@@ -21,6 +21,11 @@ type UserSpec struct {
 	Comment      string                `json:"comment,omitempty"`
 	Claims       *apiextensionsv1.JSON `json:"claims,omitempty"`
 	Disabled     *bool                 `json:"disabled,omitempty"`
+
+	// Password carries the plaintext password to identity backends that
+	// manage credentials themselves (e.g. Keycloak). Excluded from JSON so
+	// it is never persisted in the kubauth User CRD.
+	Password string `json:"-"`
 }
 
 type UserList struct {

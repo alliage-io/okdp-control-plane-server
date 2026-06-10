@@ -106,6 +106,7 @@ func (s *defaultIdentityService) CreateUser(ctx context.Context, user *models.Us
 			Name:         user.Name, // Display Name
 			Emails:       user.Email,
 			PasswordHash: passwordHash,
+			Password:     user.Password,
 			Comment:      user.Comment,
 			Disabled:     &user.Disabled,
 		},
@@ -203,6 +204,7 @@ func (s *defaultIdentityService) UpdateUser(ctx context.Context, name string, us
 			Emails:   user.Email,
 			Comment:  user.Comment,
 			Disabled: &user.Disabled,
+			Password: user.Password,
 			// PasswordHash: preserved from existing or updated if password provided
 		},
 	}

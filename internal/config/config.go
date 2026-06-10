@@ -17,6 +17,17 @@ type Config struct {
 	ReleaseInterval        string
 	ReleaseTimeout         string
 	ExcludedSidecarPrefixes []string
+
+	// Identity backend: "kubauth" (User/Group/GroupBinding CRDs) or "keycloak"
+	// (Keycloak Admin REST API)
+	IdentityBackend       string
+	KeycloakURL           string
+	KeycloakRealm         string
+	KeycloakClientID      string
+	KeycloakClientSecret  string
+	KeycloakAdminUser     string
+	KeycloakAdminPassword string
+	KeycloakTLSInsecure   bool
 }
 
 const defaultSidecarPrefixes = "istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent"
@@ -33,6 +44,15 @@ func Load() (*Config, error) {
 		ContextNamespace:  getEnv("CONTEXT_NAMESPACE", "kubocd-system"),
 		ReleaseInterval:   getEnv("RELEASE_INTERVAL", "30m"),
 		ReleaseTimeout:    getEnv("RELEASE_TIMEOUT", "10m"),
+
+		IdentityBackend:       getEnv("IDENTITY_BACKEND", "kubauth"),
+		KeycloakURL:           getEnv("KEYCLOAK_URL", "http://localhost:7080"),
+		KeycloakRealm:         getEnv("KEYCLOAK_REALM", "master"),
+		KeycloakClientID:      getEnv("KEYCLOAK_CLIENT_ID", "admin-cli"),
+		KeycloakClientSecret:  getEnv("KEYCLOAK_CLIENT_SECRET", ""),
+		KeycloakAdminUser:     getEnv("KEYCLOAK_ADMIN_USER", "admin"),
+		KeycloakAdminPassword: getEnv("KEYCLOAK_ADMIN_PASSWORD", "admin"),
+		KeycloakTLSInsecure:   getEnv("KEYCLOAK_TLS_INSECURE", "false") == "true",
 	}
 
 	raw := getEnv("EXCLUDED_SIDECAR_PREFIXES", defaultSidecarPrefixes)

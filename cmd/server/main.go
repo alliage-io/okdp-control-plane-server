@@ -59,8 +59,20 @@ func main() {
 	projectService := service.NewDefaultProjectService(projectRepo, contextWriterRepo)
 	projectHandler := handlers.NewProjectHandler(projectService)
 
-	// Initialize Identity stack
-	identityRepo := repository.NewIdentityRepository(k8sClient, cfg.PlatformNamespace)
+	// Initialize Identity stack (kubauth CRDs by default, Keycloak optional)
+	var identityRepo repository.IdentityRepository
+	switch cfg.IdentityBackend {
+	case "keycloak":
+		logrus.WithFields(logrus.Fields{
+			"url":   cfg.KeycloakURL,
+			"realm": cfg.KeycloakRealm,
+		}).Info("Using keycloak identity backend")
+		identityRepo = repository.NewKeycloakIdentityRepository(cfg)
+	case "kubauth":
+		identityRepo = repository.NewIdentityRepository(k8sClient, cfg.PlatformNamespace)
+	default:
+		logrus.Fatalf("Unknown IDENTITY_BACKEND %q (expected \"kubauth\" or \"keycloak\")", cfg.IdentityBackend)
+	}
 	identityService := service.NewDefaultIdentityService(identityRepo)
 	identityHandler := handlers.NewIdentityHandler(identityService)
 
