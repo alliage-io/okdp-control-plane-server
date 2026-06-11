@@ -1,0 +1,15 @@
+.git
+bin/
+vendor/
+*.test
+*.out
+.env
+*.log
+docker-compose.yml
+scripts/
+CLAUDE.md
+.claude/
+.cursor/
+.agent/
+Dockerfile
+.dockerignore
