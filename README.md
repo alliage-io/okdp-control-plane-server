@@ -1,4 +1,4 @@
-# okdp-server-new
+# okdp-control-plane-server
 
 Minimal Go server for OKDP UI New, featuring a standard layered architecture and Kubernetes integration.
 
@@ -36,20 +36,20 @@ http://localhost:8093/swagger/index.html
 User and group management (`/api/v1/identity`) supports two backends, selected
 with the `IDENTITY_BACKEND` environment variable:
 
-- **`kubauth`** (default): users, groups, and group bindings are stored as
+- **`keycloak`** (default): users and groups are managed through the Keycloak
+  Admin REST API. Users map to Keycloak users; groups map to Keycloak **realm
+  roles** (the OKDP sandbox maps realm roles to the `groups` token claim). Used
+  by the [okdp-sandbox](https://github.com/OKDP/okdp-sandbox), which ships
+  Keycloak as its identity provider.
+- **`kubauth`**: users, groups, and group bindings are stored as
   [kubauth](https://github.com/kubotal/kubauth) CRDs (`kubauth.kubotal.io/v1alpha1`)
-  in `PLATFORM_NAMESPACE`. Used by the dev sandbox.
-- **`keycloak`**: users and groups are managed through the Keycloak Admin REST
-  API. Users map to Keycloak users; groups map to Keycloak **realm roles**
-  (the OKDP sandbox maps realm roles to the `groups` token claim). Used by the
-  [okdp-sandbox](https://github.com/OKDP/okdp-sandbox), which ships Keycloak as
-  its identity provider.
+  in `PLATFORM_NAMESPACE`.
 
 Keycloak backend configuration:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IDENTITY_BACKEND` | `kubauth` | `kubauth` or `keycloak` |
+| `IDENTITY_BACKEND` | `keycloak` | `keycloak` or `kubauth` |
 | `KEYCLOAK_URL` | `http://localhost:7080` | Keycloak base URL |
 | `KEYCLOAK_REALM` | `master` | Realm to authenticate against and manage |
 | `KEYCLOAK_CLIENT_ID` | `admin-cli` | Client used to obtain the admin token |
@@ -64,8 +64,8 @@ Keycloak backend configuration:
 # 1. Start Keycloak
 docker compose up -d
 
-# 2. Run server (with Keycloak-managed identities)
-IDENTITY_BACKEND=keycloak go run cmd/server/main.go
+# 2. Run server (Keycloak-managed identities by default)
+go run cmd/server/main.go
 ```
 
 **Test Users** (password: `password`):
@@ -76,4 +76,3 @@ IDENTITY_BACKEND=keycloak go run cmd/server/main.go
 | userb     | viewers    | Project space    |
 
 Keycloak Admin: http://localhost:7080 (`admin` / `admin`)
-

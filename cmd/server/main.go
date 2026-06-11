@@ -59,7 +59,7 @@ func main() {
 	projectService := service.NewDefaultProjectService(projectRepo, contextWriterRepo)
 	projectHandler := handlers.NewProjectHandler(projectService)
 
-	// Initialize Identity stack (kubauth CRDs by default, Keycloak optional)
+	// Initialize Identity stack (Keycloak by default, kubauth CRDs optional)
 	var identityRepo repository.IdentityRepository
 	switch cfg.IdentityBackend {
 	case "keycloak":

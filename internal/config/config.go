@@ -18,8 +18,8 @@ type Config struct {
 	ReleaseTimeout         string
 	ExcludedSidecarPrefixes []string
 
-	// Identity backend: "kubauth" (User/Group/GroupBinding CRDs) or "keycloak"
-	// (Keycloak Admin REST API)
+	// Identity backend: "keycloak" (Keycloak Admin REST API) or "kubauth"
+	// (User/Group/GroupBinding CRDs)
 	IdentityBackend       string
 	KeycloakURL           string
 	KeycloakRealm         string
@@ -45,7 +45,7 @@ func Load() (*Config, error) {
 		ReleaseInterval:   getEnv("RELEASE_INTERVAL", "30m"),
 		ReleaseTimeout:    getEnv("RELEASE_TIMEOUT", "10m"),
 
-		IdentityBackend:       getEnv("IDENTITY_BACKEND", "kubauth"),
+		IdentityBackend:       getEnv("IDENTITY_BACKEND", "keycloak"),
 		KeycloakURL:           getEnv("KEYCLOAK_URL", "http://localhost:7080"),
 		KeycloakRealm:         getEnv("KEYCLOAK_REALM", "master"),
 		KeycloakClientID:      getEnv("KEYCLOAK_CLIENT_ID", "admin-cli"),
