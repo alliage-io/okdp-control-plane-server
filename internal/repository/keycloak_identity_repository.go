@@ -150,48 +150,65 @@ func (r *keycloakIdentityRepository) getToken(ctx context.Context) (string, erro
 
 // doRequest performs an authenticated request against the admin API.
 // path is relative to /admin/realms/{realm}. out may be nil.
+// On 401 (token revoked or expired server-side) the cached token is
+// discarded and the request retried once with a fresh token.
 func (r *keycloakIdentityRepository) doRequest(ctx context.Context, method, path string, payload, out interface{}) error {
-	token, err := r.getToken(ctx)
-	if err != nil {
-		return err
-	}
-
-	var body io.Reader
+	var data []byte
 	if payload != nil {
-		data, err := json.Marshal(payload)
+		var err error
+		data, err = json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(data)
 	}
 
-	reqURL := fmt.Sprintf("%s/admin/realms/%s%s", r.baseURL, r.realm, path)
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("keycloak request %s %s failed: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("keycloak request %s %s failed (%d): %s", method, path, resp.StatusCode, string(respBody))
-	}
-
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("failed to decode keycloak response for %s %s: %w", method, path, err)
+	for attempt := 0; ; attempt++ {
+		token, err := r.getToken(ctx)
+		if err != nil {
+			return err
 		}
+
+		var body io.Reader
+		if payload != nil {
+			body = bytes.NewReader(data)
+		}
+
+		reqURL := fmt.Sprintf("%s/admin/realms/%s%s", r.baseURL, r.realm, path)
+		req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("keycloak request %s %s failed: %w", method, path, err)
+		}
+
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
+			r.mu.Lock()
+			r.token = ""
+			r.mu.Unlock()
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("keycloak request %s %s failed (%d): %s", method, path, resp.StatusCode, string(respBody))
+		}
+
+		if out != nil && len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, out); err != nil {
+				return fmt.Errorf("failed to decode keycloak response for %s %s: %w", method, path, err)
+			}
+		}
+		return nil
 	}
-	return nil
 }
 
 // --- Mapping helpers ---
