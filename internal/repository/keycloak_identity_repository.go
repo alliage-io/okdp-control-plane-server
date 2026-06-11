@@ -40,10 +40,13 @@ type keycloakIdentityRepository struct {
 }
 
 // Realm roles managed by Keycloak itself, hidden from the identity API.
-func isBuiltInRole(name string) bool {
-	return name == "offline_access" ||
-		name == "uma_authorization" ||
-		strings.HasPrefix(name, "default-roles-")
+// Built-in roles carry a localization placeholder description (e.g.
+// "${role_admin}").
+func isBuiltInRole(role kcRole) bool {
+	return role.Name == "offline_access" ||
+		role.Name == "uma_authorization" ||
+		strings.HasPrefix(role.Name, "default-roles-") ||
+		strings.HasPrefix(role.Description, "${role_")
 }
 
 func NewKeycloakIdentityRepository(cfg *config.Config) IdentityRepository {
@@ -371,7 +374,7 @@ func (r *keycloakIdentityRepository) ListGroups(ctx context.Context) ([]models.G
 
 	var groups []models.Group
 	for _, role := range roles {
-		if isBuiltInRole(role.Name) {
+		if isBuiltInRole(role) {
 			continue
 		}
 		groups = append(groups, models.Group{
@@ -447,7 +450,7 @@ func (r *keycloakIdentityRepository) ListGroupBindings(ctx context.Context, user
 			continue
 		}
 		for _, role := range roles {
-			if isBuiltInRole(role.Name) {
+			if isBuiltInRole(role) {
 				continue
 			}
 			bindings = append(bindings, models.GroupBinding{
