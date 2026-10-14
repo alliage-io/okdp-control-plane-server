@@ -11,10 +11,9 @@ definitions:
     properties:
       crdAvailable:
         description: |-
-          CRDAvailable reports whether the KuboCD connection CRDs are installed.
-          While they are not, external connections cannot be persisted and the
-          console says so instead of failing on save. Internal connections are
-          derived from deployed services and stay available either way.
+          CRDAvailable reports whether external connections can be persisted,
+          which is whenever a deployments repository is configured (always, in a
+          running server). The name is kept for API compatibility.
         type: boolean
       types:
         items:
@@ -25,15 +24,15 @@ definitions:
     properties:
       effective:
         description: |-
-          Effective reports that the release actually resolved this connection, as
-          opposed to merely waiting for it.
+          Effective reports that the connection exists (declared, or published by
+          a deployed instance), as opposed to merely being named.
         type: boolean
       releaseName:
         type: string
       service:
         description: |-
           Service is the instance name as the console displays it, ReleaseName the
-          underlying KuboCD Release.
+          Helm release (<project>-<instance>).
         type: string
       status:
         type: string
@@ -75,7 +74,7 @@ definitions:
       secret:
         description: |-
           Secret says where the value is stored: in the credentials Secret rather
-          than in the Connection spec. It says nothing about how it is typed in.
+          than in the connection file. It says nothing about how it is typed in.
         type: boolean
       showWhen:
         allOf:
@@ -227,12 +226,18 @@ definitions:
         type: array
       icon:
         type: string
+      internal:
+        description: |-
+          Internal reports that an instance of the project can provide this
+          contract by naming convention (x-okdp-internal in the contract schema:
+          hive, iceberg-catalog, trino). Only those outputs are selectable.
+        type: boolean
       name:
         description: |-
-          Name IS the KuboCD Contract this descriptor produces. One descriptor, one
-          contract, deliberately: an entry form that produced a differently named
-          contract would mean nothing a package asks for could be found by its own
-          name.
+          Name IS the contract this descriptor produces (x-okdp-connection-ref).
+          One descriptor, one contract, deliberately: an entry form that produced a
+          differently named contract would mean nothing a chart asks for could be
+          found by its own name.
         type: string
     type: object
   models.CredentialsSecretRef:
@@ -385,7 +390,7 @@ definitions:
         - $ref: '#/definitions/models.IdentityOidcConfig'
         description: |-
           Oidc is the OIDC client the console UI should authenticate with,
-          resolved from the Context (identity.oidc). Absent when the platform
+          resolved from the platform values (global.okdp.identity.oidc). Absent when the platform
           does not publish it: the UI falls back to its build-time configuration.
       provider:
         description: |-
@@ -426,8 +431,8 @@ definitions:
         type: string
       managed:
         description: |-
-          Managed reports that the entry comes from a Connection the KuboCD release
-          controller owns, rather than being derived from the deployed service.
+          Managed reports that the entry is published by a deployed instance (its
+          descriptor's outputs), not declared by hand. Always true here.
         type: boolean
       name:
         type: string
@@ -499,10 +504,8 @@ definitions:
         type: string
       default:
         description: |-
-          Default is the template the package falls back to when the deployer picks
-          nothing. KuboCD forbids a literal here, so it is always rendered against
-          the Context: this is how an Environment says "here, the database is that
-          one" without the deployer naming it. The console must therefore leave the
+          Default is the connection the chart falls back to when the deployer picks
+          nothing (the property's schema default). The console must leave the
           parameter out rather than send an empty string, which would win over it.
         type: string
       description:
@@ -514,9 +517,14 @@ definitions:
         type: boolean
       parameter:
         description: |-
-          Parameter is the package parameter carrying the chosen connection name,
-          derived from the input's namedConnection template. Empty when the input
-          binds some other way, in which case the console offers no choice.
+          Parameter is the root chart parameter carrying the chosen connection
+          name (the property marked x-okdp-connection-ref). Empty for a ref nested
+          in an object or a list, which the form fills inside that structure.
+        type: string
+      path:
+        description: |-
+          Path is the JSON path of the marked property: "metadataDb" at the root,
+          "hiveCatalogs[].metastore" inside the items of a list.
         type: string
     type: object
   models.PlatformService:
@@ -544,6 +552,10 @@ definitions:
       name:
         type: string
       repository:
+        description: |-
+          Repository names the catalog repository holding the service's package
+          (platform/catalog.yaml repositories[].name). Read only: ignored on a
+          write.
         type: string
       versions:
         items:
@@ -723,24 +735,25 @@ definitions:
     properties:
       kind:
         description: |-
-          Kind separates a Connection from a ClusterConnection, which may share a
-          name, and tells the console which page to link to.
+          Kind is Connection (external, declared in the project) or Instance
+          (provided by another instance), and tells the console which page to
+          link to.
         type: string
       name:
         type: string
       namespace:
         type: string
       resolved:
-        description: Resolved is false while the release is still waiting for it.
+        description: Resolved is false while the connection does not exist.
         type: boolean
     type: object
   models.ServiceInstance:
     properties:
       connections:
         description: |-
-          Connections is what the release actually resolved, published by the
-          controller. Without it the console can only show what a service asked
-          for, never what it runs against.
+          Connections lists what the instance is wired to: the external
+          connections its declaration layers in, and the connections of other
+          instances its parameters name.
         items:
           $ref: '#/definitions/models.ServiceConnection'
         type: array
@@ -753,7 +766,13 @@ definitions:
         type: object
       releaseName:
         type: string
+      revision:
+        description: |-
+          Revision is the Git commit holding the change, set on the responses of
+          a deployment or an update only.
+        type: string
       roles:
+        description: 'Roles is no longer filled: KuboCD package roles have no successor.'
         items:
           type: string
         type: array
@@ -768,6 +787,11 @@ definitions:
       targetNamespace:
         type: string
       url:
+        type: string
+      usage:
+        description: |-
+          Usage is the Markdown the instance publishes: the usage of its
+          compiled okdp.instance.yaml.
         type: string
     type: object
   models.ServiceMetrics:
@@ -1036,8 +1060,9 @@ paths:
       - capabilities
   /api/contracts:
     get:
-      description: Descriptors of every contract, used to build the creation form,
-        plus whether connections can currently be persisted
+      description: 'Descriptors of every contract, used to build the creation form,
+        plus whether connections can currently be persisted (crdAvailable: true when
+        the deployments repository is configured)'
       produces:
       - application/json
       responses:
@@ -1095,8 +1120,9 @@ paths:
     post:
       consumes:
       - application/json
-      description: Expose a new managed service in the catalog (writes the default
-        KuboCD Context)
+      description: Expose a service of the catalogs in the console menu (commits platform/catalog.yaml
+        to the platform repository); its package must be in a catalog repository,
+        its versions are the catalogs' (those given are checked, not stored)
       parameters:
       - description: Catalog service
         in: body
@@ -1134,8 +1160,8 @@ paths:
       - platform-services
   /api/platform-services/{serviceName}:
     delete:
-      description: Remove an exposed service from the catalog (writes the default
-        KuboCD Context)
+      description: Remove an exposed service from the catalog (commits platform/catalog.yaml
+        to the deployments repository)
       parameters:
       - description: Service name
         in: path
@@ -1165,8 +1191,9 @@ paths:
     put:
       consumes:
       - application/json
-      description: Update an exposed service (versions, default, description, icon,
-        category)
+      description: Update an exposed service of the console menu (default, description,
+        icon, category); its versions are the catalogs', those given are checked against
+        them and not stored
       parameters:
       - description: Service name
         in: path
@@ -1215,7 +1242,7 @@ paths:
         name: serviceName
         required: true
         type: string
-      - description: Package version tag (defaults to Context CR tag)
+      - description: Package version tag (defaults to the catalog default version)
         in: query
         name: tag
         type: string
@@ -1233,15 +1260,16 @@ paths:
       - platform-services
   /api/platform-services/{serviceName}/schema:
     get:
-      description: Returns the JSON Schema (parameters with UI metadata) for a given
-        service version
+      description: 'Returns the JSON Schema of the parameters (config.schema.json
+        of the package catalog/<service>/<tag>/, global and connections removed; {"type":
+        "object"} when the package has none) for a given service version'
       parameters:
       - description: Service name
         in: path
         name: serviceName
         required: true
         type: string
-      - description: Package version tag (defaults to Context CR tag)
+      - description: Package version tag (defaults to the catalog default version)
         in: query
         name: tag
         type: string
@@ -1270,7 +1298,9 @@ paths:
       - platform-services
   /api/platform-services/{serviceName}/versions:
     get:
-      description: Returns the list of versions declared in the KuboCD Context CR
+      description: 'Returns the versions of the service''s package in the catalogs
+        (the directories catalog/<service>/<version>/ of the repository of platform/catalog.yaml
+        holding it), highest first, and the default: the menu entry''s, else the highest'
       parameters:
       - description: Service name
         in: path
@@ -1296,7 +1326,7 @@ paths:
   /api/profile-images:
     get:
       description: Returns the list of available container images per profile type
-        from the KuboCD Context
+        from the platform values (global.okdp.jupyter.profiles)
       produces:
       - application/json
       responses:
@@ -1321,7 +1351,8 @@ paths:
     get:
       consumes:
       - application/json
-      description: Get a list of all projects (backed by Kubernetes Namespaces)
+      description: List the projects declared in the deployments repository (projects/<p>/project.yaml),
+        whether written by the console or by hand in Git
       produces:
       - application/json
       responses:
@@ -1343,7 +1374,10 @@ paths:
     post:
       consumes:
       - application/json
-      description: Create a new project (materialized as a Kubernetes Namespace)
+      description: 'Create a project: commits projects/<name>/project.yaml (in a split
+        topology, to a new repository of its own, with the okdp-gitops workflow .forgejo/workflows/okdp-gitops.yaml)
+        and creates the project Namespace. 409 when the project is already declared,
+        or when a Namespace of that name exists and is not a project''s'
       parameters:
       - description: Project Object
         in: body
@@ -1359,7 +1393,13 @@ paths:
           schema:
             $ref: '#/definitions/models.Project'
         "400":
-          description: Bad Request
+          description: Invalid project name
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Project or Namespace already exists
           schema:
             additionalProperties:
               type: string
@@ -1377,7 +1417,10 @@ paths:
     delete:
       consumes:
       - application/json
-      description: Delete a project by name
+      description: 'Delete a project: removes projects/<name>/ from the deployments
+        repository (the compile of that commit, okdp-gitops in CI, removes its compiled
+        tree, and the GitOps engine uninstalls its releases), then its Namespace if
+        the console created it'
       parameters:
       - description: Project Name
         in: path
@@ -1407,7 +1450,7 @@ paths:
     get:
       consumes:
       - application/json
-      description: Get a single project by name
+      description: Get a project declared in the deployments repository (projects/<name>/project.yaml)
       parameters:
       - description: Project Name
         in: path
@@ -1440,6 +1483,7 @@ paths:
       consumes:
       - application/json
       description: Update a project's mutable metadata (currently its description)
+        in projects/<name>/project.yaml; the file's other keys are kept
       parameters:
       - description: Project Name
         in: path
@@ -1482,8 +1526,9 @@ paths:
       - projects
   /api/projects/{name}/connections:
     get:
-      description: Connections declared in the project namespace. Connections owned
-        by a deployed release are excluded. They are returned by the internal endpoint.
+      description: Connections declared in the project (projects/<p>/connections/<name>.yaml
+        in the deployments repository). Connections published by deployed instances
+        are returned by the internal endpoint.
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1511,8 +1556,9 @@ paths:
     post:
       consumes:
       - application/json
-      description: Stores the credential fields in a Kubernetes Secret and creates
-        the Connection CRD referencing it
+      description: Stores the credential fields in a Kubernetes Secret of the project
+        namespace and commits the connection file referencing it (secretRef) to the
+        deployments repository
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1555,7 +1601,9 @@ paths:
       - connections
   /api/projects/{name}/connections/{connName}:
     delete:
-      description: Removes the Connection CRD and the Secret holding its credentials
+      description: Removes the connection file from the deployments repository and
+        the Secret the console wrote for it. 400 while an instance still layers the
+        connection in.
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1590,6 +1638,10 @@ paths:
     put:
       consumes:
       - application/json
+      description: 'Commits the connection file, once the instances that layer it
+        in compile with it (a check: okdp-gitops compiles them again in CI, on the
+        commit). 400 with code does-not-compile when one of them no longer compiles
+        with it.'
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1662,8 +1714,9 @@ paths:
       - connections
   /api/projects/{name}/connections/internal:
     get:
-      description: Connections provided by the services already deployed in the project,
-        that the project's other services can consume
+      description: Connections provided by the services already deployed in the project
+        (the connections their okdp.instance.yaml provides, in the output of the deployments
+        repositories), that the project's other services can consume
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1805,7 +1858,16 @@ paths:
     post:
       consumes:
       - application/json
-      description: Deploy a managed platform service into a project
+      description: 'Deploy a managed platform service into a project: compiles the
+        instance (the package catalog/<service>/<tag>/ of the catalogs), as a check,
+        and commits its sources to the deployments Git repositories (instance.yaml:
+        service and version; values.yaml: the submitted parameters only). The output
+        (the umbrella chart of okdp-compiler, its instance.values.yaml, the engine
+        files) is not the console''s: okdp-gitops compile writes it, in a CI on each
+        commit of the sources. The answer carries the commit (revision) and the status
+        Pending until the GitOps engine reconciles it. 400 on invalid parameters,
+        or with code does-not-compile when the instance does not compile (the compiler''s
+        message, one problem per line); 409 with code instance-exists or release-name-taken.'
       parameters:
       - description: Project name
         in: path
@@ -1848,7 +1910,10 @@ paths:
       - services
   /api/projects/{name}/services/{serviceName}:
     delete:
-      description: Remove a deployed service from a project
+      description: 'Remove a deployed service from a project: removes its directory
+        from the deployments Git repository; the compile of that commit (okdp-gitops,
+        in CI) removes its compiled files, and the GitOps engine uninstalls it. 400
+        while another instance of the project references it.'
       parameters:
       - description: Project name
         in: path
@@ -1865,6 +1930,12 @@ paths:
       responses:
         "204":
           description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
         "404":
           description: Not Found
           schema:
@@ -1950,8 +2021,12 @@ paths:
     patch:
       consumes:
       - application/json
-      description: Merge new parameters and optionally update the package version
-        of a deployed service
+      description: JSON Merge Patch (RFC 7386) of the parameters (null deletes a key,
+        objects merge, arrays replace) and optionally update the package version of
+        a deployed service, compiled as a check and committed to values.yaml/instance.yaml;
+        okdp-gitops compile, in CI, writes the compiled tree in the output of the
+        deployments Git repositories. 400 on invalid parameters, or with code does-not-compile
+        when the instance does not compile.
       parameters:
       - description: Project name
         in: path
@@ -2079,7 +2154,9 @@ paths:
       - services
   /api/projects/{name}/services/stream:
     get:
-      description: Stream service status updates using Server-Sent Events (SSE)
+      description: 'Stream service status updates using Server-Sent Events (SSE):
+        the GitOps engine objects and the console''s own commits. Each message is
+        {type: ADDED|MODIFIED|DELETED, object: ServiceInstance}.'
       parameters:
       - description: Project name
         in: path
@@ -2885,7 +2962,10 @@ paths:
       - secret-stores
   /api/projects/stream:
     get:
-      description: Stream project updates using Server-Sent Events (SSE)
+      description: 'Stream project updates using Server-Sent Events (SSE): an ADDED
+        event per existing project, then ADDED/MODIFIED/DELETED as project.yaml files
+        change in the deployments repository (read every few seconds, at once after
+        a console change)'
       produces:
       - text/event-stream
       responses:
@@ -2931,8 +3011,8 @@ paths:
       - spark-apps
   /api/spark-config:
     get:
-      description: Returns Spark operator configuration from the KuboCD Context (images,
-        defaults, versions)
+      description: Returns Spark operator configuration from the platform values,
+        global.okdp.sparkOperator (images, defaults, versions)
       produces:
       - application/json
       responses:

@@ -16,9 +16,14 @@ func TestNormalizeAndValidateCatalogService(t *testing.T) {
 		wantDefault string // expected DefaultVersion when wantErr is false
 	}{
 		{
-			name:        "fills default with first version when omitted",
+			name:        "leaves the default to the catalogs when omitted",
 			in:          models.PlatformService{Name: "trino", Versions: []string{"0.3.0", "0.2.0"}, Category: "Interactive Query"},
-			wantDefault: "0.3.0",
+			wantDefault: "",
+		},
+		{
+			name:        "no versions: the catalogs'",
+			in:          models.PlatformService{Name: "trino", Category: "Interactive Query"},
+			wantDefault: "",
 		},
 		{
 			name:        "keeps a valid explicit default",
@@ -27,17 +32,16 @@ func TestNormalizeAndValidateCatalogService(t *testing.T) {
 		},
 		{
 			name:        "trims surrounding whitespace from name",
-			in:          models.PlatformService{Name: "  trino  ", Versions: []string{"0.1.0"}, Category: "Interactive Query"},
+			in:          models.PlatformService{Name: "  trino  ", Versions: []string{"0.1.0"}, DefaultVersion: "0.1.0", Category: "Interactive Query"},
 			wantDefault: "0.1.0",
 		},
 		{"empty name is rejected", models.PlatformService{Name: "", Versions: []string{"0.1.0"}}, true, ""},
 		{"missing category is rejected", models.PlatformService{Name: "trino", Versions: []string{"0.1.0"}}, true, ""},
 		{"non-DNS name is rejected", models.PlatformService{Name: "Trino_X", Versions: []string{"0.1.0"}}, true, ""},
 		{"uppercase name is rejected", models.PlatformService{Name: "Trino", Versions: []string{"0.1.0"}}, true, ""},
-		{"no versions is rejected", models.PlatformService{Name: "trino", Versions: nil}, true, ""},
-		{"empty version string is rejected", models.PlatformService{Name: "trino", Versions: []string{" "}}, true, ""},
-		{"duplicate versions are rejected", models.PlatformService{Name: "trino", Versions: []string{"0.1.0", "0.1.0"}}, true, ""},
-		{"default not in versions is rejected", models.PlatformService{Name: "trino", Versions: []string{"0.1.0"}, DefaultVersion: "9.9.9"}, true, ""},
+		{"empty version string is rejected", models.PlatformService{Name: "trino", Versions: []string{" "}, Category: "Q"}, true, ""},
+		{"duplicate versions are rejected", models.PlatformService{Name: "trino", Versions: []string{"0.1.0", "0.1.0"}, Category: "Q"}, true, ""},
+		{"default not in versions is rejected", models.PlatformService{Name: "trino", Versions: []string{"0.1.0"}, DefaultVersion: "9.9.9", Category: "Q"}, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,23 +1,31 @@
-ARG GO_VERSION=1.25
-# Released kubocd. v0.3.2 is the first release that understands the Contract
-# schema grammar (contract:, connectionRef, outputs).
-ARG KUBOCD_VERSION=v0.3.2
-# Source-built kubocd, used when KUBOCD_SOURCE=source.
-# Its own Go version, which its go.mod pins ahead of ours.
-ARG KUBOCD_GO_VERSION=1.26
-ARG KUBOCD_REPO=https://github.com/kubocd/kubocd.git
-ARG KUBOCD_REF=v0.3.2
+ARG GO_VERSION=1.27
 
 # Cross-compile on the native build platform (no QEMU emulation): the Go
 # toolchain runs natively and emits a static binary for the target arch.
-ARG KUBOCD_SOURCE=release
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS go-build
 
 ARG TARGETOS=linux
 ARG TARGETARCH
+# Version of the server (no leading "v"), named in the startup log and in the
+# co-author trailer of the commits it writes. CI passes the release version.
+ARG VERSION=dev
 
 WORKDIR /workspace/okdp-server
 
+# go.mod replaces github.com/okdp/okdp-compiler with ../okdp-compiler until it
+# is published: build with --build-context okdp-compiler=../okdp-compiler. The
+# module root is the package (compiler.go), its implementation internal/.
+COPY --from=okdp-compiler go.mod go.sum *.go ../okdp-compiler/
+COPY --from=okdp-compiler internal/ ../okdp-compiler/internal/
+# The same for github.com/okdp/okdp-gitops: --build-context
+# okdp-gitops=../okdp-gitops. Its packages, without its command; its own
+# go.mod replaces okdp-compiler with ../okdp-compiler, the directory above.
+COPY --from=okdp-gitops go.mod go.sum ../okdp-gitops/
+COPY --from=okdp-gitops catalog/ ../okdp-gitops/catalog/
+COPY --from=okdp-gitops charts/ ../okdp-gitops/charts/
+COPY --from=okdp-gitops compile/ ../okdp-gitops/compile/
+COPY --from=okdp-gitops gitops/ ../okdp-gitops/gitops/
+COPY --from=okdp-gitops internal/ ../okdp-gitops/internal/
 COPY go.* ./
 RUN go mod download
 
@@ -27,52 +35,17 @@ COPY internal/ internal/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /okdp-server ./cmd/server
-
-# kubocd CLI: the server shells out to `kubocd dump` to render service package
-# schemas (internal/service/package_schema_service.go). Downloaded per target
-# arch from the official release, on the native build platform (no QEMU), with
-# checksum verification.
-FROM --platform=$BUILDPLATFORM alpine:3.21 AS kubocd-release
-ARG TARGETARCH
-ARG KUBOCD_VERSION
-RUN apk add --no-cache curl coreutils && \
-    case "$TARGETARCH" in \
-      amd64) KARCH=x86_64 ;; \
-      arm64) KARCH=arm64 ;; \
-      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
-    esac && \
-    cd /tmp && \
-    BASE="https://github.com/kubocd/kubocd/releases/download/${KUBOCD_VERSION}" && \
-    curl -fsSL -O "${BASE}/kubocd_Linux_${KARCH}" && \
-    curl -fsSL -O "${BASE}/checksums.txt" && \
-    grep "kubocd_Linux_${KARCH}\$" checksums.txt | sha256sum -c - && \
-    install -m 0755 "kubocd_Linux_${KARCH}" /kubocd
-
-# kubocd built from source at a pinned commit, for a model no release carries
-# yet. Pinned rather than a branch name so the image is reproducible, and built
-# rather than published so nothing collides with the shared -snapshot tag.
-FROM --platform=$BUILDPLATFORM golang:${KUBOCD_GO_VERSION} AS kubocd-source
-ARG TARGETOS=linux
-ARG TARGETARCH
-ARG KUBOCD_REPO
-ARG KUBOCD_REF
-RUN git clone --filter=blob:none "$KUBOCD_REPO" /src && \
-    cd /src && git checkout --detach "$KUBOCD_REF" && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-      -ldflags "-X kubocd/internal/global.Version=git-${KUBOCD_REF}" \
-      -o /kubocd cmd/kubocd/main.go
-
-FROM kubocd-${KUBOCD_SOURCE} AS kubocd
+    go build -trimpath \
+      -ldflags="-s -w -X github.com/okdp/okdp-control-plane-server/internal/buildinfo.Version=${VERSION}" \
+      -o /okdp-server ./cmd/server
 
 FROM alpine:3.21
 
 RUN apk --no-cache add ca-certificates && update-ca-certificates
 
 COPY --from=go-build /okdp-server /usr/local/bin/okdp-server
-COPY --from=kubocd /kubocd /usr/local/bin/kubocd
 
-# Writable HOME for the unprivileged user so `kubocd dump` can use its cache.
+# Writable HOME for the unprivileged user (Git and registry clients).
 ENV HOME=/tmp
 
 USER 65534:65534

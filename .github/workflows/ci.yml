@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GOVULNCHECK_VERSION: v1.7.0   # v1.8.0 needs Go 1.26; go.mod is on 1.25
+  GOVULNCHECK_VERSION: v1.8.0   # needs Go 1.26 or later; go.mod is on 1.27 (okdp-compiler's)
 
 jobs:
   test:
@@ -24,6 +24,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # go.mod replaces github.com/okdp/okdp-compiler with ../okdp-compiler until
+      # it is published.
+      - name: Clone okdp-compiler next to the repository
+        run: git clone --depth 1 https://github.com/OKDP/okdp-compiler.git ../okdp-compiler
+      # Likewise github.com/okdp/okdp-gitops with ../okdp-gitops.
+      - name: Clone okdp-gitops next to the repository
+        run: git clone --depth 1 https://github.com/OKDP/okdp-gitops.git ../okdp-gitops
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
