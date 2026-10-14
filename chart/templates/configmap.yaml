@@ -7,13 +7,28 @@ metadata:
 data:
   PORT: {{ .Values.service.port | quote }}
   PLATFORM_NAMESPACE: {{ .Values.configuration.platformNamespace | quote }}
-  KUBOCD_NAMESPACE: {{ .Values.configuration.kubocdNamespace | quote }}
-  CONTEXT_NAME: {{ .Values.configuration.contextName | quote }}
-  CONTEXT_NAMESPACE: {{ .Values.configuration.contextNamespace | quote }}
   ALLOWED_ORIGINS: {{ .Values.configuration.allowedOrigins | quote }}
   LOG_LEVEL: {{ .Values.configuration.logLevel | quote }}
-  RELEASE_INTERVAL: {{ .Values.configuration.releaseInterval | quote }}
-  RELEASE_TIMEOUT: {{ .Values.configuration.releaseTimeout | quote }}
+  {{- if .Values.gitops.topology }}
+  # Where the platform, the projects and the output live.
+  GITOPS_CONFIG: /etc/okdp/gitops/topology.yaml
+  {{- else }}
+  GITOPS_REPO_URL: {{ required "gitops.repoURL (or gitops.topology) is required: the deployments repositories are the only desired-state store" .Values.gitops.repoURL | quote }}
+  {{- end }}
+  GITOPS_BRANCH: {{ .Values.gitops.branch | quote }}
+  GITOPS_PATH: {{ .Values.gitops.path | quote }}
+  GITOPS_ENGINE: {{ .Values.gitops.engine | quote }}
+  GITOPS_RELEASES_NAMESPACE: {{ .Values.gitops.releasesNamespace | quote }}
+  ARGOCD_NAMESPACE: {{ .Values.gitops.argocdNamespace | quote }}
+  GITOPS_AUTHOR_NAME: {{ .Values.gitops.author.name | quote }}
+  GITOPS_AUTHOR_EMAIL: {{ .Values.gitops.author.email | quote }}
+  GITOPS_CREDENTIALS_DIR: /etc/okdp/gitops-credentials
+  GITOPS_CLONE_DIR: /var/cache/okdp/gitops
+  GITOPS_CHART_CACHE_DIR: {{ .Values.gitops.chartCacheDir | quote }}
+  {{- if .Values.gitops.sshInsecureIgnoreHostKey }}
+  # Sandboxes only: any SSH host key is accepted.
+  GITOPS_SSH_INSECURE_IGNORE_HOST_KEY: "true"
+  {{- end }}
   {{- if .Values.configuration.insecureOciRegistries }}
   # Development sandboxes only: registry hosts reached over plain HTTP.
   INSECURE_OCI_REGISTRIES: {{ .Values.configuration.insecureOciRegistries | quote }}

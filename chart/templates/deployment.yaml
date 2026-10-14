@@ -15,6 +15,7 @@ spec:
         # Environment variables only refresh on pod restart: roll the
         # Deployment whenever the ConfigMap content changes.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/topology: {{ include (print $.Template.BasePath "/topology.yaml") . | sha256sum }}
       labels:
         {{- include "okdp-control-plane-server.labels" . | nindent 8 }}
     spec:
@@ -57,5 +58,54 @@ spec:
             httpGet:
               path: /health
               port: http
+          volumeMounts:
+            # The local clone of the deployments repository: a cache only,
+            # Git is the store.
+            - name: gitops-clone
+              mountPath: /var/cache/okdp/gitops
+            # The chart cache: the upstream charts of the compiled
+            # instances, for the checks of a compile and the chart defaults.
+            - name: chart-cache
+              mountPath: {{ .Values.gitops.chartCacheDir }}
+            {{- if .Values.gitops.credentialsSecret }}
+            - name: gitops-credentials
+              mountPath: /etc/okdp/gitops-credentials
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gitops.topology }}
+            - name: gitops-topology
+              mountPath: /etc/okdp/gitops
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gitops.forgejoTokenSecret }}
+            - name: forgejo-token
+              mountPath: /etc/okdp/forgejo
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: gitops-clone
+          emptyDir: {}
+        - name: chart-cache
+          emptyDir: {}
+        {{- if .Values.gitops.credentialsSecret }}
+        - name: gitops-credentials
+          secret:
+            secretName: {{ .Values.gitops.credentialsSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if .Values.gitops.topology }}
+        - name: gitops-topology
+          configMap:
+            name: {{ include "okdp-control-plane-server.fullname" . }}-topology
+        {{- end }}
+        {{- if .Values.gitops.forgejoTokenSecret }}
+        - name: forgejo-token
+          secret:
+            secretName: {{ .Values.gitops.forgejoTokenSecret }}
+            defaultMode: 0400
+            items:
+              - key: token
+                path: token
+        {{- end }}

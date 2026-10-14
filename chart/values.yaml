@@ -9,20 +9,58 @@ image:
 # Rendered as environment variables (see internal/config/config.go).
 configuration:
   platformNamespace: okdp-system
-  kubocdNamespace: kubocd-system
-  # The platform Context, read by the server and written for its service
-  # catalog. Empty namespace: the namespace the server runs in.
-  contextName: platform
-  contextNamespace: ""
   # Single origin, set verbatim in the Access-Control-Allow-Origin header.
   allowedOrigins: https://okdp-ui.example.com
   logLevel: info
-  releaseInterval: 30m
-  releaseTimeout: 10m
   # Comma-separated registry hosts to reach over plain HTTP (dev sandboxes
   # with a local registry). Leave empty in any real deployment.
   insecureOciRegistries: ""
 
+# The deployments Git repository: the only desired-state store. The server
+# commits the sources there (instances, connections, projects and the
+# catalog); okdp-gitops, in a CI on each of their commits, compiles them into
+# the output (compiled/...), which the GitOps engine reconciles.
+gitops:
+  # The deployments repository holding the whole layout (platform/,
+  # projects/, compiled/...): https://…, ssh://… or git@host:org/repo.git.
+  # Required without topology.
+  repoURL: ""
+  branch: main
+  # Directory of the repository holding the layout (platform/, projects/…),
+  # empty for the root.
+  path: ""
+  # Where each part of the layout lives, when not all in repoURL
+  # (GITOPS_CONFIG, written to a ConfigMap mounted at
+  # /etc/okdp/gitops/topology.yaml):
+  #   platform: {url: <git url>, branch: main, path: platform}
+  #   projects: {url: <git url, may contain {project}>, branch: main, path: "projects/{project}"}
+  #   output:   {url: <git url>, branch: main, path: ""}
+  #   forgejo:  {url: http://forgejo-http.forgejo.svc.cluster.local:3000, owner: okdp}
+  # forgejo (a repository per project) creates the repository of a new
+  # project; its tokenFile is set to the token of forgejoTokenSecret.
+  topology: {}
+  # A Secret of the release namespace with the Forgejo API token (key
+  # token), mounted at /etc/okdp/forgejo/token.
+  forgejoTokenSecret: ""
+  # The chart cache (GITOPS_CHART_CACHE_DIR, an emptyDir): the upstream
+  # charts of the compiled instances, pulled from their repositories.
+  chartCacheDir: /var/cache/okdp/charts
+  # flux or argocd: which objects carry the render/sync status.
+  engine: flux
+  # Namespace of the Flux HelmReleases and values ConfigMaps, including
+  # okdp-platform-values.
+  releasesNamespace: okdp-releases
+  # Namespace of the Argo CD Applications (engine: argocd).
+  argocdNamespace: argocd
+  # Name of a Secret, in the release namespace, with write access to the
+  # repository. Flux GitRepository keys: username + password (a token as
+  # password) or bearerToken for HTTPS; identity + known_hosts for SSH.
+  credentialsSecret: ""
+  # Accept any SSH host key. Sandboxes only.
+  sshInsecureIgnoreHostKey: false
+  author:
+    name: OKDP control plane
+    email: okdp-control-plane@okdp.io
 
 service:
   type: ClusterIP

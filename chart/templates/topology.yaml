@@ -1,0 +1,15 @@
+{{- with .Values.gitops.topology }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "okdp-control-plane-server.fullname" $ }}-topology
+  labels:
+    {{- include "okdp-control-plane-server.labels" $ | nindent 4 }}
+data:
+  {{- $topology := deepCopy . }}
+  {{- if $topology.forgejo }}
+  {{- $_ := set $topology.forgejo "tokenFile" "/etc/okdp/forgejo/token" }}
+  {{- end }}
+  topology.yaml: |
+    {{- toYaml $topology | nindent 4 }}
+{{- end }}
