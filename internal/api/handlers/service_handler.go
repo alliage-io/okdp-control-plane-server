@@ -39,13 +39,19 @@ func validationBody(err error) gin.H {
 
 // ServiceHandler handles platform service and catalog requests
 type ServiceHandler struct {
-	service       service.ServiceService
-	schemaService service.PackageSchemaService
+	service        service.ServiceService
+	schemaService  service.PackageSchemaService
+	renderedValues service.RenderedValuesService
 }
 
 // NewServiceHandler creates a new ServiceHandler
 func NewServiceHandler(svc service.ServiceService, schemaSvc service.PackageSchemaService) *ServiceHandler {
 	return &ServiceHandler{service: svc, schemaService: schemaSvc}
+}
+
+// SetRenderedValuesService enables GET …/services/:serviceName/values.
+func (h *ServiceHandler) SetRenderedValuesService(svc service.RenderedValuesService) {
+	h.renderedValues = svc
 }
 
 // --- Platform services (managed by OKDP) ---
@@ -492,6 +498,39 @@ func (h *ServiceHandler) UpdateServiceParameters(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, instance)
+}
+
+// GetRenderedValues godoc
+// @Summary      Values the charts of an instance are rendered with
+// @Description  For each upstream chart of the instance's compiled umbrella (each dependency of compiled/projects/<p>/services/<i>/Chart.yaml, by key; or the chart itself for a plain chart): values, what Helm renders the chart with, its own defaults coalesced under the compiled values (instance.values.yaml, the key's; values.yaml for a plain chart); defaults, the chart's values.yaml as published, from the chart cache; changedLines, the 1-based lines of values that differ from the defaults (set by OKDP or the instance). The key named like the service comes first. Empty when the instance has not been compiled yet (the output is written by okdp-gitops, in CI on each commit of the sources). A chart that cannot be fetched leaves values the compiled values only, and defaultsError says why, instead of failing.
+// @Tags         services
+// @Produce      json
+// @Param        name path string true "Project name"
+// @Param        serviceName path string true "Service instance name"
+// @Success      200  {array}   models.RenderedValues
+// @Failure      404  {object}  map[string]string
+// @Failure      500  {object}  map[string]string
+// @Router       /api/projects/{name}/services/{serviceName}/values [get]
+func (h *ServiceHandler) GetRenderedValues(c *gin.Context) {
+	project := c.Param("name")
+	serviceName := c.Param("serviceName")
+	if h.renderedValues == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "rendered values are not available"})
+		return
+	}
+	values, err := h.renderedValues.GetRenderedValues(c.Request.Context(), project, serviceName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
+			})
+			return
+		}
+		logrus.WithError(err).Error("Failed to get the rendered values")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, values)
 }
 
 // --- Pod operations ---
