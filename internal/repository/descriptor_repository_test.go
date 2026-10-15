@@ -8,13 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// What an instance publishes is its okdp.instance.yaml in the output.
+// What an instance publishes is its okdp.info.yaml in the output.
 func TestDescriptorsAreWhatTheCompiledInstancesPublish(t *testing.T) {
 	store := gitops.NewMemoryStore(map[string]string{
-		"compiled/projects/demo/services/hive/Chart.yaml":         "apiVersion: v2\nname: hive-metastore\nversion: 4.0.1-1.0.0\n",
-		"compiled/projects/demo/services/hive/okdp.instance.yaml": "usage: |\n  # Hive\nprovides:\n  - name: demo-hive\n    contract: hive\n    values:\n      thriftUri: thrift://demo-hive-hive-metastore.demo.svc:9083\n    secretRef:\n      name: demo-hive-hive-credentials\n",
-		"compiled/projects/demo/services/web/Chart.yaml":          "apiVersion: v2\nname: webapp\nversion: 1.0.0\n",
-		"compiled/projects/demo/services/web/okdp.instance.yaml":  "url: https://demo-web.example.org\n",
+		"compiled/projects/demo/services/hive/Chart.yaml":     "apiVersion: v2\nname: hive-metastore\nversion: 4.0.1-1.0.0\n",
+		"compiled/projects/demo/services/hive/okdp.info.yaml": "usage: |\n  # Hive\nprovides:\n  - name: demo-hive\n    contract: hive\n    values:\n      thriftUri: thrift://demo-hive-hive-metastore.demo.svc:9083\n    secretRef:\n      name: demo-hive-hive-credentials\n",
+		"compiled/projects/demo/services/web/Chart.yaml":      "apiVersion: v2\nname: webapp\nversion: 1.0.0\n",
+		"compiled/projects/demo/services/web/okdp.info.yaml":  "url: https://demo-web.example.org\n",
 	})
 	list, err := NewDescriptorRepository(gitops.NewDeployments(store, nil)).List(context.Background(), "demo")
 	require.NoError(t, err)
