@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -610,26 +609,29 @@ func (h *ServiceHandler) GetServiceMetrics(c *gin.Context) {
 // @Param        serviceName path string true "Service instance name"
 // @Param        podName path string true "Pod name"
 // @Param        container query string false "Container name (defaults to first app container)"
-// @Param        tailLines query int false "Number of lines from the end (default 100)"
+// @Param        tailLines query int false "Number of lines from the end (default 100, at most 10000)"
 // @Param        follow query bool false "Stream logs in real-time (default false)"
 // @Success      200  {string}  string  "log output"
+// @Failure      404  {object}  map[string]string
 // @Failure      500  {object}  map[string]string
 // @Router       /api/projects/{name}/services/{serviceName}/pods/{podName}/logs [get]
 func (h *ServiceHandler) GetPodLogs(c *gin.Context) {
 	project := c.Param("name")
+	serviceName := c.Param("serviceName")
 	podName := c.Param("podName")
 	container := c.Query("container")
 	follow := c.Query("follow") == "true"
 
-	tailLines := int64(100)
-	if tl := c.Query("tailLines"); tl != "" {
-		if v, err := strconv.ParseInt(tl, 10, 64); err == nil && v > 0 {
-			tailLines = v
-		}
-	}
+	tailLines := tailLinesParam(c)
 
-	stream, err := h.service.GetPodLogs(c.Request.Context(), project, podName, container, tailLines, follow)
+	stream, err := h.service.GetPodLogs(c.Request.Context(), project, serviceName, podName, container, tailLines, follow)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": fmt.Sprintf("Pod '%s' of service '%s' not found in project '%s'", podName, serviceName, project),
+			})
+			return
+		}
 		logrus.WithError(err).Error("Failed to get pod logs")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

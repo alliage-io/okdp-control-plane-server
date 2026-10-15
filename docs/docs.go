@@ -1723,7 +1723,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Number of lines from the end (default 100)",
+                        "description": "Number of lines from the end (default 100, at most 10000)",
                         "name": "tailLines",
                         "in": "query"
                     },
@@ -1739,6 +1739,15 @@ const docTemplate = `{
                         "description": "log output",
                         "schema": {
                             "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
                         }
                     },
                     "500": {
@@ -2307,7 +2316,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "integer",
-                        "description": "Number of lines from the end (default 100)",
+                        "description": "Number of lines from the end (default 100, at most 10000)",
                         "name": "tailLines",
                         "in": "query"
                     },

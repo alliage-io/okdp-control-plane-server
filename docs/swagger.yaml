@@ -2291,7 +2291,7 @@ paths:
         in: query
         name: container
         type: string
-      - description: Number of lines from the end (default 100)
+      - description: Number of lines from the end (default 100, at most 10000)
         in: query
         name: tailLines
         type: integer
@@ -2306,6 +2306,12 @@ paths:
           description: log output
           schema:
             type: string
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
         "500":
           description: Internal Server Error
           schema:
@@ -2650,7 +2656,7 @@ paths:
         in: query
         name: container
         type: string
-      - description: Number of lines from the end (default 100)
+      - description: Number of lines from the end (default 100, at most 10000)
         in: query
         name: tailLines
         type: integer
