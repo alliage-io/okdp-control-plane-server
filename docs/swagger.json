@@ -3692,7 +3692,7 @@
                     "type": "string"
                 },
                 "internal": {
-                    "description": "Internal reports that an instance of the project can provide this\ncontract by naming convention (x-okdp-internal in the contract schema:\nhive, iceberg-catalog, trino). Only those outputs are selectable.",
+                    "description": "Internal reports that the contract has a naming convention\n(x-okdp-internal in the contract schema: hive, iceberg-catalog, trino):\nan instance's output of it is named after the instance's release. An\noutput of any contract is selectable, by its name.",
                     "type": "boolean"
                 },
                 "name": {

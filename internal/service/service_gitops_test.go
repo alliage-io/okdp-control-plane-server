@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -161,6 +162,33 @@ func TestDeployCommitsTheInstanceFiles(t *testing.T) {
 
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql"})
 	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+}
+
+// Picking an output another instance publishes (a managed connection of the
+// picker), whatever its contract, writes its name in the parameter only:
+// instance.yaml lists the project's connection files the parameters name,
+// and an output is none.
+func TestAnOutputPickedIsWrittenInTheParameterOnly(t *testing.T) {
+	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	schema := trinoSchema()
+	schema["properties"].(map[string]any)["storage"] = map[string]any{"type": "string", "x-okdp-connection-ref": map[string]any{"contract": "s3"}}
+	svc.schemaService = stubSchema{schema: schema}
+	const instanceFile = "name: sql\nproject: demo\nservice: trino\nversion: 480.0.0-p21\nconnections:\n  - lake-hms\n"
+
+	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql", Parameters: map[string]any{
+		"storage":  "demo-store-lake",
+		"catalogs": []any{map[string]any{"name": "lake", "hive": "lake-hms"}},
+	}})
+	require.NoError(t, err)
+	files := store.Files()
+	assert.Equal(t, instanceFile, files["projects/demo/services/sql/instance.yaml"])
+	assert.Contains(t, files["projects/demo/services/sql/values.yaml"], "storage: demo-store-lake\n")
+
+	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "sql", models.ServiceUpdateRequest{Parameters: map[string]any{"storage": "demo-pg-lake"}})
+	require.NoError(t, err)
+	files = store.Files()
+	assert.Equal(t, instanceFile, files["projects/demo/services/sql/instance.yaml"])
+	assert.Contains(t, files["projects/demo/services/sql/values.yaml"], "storage: demo-pg-lake\n")
 }
 
 // compileAll is what a CI runs on each commit of the sources: okdp-gitops
@@ -486,6 +514,6 @@ func TestDeployThatDoesNotCompileIsRefusedWithItsCode(t *testing.T) {
 
 type refusingCompiler struct{}
 
-func (refusingCompiler) Compile(_ context.Context, _ gitops.Reader, st gitops.InstanceState) (*gitops.Compiled, error) {
+func (refusingCompiler) Compile(_ context.Context, _ gitops.Reader, st gitops.InstanceState, _ map[string]compiler.Instance) (*gitops.Compiled, error) {
 	return nil, &gitops.CompileError{Project: st.Instance.Project, Instance: st.Instance.Name, Err: errors.New("workers: must be >= 1")}
 }

@@ -384,9 +384,9 @@ func TestListSelectableOffersBothKindsOfTheContract(t *testing.T) {
 	require.NoError(t, err)
 	env.descriptors.list = []repository.Descriptor{
 		descriptorWith("demo-hive", repository.DescriptorOutput{Name: "demo-hive", Contract: "hive"}),
-		// database-server has no naming convention: an output of it cannot be
-		// referenced by name, so it is never offered.
-		descriptorWith("demo-pg", repository.DescriptorOutput{Name: "demo-pg", Contract: "database-server"}),
+		// database-server has no naming convention: an output of it is
+		// referenced by its name all the same.
+		descriptorWith("demo-pg", repository.DescriptorOutput{Name: "demo-pg-app", Contract: "database-server"}),
 	}
 
 	selectable, err := svc.ListSelectable(context.Background(), "demo", "hive")
@@ -400,13 +400,19 @@ func TestListSelectableOffersBothKindsOfTheContract(t *testing.T) {
 
 	databases, err := svc.ListSelectable(context.Background(), "demo", "database-server")
 	require.NoError(t, err)
-	require.Len(t, databases, 1)
-	assert.Equal(t, "warehouse", databases[0].Name)
+	require.Len(t, databases, 2)
+	assert.Equal(t, "demo-pg-app", databases[0].Name)
+	assert.True(t, databases[0].Managed)
+	assert.Equal(t, "demo-pg", databases[0].ProvidedBy)
+	assert.Equal(t, "warehouse", databases[1].Name)
+	assert.False(t, databases[1].Managed)
 
 	internal, err := svc.ListInternal(context.Background(), "demo")
 	require.NoError(t, err)
-	require.Len(t, internal, 1)
+	require.Len(t, internal, 2)
 	assert.Equal(t, "demo-hive", internal[0].Name)
+	assert.Equal(t, "demo-pg-app", internal[1].Name)
+	assert.Equal(t, "demo-pg", internal[1].ReleaseName)
 }
 
 // A contract without secret fields carries no secretRef, even when a Secret

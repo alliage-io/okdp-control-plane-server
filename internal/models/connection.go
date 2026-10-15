@@ -94,9 +94,10 @@ type ContractDescriptor struct {
 	// internal view, where the connections come from the deployed services,
 	// but offers no creation form.
 	External bool `json:"external"`
-	// Internal reports that an instance of the project can provide this
-	// contract by naming convention (x-okdp-internal in the contract schema:
-	// hive, iceberg-catalog, trino). Only those outputs are selectable.
+	// Internal reports that the contract has a naming convention
+	// (x-okdp-internal in the contract schema: hive, iceberg-catalog, trino):
+	// an instance's output of it is named after the instance's release. An
+	// output of any contract is selectable, by its name.
 	Internal bool              `json:"internal"`
 	Fields   []ConnectionField `json:"fields"`
 	// EndpointFrom names the value fields carrying the address a consumer would
