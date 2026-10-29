@@ -46,7 +46,7 @@ const docTemplate = `{
         },
         "/api/contracts": {
             "get": {
-                "description": "Descriptors of every contract, used to build the creation form, plus whether connections can currently be persisted",
+                "description": "Descriptors of every contract, used to build the creation form, plus whether connections can currently be persisted (crdAvailable: true when the deployments repository is configured)",
                 "produces": [
                     "application/json"
                 ],
@@ -128,7 +128,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Expose a new managed service in the catalog (writes the default KuboCD Context)",
+                "description": "Expose a service of the catalogs in the console menu (commits platform/catalog.yaml to the platform repository); its package must be in a catalog repository, its versions are the catalogs' (those given are checked, not stored)",
                 "consumes": [
                     "application/json"
                 ],
@@ -189,7 +189,7 @@ const docTemplate = `{
         },
         "/api/platform-services/{serviceName}": {
             "put": {
-                "description": "Update an exposed service (versions, default, description, icon, category)",
+                "description": "Update an exposed service of the console menu (default, description, icon, category); its versions are the catalogs', those given are checked against them and not stored",
                 "consumes": [
                     "application/json"
                 ],
@@ -255,7 +255,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Remove an exposed service from the catalog (writes the default KuboCD Context)",
+                "description": "Remove an exposed service from the catalog (commits platform/catalog.yaml to the deployments repository)",
                 "produces": [
                     "application/json"
                 ],
@@ -316,7 +316,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Package version tag (defaults to Context CR tag)",
+                        "description": "Package version tag (defaults to the catalog default version)",
                         "name": "tag",
                         "in": "query"
                     }
@@ -336,7 +336,7 @@ const docTemplate = `{
         },
         "/api/platform-services/{serviceName}/schema": {
             "get": {
-                "description": "Returns the JSON Schema (parameters with UI metadata) for a given service version",
+                "description": "Returns the JSON Schema of the parameters (config.schema.json of the package catalog/\u003cservice\u003e/\u003ctag\u003e/, global and connections removed; {\"type\": \"object\"} when the package has none) for a given service version",
                 "produces": [
                     "application/json"
                 ],
@@ -354,7 +354,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Package version tag (defaults to Context CR tag)",
+                        "description": "Package version tag (defaults to the catalog default version)",
                         "name": "tag",
                         "in": "query"
                     }
@@ -390,7 +390,7 @@ const docTemplate = `{
         },
         "/api/platform-services/{serviceName}/versions": {
             "get": {
-                "description": "Returns the list of versions declared in the KuboCD Context CR",
+                "description": "Returns the versions of the service's package in the catalogs (the directories catalog/\u003cservice\u003e/\u003cversion\u003e/ of the repository of platform/catalog.yaml holding it), highest first, and the default: the menu entry's, else the highest",
                 "produces": [
                     "application/json"
                 ],
@@ -428,7 +428,7 @@ const docTemplate = `{
         },
         "/api/profile-images": {
             "get": {
-                "description": "Returns the list of available container images per profile type from the KuboCD Context",
+                "description": "Returns the list of available container images per profile type from the platform values (global.okdp.jupyter.profiles)",
                 "produces": [
                     "application/json"
                 ],
@@ -463,7 +463,7 @@ const docTemplate = `{
         },
         "/api/projects": {
             "get": {
-                "description": "Get a list of all projects (backed by Kubernetes Namespaces)",
+                "description": "List the projects declared in the deployments repository (projects/\u003cp\u003e/project.yaml), whether written by the console or by hand in Git",
                 "consumes": [
                     "application/json"
                 ],
@@ -496,7 +496,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Create a new project (materialized as a Kubernetes Namespace)",
+                "description": "Create a project: commits projects/\u003cname\u003e/project.yaml (in a split topology, to a new repository of its own, with the okdp-gitops workflow .forgejo/workflows/okdp-gitops.yaml) and creates the project Namespace. 409 when the project is already declared, or when a Namespace of that name exists and is not a project's",
                 "consumes": [
                     "application/json"
                 ],
@@ -526,7 +526,16 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Bad Request",
+                        "description": "Invalid project name",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Project or Namespace already exists",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -548,7 +557,7 @@ const docTemplate = `{
         },
         "/api/projects/stream": {
             "get": {
-                "description": "Stream project updates using Server-Sent Events (SSE)",
+                "description": "Stream project updates using Server-Sent Events (SSE): an ADDED event per existing project, then ADDED/MODIFIED/DELETED as project.yaml files change in the deployments repository (read every few seconds, at once after a console change)",
                 "produces": [
                     "text/event-stream"
                 ],
@@ -577,7 +586,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}": {
             "get": {
-                "description": "Get a single project by name",
+                "description": "Get a project declared in the deployments repository (projects/\u003cname\u003e/project.yaml)",
                 "consumes": [
                     "application/json"
                 ],
@@ -625,7 +634,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "Update a project's mutable metadata (currently its description)",
+                "description": "Update a project's mutable metadata (currently its description) in projects/\u003cname\u003e/project.yaml; the file's other keys are kept",
                 "consumes": [
                     "application/json"
                 ],
@@ -691,7 +700,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Delete a project by name",
+                "description": "Delete a project: removes projects/\u003cname\u003e/ from the deployments repository (the compile of that commit, okdp-gitops in CI, removes its compiled tree, and the GitOps engine uninstalls its releases), then its Namespace if the console created it",
                 "consumes": [
                     "application/json"
                 ],
@@ -738,7 +747,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/connections": {
             "get": {
-                "description": "Connections declared in the project namespace. Connections owned by a deployed release are excluded. They are returned by the internal endpoint.",
+                "description": "Connections declared in the project (projects/\u003cp\u003e/connections/\u003cname\u003e.yaml in the deployments repository). Connections published by deployed instances are returned by the internal endpoint.",
                 "produces": [
                     "application/json"
                 ],
@@ -777,7 +786,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Stores the credential fields in a Kubernetes Secret and creates the Connection CRD referencing it",
+                "description": "Stores the credential fields in a Kubernetes Secret of the project namespace and commits the connection file referencing it (secretRef) to the deployments repository",
                 "consumes": [
                     "application/json"
                 ],
@@ -845,7 +854,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/connections/internal": {
             "get": {
-                "description": "Connections provided by the services already deployed in the project, that the project's other services can consume",
+                "description": "Connections provided by the services already deployed in the project (the connections their okdp.instance.yaml provides, in the output of the deployments repositories), that the project's other services can consume",
                 "produces": [
                     "application/json"
                 ],
@@ -973,6 +982,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/connections/{connName}": {
             "put": {
+                "description": "Commits the connection file, once the instances that layer it in compile with it (a check: okdp-gitops compiles them again in CI, on the commit). 400 with code does-not-compile when one of them no longer compiles with it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1045,7 +1055,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Removes the Connection CRD and the Secret holding its credentials",
+                "description": "Removes the connection file from the deployments repository and the Secret the console wrote for it. 400 while an instance still layers the connection in.",
                 "produces": [
                     "application/json"
                 ],
@@ -1214,7 +1224,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Deploy a managed platform service into a project",
+                "description": "Deploy a managed platform service into a project: compiles the instance (the package catalog/\u003cservice\u003e/\u003ctag\u003e/ of the catalogs), as a check, and commits its sources to the deployments Git repositories (instance.yaml: service and version; values.yaml: the submitted parameters only). The output (the umbrella chart of okdp-compiler, its instance.values.yaml, the engine files) is not the console's: okdp-gitops compile writes it, in a CI on each commit of the sources. The answer carries the commit (revision) and the status Pending until the GitOps engine reconciles it. 400 on invalid parameters, or with code does-not-compile when the instance does not compile (the compiler's message, one problem per line); 409 with code instance-exists or release-name-taken.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1282,7 +1292,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/services/stream": {
             "get": {
-                "description": "Stream service status updates using Server-Sent Events (SSE)",
+                "description": "Stream service status updates using Server-Sent Events (SSE): the GitOps engine objects and the console's own commits. Each message is {type: ADDED|MODIFIED|DELETED, object: ServiceInstance}.",
                 "produces": [
                     "text/event-stream"
                 ],
@@ -1372,7 +1382,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Remove a deployed service from a project",
+                "description": "Remove a deployed service from a project: removes its directory from the deployments Git repository; the compile of that commit (okdp-gitops, in CI) removes its compiled files, and the GitOps engine uninstalls it. 400 while another instance of the project references it.",
                 "produces": [
                     "application/json"
                 ],
@@ -1399,6 +1409,15 @@ const docTemplate = `{
                 "responses": {
                     "204": {
                         "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
                     },
                     "404": {
                         "description": "Not Found",
@@ -1468,7 +1487,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/services/{serviceName}/parameters": {
             "patch": {
-                "description": "Merge new parameters and optionally update the package version of a deployed service",
+                "description": "JSON Merge Patch (RFC 7386) of the parameters (null deletes a key, objects merge, arrays replace) and optionally update the package version of a deployed service, compiled as a check and committed to values.yaml/instance.yaml; okdp-gitops compile, in CI, writes the compiled tree in the output of the deployments Git repositories. 400 on invalid parameters, or with code does-not-compile when the instance does not compile.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2862,7 +2881,7 @@ const docTemplate = `{
         },
         "/api/spark-config": {
             "get": {
-                "description": "Returns Spark operator configuration from the KuboCD Context (images, defaults, versions)",
+                "description": "Returns Spark operator configuration from the platform values, global.okdp.sparkOperator (images, defaults, versions)",
                 "produces": [
                     "application/json"
                 ],
@@ -3188,7 +3207,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "crdAvailable": {
-                    "description": "CRDAvailable reports whether the KuboCD connection CRDs are installed.\nWhile they are not, external connections cannot be persisted and the\nconsole says so instead of failing on save. Internal connections are\nderived from deployed services and stay available either way.",
+                    "description": "CRDAvailable reports whether external connections can be persisted,\nwhich is whenever a deployments repository is configured (always, in a\nrunning server). The name is kept for API compatibility.",
                     "type": "boolean"
                 },
                 "types": {
@@ -3203,14 +3222,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "effective": {
-                    "description": "Effective reports that the release actually resolved this connection, as\nopposed to merely waiting for it.",
+                    "description": "Effective reports that the connection exists (declared, or published by\na deployed instance), as opposed to merely being named.",
                     "type": "boolean"
                 },
                 "releaseName": {
                     "type": "string"
                 },
                 "service": {
-                    "description": "Service is the instance name as the console displays it, ReleaseName the\nunderlying KuboCD Release.",
+                    "description": "Service is the instance name as the console displays it, ReleaseName the\nHelm release (\u003cproject\u003e-\u003cinstance\u003e).",
                     "type": "string"
                 },
                 "status": {
@@ -3262,7 +3281,7 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "secret": {
-                    "description": "Secret says where the value is stored: in the credentials Secret rather\nthan in the Connection spec. It says nothing about how it is typed in.",
+                    "description": "Secret says where the value is stored: in the credentials Secret rather\nthan in the connection file. It says nothing about how it is typed in.",
                     "type": "boolean"
                 },
                 "showWhen": {
@@ -3462,8 +3481,12 @@ const docTemplate = `{
                 "icon": {
                     "type": "string"
                 },
+                "internal": {
+                    "description": "Internal reports that an instance of the project can provide this\ncontract by naming convention (x-okdp-internal in the contract schema:\nhive, iceberg-catalog, trino). Only those outputs are selectable.",
+                    "type": "boolean"
+                },
                 "name": {
-                    "description": "Name IS the KuboCD Contract this descriptor produces. One descriptor, one\ncontract, deliberately: an entry form that produced a differently named\ncontract would mean nothing a package asks for could be found by its own\nname.",
+                    "description": "Name IS the contract this descriptor produces (x-okdp-connection-ref).\nOne descriptor, one contract, deliberately: an entry form that produced a\ndifferently named contract would mean nothing a chart asks for could be\nfound by its own name.",
                     "type": "string"
                 }
             }
@@ -3685,7 +3708,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "oidc": {
-                    "description": "Oidc is the OIDC client the console UI should authenticate with,\nresolved from the Context (identity.oidc). Absent when the platform\ndoes not publish it: the UI falls back to its build-time configuration.",
+                    "description": "Oidc is the OIDC client the console UI should authenticate with,\nresolved from the platform values (global.okdp.identity.oidc). Absent when the platform\ndoes not publish it: the UI falls back to its build-time configuration.",
                     "allOf": [
                         {
                             "$ref": "#/definitions/models.IdentityOidcConfig"
@@ -3739,7 +3762,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "managed": {
-                    "description": "Managed reports that the entry comes from a Connection the KuboCD release\ncontroller owns, rather than being derived from the deployed service.",
+                    "description": "Managed reports that the entry is published by a deployed instance (its\ndescriptor's outputs), not declared by hand. Always true here.",
                     "type": "boolean"
                 },
                 "name": {
@@ -3834,7 +3857,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "default": {
-                    "description": "Default is the template the package falls back to when the deployer picks\nnothing. KuboCD forbids a literal here, so it is always rendered against\nthe Context: this is how an Environment says \"here, the database is that\none\" without the deployer naming it. The console must therefore leave the\nparameter out rather than send an empty string, which would win over it.",
+                    "description": "Default is the connection the chart falls back to when the deployer picks\nnothing (the property's schema default). The console must leave the\nparameter out rather than send an empty string, which would win over it.",
                     "type": "string"
                 },
                 "description": {
@@ -3846,7 +3869,11 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "parameter": {
-                    "description": "Parameter is the package parameter carrying the chosen connection name,\nderived from the input's namedConnection template. Empty when the input\nbinds some other way, in which case the console offers no choice.",
+                    "description": "Parameter is the root chart parameter carrying the chosen connection\nname (the property marked x-okdp-connection-ref). Empty for a ref nested\nin an object or a list, which the form fills inside that structure.",
+                    "type": "string"
+                },
+                "path": {
+                    "description": "Path is the JSON path of the marked property: \"metadataDb\" at the root,\n\"hiveCatalogs[].metastore\" inside the items of a list.",
                     "type": "string"
                 }
             }
@@ -3878,6 +3905,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "repository": {
+                    "description": "Repository names the catalog repository holding the service's package\n(platform/catalog.yaml repositories[].name). Read only: ignored on a\nwrite.",
                     "type": "string"
                 },
                 "versions": {
@@ -4137,7 +4165,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "kind": {
-                    "description": "Kind separates a Connection from a ClusterConnection, which may share a\nname, and tells the console which page to link to.",
+                    "description": "Kind is Connection (external, declared in the project) or Instance\n(provided by another instance), and tells the console which page to\nlink to.",
                     "type": "string"
                 },
                 "name": {
@@ -4147,7 +4175,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "resolved": {
-                    "description": "Resolved is false while the release is still waiting for it.",
+                    "description": "Resolved is false while the connection does not exist.",
                     "type": "boolean"
                 }
             }
@@ -4156,7 +4184,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "connections": {
-                    "description": "Connections is what the release actually resolved, published by the\ncontroller. Without it the console can only show what a service asked\nfor, never what it runs against.",
+                    "description": "Connections lists what the instance is wired to: the external\nconnections its declaration layers in, and the connections of other\ninstances its parameters name.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/models.ServiceConnection"
@@ -4175,7 +4203,12 @@ const docTemplate = `{
                 "releaseName": {
                     "type": "string"
                 },
+                "revision": {
+                    "description": "Revision is the Git commit holding the change, set on the responses of\na deployment or an update only.",
+                    "type": "string"
+                },
                 "roles": {
+                    "description": "Roles is no longer filled: KuboCD package roles have no successor.",
                     "type": "array",
                     "items": {
                         "type": "string"
@@ -4197,6 +4230,10 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "url": {
+                    "type": "string"
+                },
+                "usage": {
+                    "description": "Usage is the Markdown the instance publishes: the usage of its\ncompiled okdp.instance.yaml.",
                     "type": "string"
                 }
             }

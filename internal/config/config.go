@@ -1,39 +1,97 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/okdp/okdp-gitops/gitops"
 )
 
 // Config holds the application configuration
 type Config struct {
-	ServerPort        string
-	PlatformNamespace string
-	AllowedOrigins    string
-	LogLevel          string
-	KuboCDNamespace   string
-	ContextName       string
-	ContextNamespace  string // empty: the namespace the server runs in
-	// The platform Context, the one package templates also read. Empty means it
-	// is the same object as the Control Plane one, which is what a deployment
-	// that has not split them yet looks like.
-	ReleaseInterval         string
-	ReleaseTimeout          string
+	ServerPort              string
+	PlatformNamespace       string
+	AllowedOrigins          string
+	LogLevel                string
 	ExcludedSidecarPrefixes []string
 	// InsecureOCIRegistries lists registry hosts reached over plain HTTP
-	// a development-sandbox affordance for local registries without TLS.
+	// (the upstream charts of the chart cache): a development-sandbox
+	// affordance for local registries without TLS.
 	InsecureOCIRegistries []string
-	// RegistryAuthFile is a dockerconfigjson file with credentials for private package registries. Empty means anonymous access only.
-	RegistryAuthFile string
 	// OIDC configures the verification of the console's bearer token.
 	OIDC OIDCConfig
+	// GitOps configures the deployments repository, the only desired-state
+	// store, and the engine reconciling it.
+	GitOps GitOpsConfig
+}
+
+// Engines reconciling the deployments repository.
+const (
+	EngineFlux   = "flux"
+	EngineArgoCD = "argocd"
+)
+
+type GitOpsConfig struct {
+	// ConfigFile is the topology file (GITOPS_CONFIG): where the platform,
+	// the projects and the output live. Without it, RepoURL, Branch and Path
+	// hold the whole layout (mono).
+	ConfigFile string
+	// RepoURL is the deployments repository (https://, ssh:// or git@host:path).
+	RepoURL string
+	Branch  string
+	// Path is the directory of the repository holding the layout, empty for the root.
+	Path string
+	// CredentialsDir holds the mounted credentials Secret (Flux GitRepository
+	// keys: username/password, bearerToken, or identity/known_hosts).
+	CredentialsDir string
+	// InsecureIgnoreHostKey accepts any SSH host key. Sandboxes only.
+	InsecureIgnoreHostKey bool
+	AuthorName            string
+	AuthorEmail           string
+	// CloneDir holds the local clones, a cache (an emptyDir), one directory
+	// per repository under repos/; empty keeps them in memory.
+	CloneDir string
+	// ChartCacheDir is the chart cache (GITOPS_CHART_CACHE_DIR): the
+	// upstream charts of the compiled instances, for the checks of a compile
+	// and the chart defaults. <CloneDir>/charts by default, else under the
+	// temporary directory.
+	ChartCacheDir string
+	// Engine is flux or argocd: which objects carry the render/sync status.
+	Engine string
+	// ReleasesNamespace holds the Flux HelmReleases and the values ConfigMaps,
+	// including okdp-platform-values.
+	ReleasesNamespace string
+	// ArgoCDNamespace holds the Argo CD Applications.
+	ArgoCDNamespace string
+}
+
+// Validate refuses a configuration the server cannot run with.
+func (g GitOpsConfig) Validate() error {
+	if g.RepoURL == "" && g.ConfigFile == "" {
+		return errors.New("GITOPS_CONFIG or GITOPS_REPO_URL is required: the deployments repositories are the only desired-state store")
+	}
+	if g.Engine != EngineFlux && g.Engine != EngineArgoCD {
+		return errors.New("GITOPS_ENGINE must be flux or argocd")
+	}
+	return nil
+}
+
+// Topology returns where the parts of the layout live: the GITOPS_CONFIG
+// file, else the layout under GITOPS_PATH of GITOPS_REPO_URL (mono).
+func (g GitOpsConfig) Topology() (*gitops.Topology, error) {
+	if g.ConfigFile != "" {
+		return gitops.LoadTopology(g.ConfigFile)
+	}
+	return gitops.MonoTopology(g.RepoURL, g.Branch, g.Path), nil
 }
 
 type OIDCConfig struct {
-	// It overrides the issuer the platform Context declares. Empty is the
-	// normal case: the Context is where that setting lives.
+	// It overrides the issuer the platform values declare. Empty is the
+	// normal case: the platform values are where that setting lives.
 	Issuer string
-	// ClientID overrides the client id the platform Context declares.
+	// ClientID overrides the client id the platform values declare.
 	ClientID string
 	// Disabled leaves the API open to anyone who can reach the port.
 	Disabled bool
@@ -48,21 +106,34 @@ func Load() (*Config, error) {
 		PlatformNamespace: getEnv("PLATFORM_NAMESPACE", "okdp-system"),
 		AllowedOrigins:    getEnv("ALLOWED_ORIGINS", "http://localhost:4200"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
-		KuboCDNamespace:   getEnv("KUBOCD_NAMESPACE", "kubocd-system"),
-		ContextName:       getEnv("CONTEXT_NAME", "platform"),
-		ContextNamespace:  getEnv("CONTEXT_NAMESPACE", ""),
-		ReleaseInterval:   getEnv("RELEASE_INTERVAL", "30m"),
-		ReleaseTimeout:    getEnv("RELEASE_TIMEOUT", "10m"),
-		RegistryAuthFile:  getEnv("REGISTRY_AUTH_FILE", ""),
 		OIDC: OIDCConfig{
 			Issuer:   strings.TrimSpace(getEnv("OIDC_ISSUER", "")),
 			ClientID: strings.TrimSpace(getEnv("OIDC_CLIENT_ID", "")),
 			Disabled: getEnv("AUTH_DISABLED", "") == "true",
 		},
+		GitOps: GitOpsConfig{
+			RepoURL:               strings.TrimSpace(getEnv("GITOPS_REPO_URL", "")),
+			Branch:                getEnv("GITOPS_BRANCH", "main"),
+			Path:                  strings.Trim(getEnv("GITOPS_PATH", ""), "/"),
+			CredentialsDir:        getEnv("GITOPS_CREDENTIALS_DIR", "/etc/okdp/gitops-credentials"),
+			InsecureIgnoreHostKey: getEnv("GITOPS_SSH_INSECURE_IGNORE_HOST_KEY", "") == "true",
+			AuthorName:            getEnv("GITOPS_AUTHOR_NAME", "OKDP control plane"),
+			AuthorEmail:           getEnv("GITOPS_AUTHOR_EMAIL", "okdp-control-plane@okdp.io"),
+			ConfigFile:            strings.TrimSpace(getEnv("GITOPS_CONFIG", "")),
+			CloneDir:              getEnv("GITOPS_CLONE_DIR", ""),
+			ChartCacheDir:         getEnv("GITOPS_CHART_CACHE_DIR", ""),
+			Engine:                strings.ToLower(getEnv("GITOPS_ENGINE", EngineFlux)),
+			ReleasesNamespace:     getEnv("GITOPS_RELEASES_NAMESPACE", "okdp-releases"),
+			ArgoCDNamespace:       getEnv("ARGOCD_NAMESPACE", "argocd"),
+		},
 	}
 
-	if cfg.ContextNamespace == "" {
-		cfg.ContextNamespace = ownNamespace()
+	if cfg.GitOps.ChartCacheDir == "" {
+		if cfg.GitOps.CloneDir != "" {
+			cfg.GitOps.ChartCacheDir = filepath.Join(cfg.GitOps.CloneDir, "charts")
+		} else {
+			cfg.GitOps.ChartCacheDir = filepath.Join(os.TempDir(), "okdp-charts")
+		}
 	}
 
 	for _, h := range strings.Split(getEnv("INSECURE_OCI_REGISTRIES", ""), ",") {
@@ -87,18 +158,4 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-// ownNamespace resolves the namespace the server runs in, from the
-// serviceaccount mount, falling back to POD_NAMESPACE then okdp-system.
-func ownNamespace() string {
-	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		if ns := strings.TrimSpace(string(b)); ns != "" {
-			return ns
-		}
-	}
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns
-	}
-	return "okdp-system"
 }

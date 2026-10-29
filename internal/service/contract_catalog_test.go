@@ -1,6 +1,10 @@
 package service
 
 import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,7 +13,7 @@ import (
 
 func newTestCatalog(t *testing.T) ContractCatalog {
 	t.Helper()
-	catalog, err := NewEmbeddedContractCatalog()
+	catalog, err := testContractCatalog()
 	require.NoError(t, err, "the embedded contracts must all parse")
 	return catalog
 }
@@ -283,7 +287,7 @@ func TestEveryPlatformContractIsInTheCatalog(t *testing.T) {
 // The consumers and the connectivity test read the values, not the descriptor,
 // so an omitted optional field must carry its declared default.
 func TestNormalizeWritesTheDeclaredDefaults(t *testing.T) {
-	catalog, err := NewEmbeddedContractCatalog()
+	catalog, err := testContractCatalog()
 	if err != nil {
 		t.Fatalf("loading the catalog: %v", err)
 	}
@@ -297,5 +301,53 @@ func TestNormalizeWritesTheDeclaredDefaults(t *testing.T) {
 
 	if values["sslMode"] != "prefer" {
 		t.Fatalf("sslMode: got %v, want the declared default \"prefer\"", values["sslMode"])
+	}
+}
+
+func TestValidatePublicUsesTheContractSchema(t *testing.T) {
+	catalog, err := testContractCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.ValidatePublic("hive", map[string]any{"thriftUri": "thrift://hms:9083"}); err != nil {
+		t.Errorf("valid hive values rejected: %v", err)
+	}
+	if err := catalog.ValidatePublic("hive", map[string]any{}); err == nil {
+		t.Errorf("a hive connection without thriftUri passed")
+	}
+	if err := catalog.ValidatePublic("database-server", map[string]any{
+		"engine": "postgresql", "driver": "org.postgresql.Driver", "host": "db", "port": 5432.5, "dbName": "x",
+	}); err == nil {
+		t.Errorf("a fractional port passed the integer type")
+	}
+}
+
+// testContractCatalog loads testdata/contracts, the contracts of the OKDP
+// catalogs.
+func testContractCatalog() (ContractCatalog, error) {
+	return NewContractCatalog(os.DirFS("testdata/contracts"))
+}
+
+func TestTheContractsOfTheCatalogsAreReadAgainAndKeptWhenUnreadable(t *testing.T) {
+	calls := 0
+	var fail error
+	catalog := NewCatalogContracts(func(context.Context) (fs.FS, error) {
+		calls++
+		if fail != nil {
+			return nil, fail
+		}
+		return os.DirFS("testdata/contracts"), nil
+	})
+	if _, ok := catalog.Get("s3"); !ok {
+		t.Fatal("s3 is a contract of the catalogs")
+	}
+	catalog.List()
+	if calls != 1 {
+		t.Fatalf("read %d times, want once within the refresh interval", calls)
+	}
+
+	broken := NewCatalogContracts(func(context.Context) (fs.FS, error) { return nil, errors.New("catalog unreachable") })
+	if list := broken.List(); len(list) != 0 {
+		t.Fatalf("no contract read yet: %v", list)
 	}
 }

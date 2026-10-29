@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 	"github.com/okdp/okdp-control-plane-server/internal/service/mocks"
@@ -70,4 +71,22 @@ func (noExternalSecret) List(context.Context, string) ([]crd.ESOExternalSecret, 
 }
 func (noExternalSecret) Get(context.Context, string, string) (*crd.ESOExternalSecret, error) {
 	return &crd.ESOExternalSecret{}, nil
+}
+
+// versionlessPlatform lists one service with no default version, in no
+// catalog.
+type versionlessPlatform struct {
+	repository.PlatformRepository
+}
+
+func (versionlessPlatform) GetPlatformServices(context.Context) ([]models.PlatformService, error) {
+	return []models.PlatformService{{Name: "trino"}}, nil
+}
+
+func TestNoVersionListsAsEmpty(t *testing.T) {
+	resp, err := NewDefaultPackageSchemaService(versionlessPlatform{}, nil).GetServiceVersions(context.Background(), "trino")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEmptyJSONList(t, "versions", resp.Versions)
 }

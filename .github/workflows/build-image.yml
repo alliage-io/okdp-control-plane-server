@@ -38,11 +38,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # go.mod replaces github.com/okdp/okdp-compiler with ../okdp-compiler until
+      # it is published.
+      - name: Clone okdp-compiler next to the repository
+        run: git clone --depth 1 https://github.com/OKDP/okdp-compiler.git ../okdp-compiler
+      # Likewise github.com/okdp/okdp-gitops with ../okdp-gitops.
+      - name: Clone okdp-gitops next to the repository
+        run: git clone --depth 1 https://github.com/OKDP/okdp-gitops.git ../okdp-gitops
       - id: vars
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           VERSION="${INPUT_VERSION:-$(jq -r '.["."] // "0.1.0"' .release-please-manifest.json)}"
+          VERSION="${VERSION#v}"   # the image tag and the binary carry no leading "v"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -54,11 +62,16 @@ jobs:
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
+          build-contexts: |
+            okdp-compiler=../okdp-compiler
+            okdp-gitops=../okdp-gitops
           platforms: linux/amd64,linux/arm64
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: quay.io/okdp/images/okdp-control-plane-server:${{ steps.vars.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
           labels: |
             org.opencontainers.image.title=okdp-control-plane-server
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
