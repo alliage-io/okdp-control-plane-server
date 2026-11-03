@@ -181,6 +181,9 @@ func main() {
 		SidecarPrefixes: cfg.ExcludedSidecarPrefixes,
 	})
 	serviceHandler := handlers.NewServiceHandler(serviceService, schemaService)
+	// What each chart of an instance is rendered with: its compiled values
+	// over the defaults of the upstream chart (the chart cache).
+	serviceHandler.SetRenderedValuesService(service.NewDefaultRenderedValuesService(deployments, chartCache))
 
 	// Initialize Spark stack (SparkApplication CRUD)
 	sparkRepo := repository.NewSparkAppRepository(k8sClient)

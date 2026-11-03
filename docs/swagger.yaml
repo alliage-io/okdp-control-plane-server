@@ -595,6 +595,54 @@ definitions:
       name:
         type: string
     type: object
+  models.RenderedValues:
+    properties:
+      changedLines:
+        description: |-
+          ChangedLines are the 1-based lines of Values that differ from Defaults:
+          set by OKDP or the instance; the others come from the chart's
+          defaults. Empty when nothing differs or when the defaults could not be
+          read.
+        items:
+          type: integer
+        type: array
+      chart:
+        description: Chart is the chart that renders them (its name in its Chart.yaml).
+        example: trino
+        type: string
+      chartVersion:
+        description: ChartVersion is that chart, <name>-<version>.
+        example: trino-1.42.2
+        type: string
+      defaults:
+        description: |-
+          Defaults is the chart's own values.yaml, as published (with its
+          comments), from the chart cache. Empty when it could not be read (see
+          DefaultsError).
+        type: string
+      defaultsError:
+        description: DefaultsError says why the defaults are missing.
+        type: string
+      name:
+        description: |-
+          Name is the chart key (the umbrella's dependency alias, else its name),
+          or the chart of a plain chart instance.
+        example: trino
+        type: string
+      serviceVersion:
+        description: |-
+          ServiceVersion is the version of the instance's package (or plain
+          chart) the values were compiled for.
+        example: 480.0.0-1.0.2
+        type: string
+      values:
+        description: |-
+          Values is what Helm renders the chart with: its defaults coalesced
+          under the compiled values (instance.values.yaml of the compiled
+          directory, the key's; values.yaml for a plain chart). The compiled
+          values only when the defaults cannot be read (DefaultsError).
+        type: string
+    type: object
   models.ResourceDefaults:
     properties:
       cores:
@@ -2319,6 +2367,54 @@ paths:
       summary: Execute a SQL query on a deployed SQL engine
       tags:
       - sql
+  /api/projects/{name}/services/{serviceName}/values:
+    get:
+      description: 'For each upstream chart of the instance''s compiled umbrella (each
+        dependency of compiled/projects/<p>/services/<i>/Chart.yaml, by key; or the
+        chart itself for a plain chart): values, what Helm renders the chart with,
+        its own defaults coalesced under the compiled values (instance.values.yaml,
+        the key''s; values.yaml for a plain chart); defaults, the chart''s values.yaml
+        as published, from the chart cache; changedLines, the 1-based lines of values
+        that differ from the defaults (set by OKDP or the instance). The key named
+        like the service comes first. Empty when the instance has not been compiled
+        yet (the output is written by okdp-gitops, in CI on each commit of the sources).
+        A chart that cannot be fetched leaves values the compiled values only, and
+        defaultsError says why, instead of failing.'
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Service instance name
+        in: path
+        name: serviceName
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.RenderedValues'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Values the charts of an instance are rendered with
+      tags:
+      - services
   /api/projects/{name}/services/stream:
     get:
       description: 'Stream service status updates using Server-Sent Events (SSE):
