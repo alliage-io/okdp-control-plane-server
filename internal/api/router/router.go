@@ -19,7 +19,9 @@ func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler
 	// Middleware
 	r.Use(middleware.RequestLogger())
 	r.Use(gin.Recovery())
+	r.Use(middleware.SecurityHeaders())
 	r.Use(corsMiddleware(cfg))
+	r.Use(middleware.LimitRequestBody(middleware.DefaultMaxBodyBytes))
 
 	// Swagger documentation
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
@@ -36,6 +38,10 @@ func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler
 		// unless the middleware lists it as public.
 		api.Use(middleware.RequireAuthentication(verifier))
 	}
+	// After authentication, before any group middleware: an object name that
+	// could leave its directory never reaches a store (RequireProject
+	// included).
+	api.Use(middleware.ValidatePathNames())
 	{
 		// Platform capabilities (UI feature discovery)
 		api.GET("/capabilities", capabilitiesHandler.GetCapabilities)
@@ -182,6 +188,9 @@ func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		// Tells caches the CORS answer is about the requesting origin, so one
+		// origin's cached response is never replayed to another.
+		c.Writer.Header().Add("Vary", "Origin")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
