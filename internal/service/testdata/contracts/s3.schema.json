@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://okdp.io/schemas/contracts/s3.schema.json",
   "title": "S3 object storage",
-  "description": "S3-compatible object storage (AWS S3, MinIO, SeaweedFS, RustFS, ...). The connection carries endpoints. Consumers usually bring their own identity (an s3SecretRef parameter); secretRef is only set on stores declared by hand.",
+  "description": "S3-compatible object storage (AWS S3, MinIO, SeaweedFS, RustFS, ...). The connection carries endpoints. Consumers usually bring their own identity (an s3SecretRef parameter); secretRef is set on stores declared by hand, and on a store's output only when it has credentials its consumers can use.",
   "type": "object",
   "x-okdp-contract": "s3",
   "x-okdp-icon": "pi pi-box",

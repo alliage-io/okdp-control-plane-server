@@ -35,8 +35,9 @@ var connectionsResource = schema.GroupResource{Group: "okdp.io", Resource: "conn
 //
 // External connections are files of the deployments Git repository
 // (projects/<p>/connections/<name>.yaml) plus a credentials Secret in the
-// project namespace. Internal connections are what the deployed instances
-// publish in their descriptor (outputs.yaml).
+// project namespace. Internal connections are the outputs the instances of
+// the project publish (the provides of their compiled okdp.instance.yaml),
+// whatever their contract: a parameter references one by its name.
 type ConnectionService interface {
 	// Catalog returns the known contracts and whether connections can currently
 	// be persisted.
@@ -438,8 +439,8 @@ func (s *DefaultConnectionService) Test(ctx context.Context, req models.Connecti
 
 // --- Internal connections ---
 
-// outputsOf lists the connections the deployed instances of a project
-// publish in their descriptor.
+// outputsOf lists the connections the compiled instances of a project
+// publish (okdp.instance.yaml).
 func (s *DefaultConnectionService) outputsOf(ctx context.Context, project string) ([]repository.Descriptor, error) {
 	if s.descriptors == nil {
 		return nil, nil
@@ -447,18 +448,10 @@ func (s *DefaultConnectionService) outputsOf(ctx context.Context, project string
 	return s.descriptors.List(ctx, project)
 }
 
-// internalCapable reports whether an instance output of that contract can be
-// referenced by name: okdp.connection resolves an internal reference only for
-// contracts declaring a naming convention (x-okdp-internal). The others (s3,
-// database-server) are external only.
-func (s *DefaultConnectionService) internalCapable(contract string) bool {
-	descriptor, known := s.catalog.Get(contract)
-	return known && descriptor.Internal
-}
-
-// ListInternal returns the connections the project's own instances publish
-// (their descriptor's outputs.yaml) that other instances can reference by
-// name, and only those.
+// ListInternal returns the connections the project's own instances publish,
+// their outputs: another instance references one by its name, whatever its
+// contract (an output of a contract with a naming convention is named after
+// its instance's release).
 func (s *DefaultConnectionService) ListInternal(ctx context.Context, project string) ([]models.InternalConnection, error) {
 	descriptors, err := s.outputsOf(ctx, project)
 	if err != nil {
@@ -467,9 +460,6 @@ func (s *DefaultConnectionService) ListInternal(ctx context.Context, project str
 	result := make([]models.InternalConnection, 0)
 	for _, d := range descriptors {
 		for _, output := range d.Outputs {
-			if !s.internalCapable(output.Contract) {
-				continue
-			}
 			result = append(result, s.outputToInternal(d, output, project))
 		}
 	}
@@ -683,9 +673,6 @@ func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, 
 	for _, d := range descriptors {
 		for _, output := range d.Outputs {
 			if contract != "" && output.Contract != contract {
-				continue
-			}
-			if !s.internalCapable(output.Contract) {
 				continue
 			}
 			result = append(result, models.SelectableConnection{
