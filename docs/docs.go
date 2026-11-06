@@ -854,7 +854,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/connections/internal": {
             "get": {
-                "description": "Connections provided by the services already deployed in the project (the connections their okdp.instance.yaml provides, in the output of the deployments repositories), that the project's other services can consume",
+                "description": "Connections provided by the services already deployed in the project (the connections their okdp.info.yaml provides, in the output of the deployments repositories), that the project's other services can consume",
                 "produces": [
                     "application/json"
                 ],
@@ -4493,7 +4493,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "usage": {
-                    "description": "Usage is the Markdown the instance publishes: the usage of its\ncompiled okdp.instance.yaml.",
+                    "description": "Usage is the Markdown the instance publishes: the usage of its\ncompiled okdp.info.yaml.",
                     "type": "string"
                 }
             }

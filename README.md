@@ -76,7 +76,7 @@ it is published).
 > compile` on each of their commits writes the output, and a GitOps engine (FluxCD or
 > Argo CD) deploys each instance from its compiled directory in the output repository, the
 > same under both engines. What an instance publishes (its URL, its usage, the connections
-> it provides) is read from its compiled `okdp.instance.yaml`; observed state from the
+> it provides) is read from its compiled `okdp.info.yaml`; observed state from the
 > cluster: the workloads (`app.kubernetes.io/instance`) and the engine's own objects for
 > render/sync errors. There is no database; the local clones are a cache. Authentication
 > (OIDC) is verified on every `/api` call; TLS is provided by the platform ingress.
@@ -92,7 +92,7 @@ projects/<project>/services/<instance>/instance.yaml    # service and version of
 projects/<project>/services/<instance>/values.yaml      # the submitted parameters only
 compiled/projects/<project>/kustomization.yaml          # Flux: the compiled services
 compiled/projects/<project>/services/<instance>/        # okdp-compiler's umbrella chart (Chart.yaml, instance.values.yaml,
-                                                        # okdp.objects.yaml, okdp.instance.yaml),
+                                                        # okdp.objects.yaml, okdp.info.yaml),
                                                         # helmrelease.yaml, kustomization.yaml (Flux), application.yaml (Argo CD)
 ```
 
@@ -207,7 +207,7 @@ The parameters are checked against the package's `config.schema.json`, the conne
 against their contracts, and the values of each upstream chart computed; the instance is
 written as one chart, an umbrella over its upstream charts (`compiler.Write`: `Chart.yaml`,
 `instance.values.yaml`, OKDP's own objects in `okdp.objects.yaml`, what it publishes in
-`okdp.instance.yaml`). Each connection reference to another instance of the project (by
+`okdp.info.yaml`). Each connection reference to another instance of the project (by
 its release name, one of the compile's dependencies) becomes a `dependsOn` of the
 HelmRelease and a later Argo CD sync wave; it must name an instance of the project, and
 an instance another one references cannot be deleted.

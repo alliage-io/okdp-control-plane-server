@@ -117,7 +117,7 @@ func main() {
 	default:
 		engine = repository.NewFluxAdapter(k8sClient, cfg.GitOps.ReleasesNamespace)
 	}
-	// What each instance publishes: its okdp.instance.yaml in the output.
+	// What each instance publishes: its okdp.info.yaml in the output.
 	descriptors := repository.NewDescriptorRepository(deployments)
 
 	// Initialize Project stack: projects are the projects/<p>/project.yaml

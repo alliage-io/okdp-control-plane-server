@@ -36,7 +36,7 @@ var connectionsResource = schema.GroupResource{Group: "okdp.io", Resource: "conn
 // External connections are files of the deployments Git repository
 // (projects/<p>/connections/<name>.yaml) plus a credentials Secret in the
 // project namespace. Internal connections are the outputs the instances of
-// the project publish (the provides of their compiled okdp.instance.yaml),
+// the project publish (the provides of their compiled okdp.info.yaml),
 // whatever their contract: a parameter references one by its name.
 type ConnectionService interface {
 	// Catalog returns the known contracts and whether connections can currently
@@ -440,7 +440,7 @@ func (s *DefaultConnectionService) Test(ctx context.Context, req models.Connecti
 // --- Internal connections ---
 
 // outputsOf lists the connections the compiled instances of a project
-// publish (okdp.instance.yaml).
+// publish (okdp.info.yaml).
 func (s *DefaultConnectionService) outputsOf(ctx context.Context, project string) ([]repository.Descriptor, error) {
 	if s.descriptors == nil {
 		return nil, nil

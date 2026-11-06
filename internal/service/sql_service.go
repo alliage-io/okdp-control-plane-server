@@ -31,7 +31,7 @@ const (
 var (
 	// ErrSqlUnsupported: the instance's service has no SQL engine driver.
 	ErrSqlUnsupported = errors.New("does not support SQL execution")
-	// ErrSqlNoURL: the instance publishes no URL (its okdp.instance.yaml).
+	// ErrSqlNoURL: the instance publishes no URL (its okdp.info.yaml).
 	ErrSqlNoURL = errors.New("does not expose a URL")
 	// ErrSqlNoCredentials: the connection's credentials Secret is missing.
 	ErrSqlNoCredentials = errors.New("does not exist")

@@ -47,7 +47,7 @@ var servicesResource = schema.GroupResource{Group: "okdp.io", Resource: "service
 //
 // Desired state is written to the deployments Git repositories, the sources
 // only; what each compiled instance publishes is read from their output
-// (okdp.instance.yaml), as okdp-gitops compile wrote it in CI (it may lag
+// (okdp.info.yaml), as okdp-gitops compile wrote it in CI (it may lag
 // behind the sources), observed state from the cluster (workloads, and the
 // objects of the GitOps engine).
 type ServiceService interface {

@@ -514,6 +514,6 @@ func TestDeployThatDoesNotCompileIsRefusedWithItsCode(t *testing.T) {
 
 type refusingCompiler struct{}
 
-func (refusingCompiler) Compile(_ context.Context, _ gitops.Reader, st gitops.InstanceState, _ map[string]compiler.Instance) (*gitops.Compiled, error) {
+func (refusingCompiler) Compile(_ context.Context, _ gitops.Reader, st gitops.InstanceState, _ map[string]compiler.Info) (*gitops.Compiled, error) {
 	return nil, &gitops.CompileError{Project: st.Instance.Project, Instance: st.Instance.Name, Err: errors.New("workers: must be >= 1")}
 }

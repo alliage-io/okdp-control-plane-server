@@ -82,7 +82,7 @@ type ServiceInstance struct {
 	Roles      []string       `json:"roles,omitempty"`
 	Parameters map[string]any `json:"parameters,omitempty"`
 	// Usage is the Markdown the instance publishes: the usage of its
-	// compiled okdp.instance.yaml.
+	// compiled okdp.info.yaml.
 	Usage string `json:"usage,omitempty"`
 	// Connections lists what the instance is wired to: the external
 	// connections its declaration layers in, and the connections of other
@@ -100,7 +100,7 @@ const (
 	// (projects/<p>/connections/<name>.yaml).
 	ConnectionKindExternal = "Connection"
 	// ConnectionKindInternal is a connection provided by another instance of
-	// the project (the connections its okdp.instance.yaml provides).
+	// the project (the connections its okdp.info.yaml provides).
 	ConnectionKindInternal = "Instance"
 )
 

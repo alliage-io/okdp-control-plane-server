@@ -106,7 +106,7 @@ func (h *ConnectionHandler) ListConsumers(c *gin.Context) {
 
 // ListInternalConnections godoc
 // @Summary      List the internal connections of a project
-// @Description  Connections provided by the services already deployed in the project (the connections their okdp.instance.yaml provides, in the output of the deployments repositories), that the project's other services can consume
+// @Description  Connections provided by the services already deployed in the project (the connections their okdp.info.yaml provides, in the output of the deployments repositories), that the project's other services can consume
 // @Tags         connections
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
