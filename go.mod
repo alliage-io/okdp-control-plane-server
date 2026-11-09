@@ -10,7 +10,7 @@ require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/minio/minio-go/v7 v7.2.1
-	github.com/okdp/okdp-compiler v0.0.0-00010101000000-000000000000
+	github.com/okdp/okdp-compiler v0.4.0
 	github.com/okdp/okdp-gitops v0.0.0-00010101000000-000000000000
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/sirupsen/logrus v1.9.4

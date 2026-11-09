@@ -11,7 +11,7 @@ import (
 )
 
 // CatalogWriterRepository manages the platform service catalog, the file
-// platform/catalog.yaml of the deployments repository
+// catalogs.yaml of the deployments repository
 // (categories[].services). A service is stored in the section whose title
 // equals its Category, created on the fly when it does not exist yet.
 type CatalogWriterRepository interface {
@@ -50,7 +50,7 @@ func (r *gitCatalogWriterRepository) mutateCategories(ctx context.Context, targe
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to write %s: %w", gitops.CatalogPath, err)
+		return fmt.Errorf("failed to write %s: %w", gitops.CatalogsFile, err)
 	}
 	return nil
 }

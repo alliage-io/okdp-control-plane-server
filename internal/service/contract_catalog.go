@@ -17,7 +17,7 @@ import (
 )
 
 // The contract schemas are those of the catalogs (contracts/ of each
-// repository of platform/catalog.yaml), the ones the compiler checks the
+// repository of catalogs.yaml), the ones the compiler checks the
 // connections against. The same document drives the form rendered by the
 // console (converted to a ContractDescriptor), the server-side validation
 // of submitted values, and the address shown for a connection of that
@@ -38,14 +38,20 @@ type ContractCatalog interface {
 	// set. Called before Validate, on both create and update.
 	Normalize(typeName string, values map[string]any) map[string]any
 	// ValidatePublic checks the non-secret values, as they are written to the
-	// connection file, against the contract's JSON Schema itself.
+	// connection's entry, against the contract's JSON Schema itself.
 	ValidatePublic(typeName string, values map[string]any) error
+	// ValidateClaimRequest checks what a claim requests against the
+	// contract's claim schema (x-okdp-claim); a contract without one takes
+	// no request.
+	ValidateClaimRequest(typeName string, request map[string]any) error
 }
 
 type embeddedCatalog struct {
 	types   []models.ContractDescriptor
 	byName  map[string]*models.ContractDescriptor
 	schemas map[string]*jsonschema.Schema
+	// claims are the compiled claim schemas (x-okdp-claim), by contract.
+	claims map[string]*jsonschema.Schema
 }
 
 // NewContractCatalog loads the contracts of a directory of contract
@@ -56,7 +62,7 @@ func NewContractCatalog(contractsFS fs.FS) (ContractCatalog, error) {
 		return nil, fmt.Errorf("failed to read the contracts: %w", err)
 	}
 
-	c := &embeddedCatalog{byName: map[string]*models.ContractDescriptor{}, schemas: map[string]*jsonschema.Schema{}}
+	c := &embeddedCatalog{byName: map[string]*models.ContractDescriptor{}, schemas: map[string]*jsonschema.Schema{}, claims: map[string]*jsonschema.Schema{}}
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".schema.json") {
@@ -76,6 +82,13 @@ func NewContractCatalog(contractsFS fs.FS) (ContractCatalog, error) {
 		compiled, err := compileSchema(entry.Name(), raw)
 		if err != nil {
 			return nil, fmt.Errorf("invalid contract %s: %w", entry.Name(), err)
+		}
+		if ct.ClaimSchema != nil {
+			claim, err := compileClaimSchema(entry.Name(), ct.ClaimSchema)
+			if err != nil {
+				return nil, fmt.Errorf("invalid contract %s: x-okdp-claim: %w", entry.Name(), err)
+			}
+			c.claims[ct.Name] = claim
 		}
 		c.types = append(c.types, *ct)
 		c.schemas[ct.Name] = compiled
@@ -106,6 +119,16 @@ func compileSchema(name string, raw []byte) (*jsonschema.Schema, error) {
 	return compiler.Compile(name)
 }
 
+// compileClaimSchema compiles a contract's claim schema, in the draft of
+// the contract.
+func compileClaimSchema(name string, claim map[string]any) (*jsonschema.Schema, error) {
+	raw, err := json.Marshal(claim)
+	if err != nil {
+		return nil, err
+	}
+	return compileSchema("https://okdp.io/schemas/contracts/"+strings.TrimSuffix(name, ".schema.json")+".claim.schema.json", raw)
+}
+
 // contractSchema is the part of a contract schema the console form needs.
 type contractSchema struct {
 	Title        string                    `json:"title"`
@@ -115,7 +138,7 @@ type contractSchema struct {
 	Category     string                    `json:"x-okdp-category"`
 	External     bool                      `json:"x-okdp-external"`
 	EndpointFrom []string                  `json:"x-okdp-endpoint-from"`
-	Internal     map[string]any            `json:"x-okdp-internal"`
+	Claim        map[string]any            `json:"x-okdp-claim"`
 	Required     []string                  `json:"required"`
 	Properties   map[string]propertySchema `json:"properties"`
 }
@@ -187,8 +210,8 @@ func descriptorFromSchema(raw []byte) (*models.ContractDescriptor, error) {
 		Icon:         cs.Icon,
 		Category:     cs.Category,
 		External:     cs.External,
-		Internal:     len(cs.Internal) > 0,
 		EndpointFrom: cs.EndpointFrom,
+		ClaimSchema:  cs.Claim,
 	}
 	for _, name := range order {
 		p := cs.Properties[name]
@@ -273,6 +296,34 @@ func (c *embeddedCatalog) ValidatePublic(typeName string, values map[string]any)
 	}
 	if err := sch.Validate(doc); err != nil {
 		return fmt.Errorf("the values do not satisfy the %s contract: %v", typeName, err)
+	}
+	return nil
+}
+
+func (c *embeddedCatalog) ValidateClaimRequest(typeName string, request map[string]any) error {
+	if _, ok := c.byName[typeName]; !ok {
+		return fmt.Errorf("unknown contract %q", typeName)
+	}
+	sch, ok := c.claims[typeName]
+	if !ok {
+		if len(request) > 0 {
+			return fmt.Errorf("the %s contract declares no claim schema (x-okdp-claim): a claim requests nothing of it", typeName)
+		}
+		return nil
+	}
+	if request == nil {
+		request = map[string]any{}
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	if err := sch.Validate(doc); err != nil {
+		return fmt.Errorf("the request does not meet the %s contract's claim schema (x-okdp-claim): %v", typeName, err)
 	}
 	return nil
 }
@@ -497,6 +548,9 @@ func (c *catalogContracts) Normalize(typeName string, values map[string]any) map
 }
 func (c *catalogContracts) ValidatePublic(typeName string, values map[string]any) error {
 	return c.get().ValidatePublic(typeName, values)
+}
+func (c *catalogContracts) ValidateClaimRequest(typeName string, request map[string]any) error {
+	return c.get().ValidateClaimRequest(typeName, request)
 }
 
 // emptyFS is a directory with nothing in it.

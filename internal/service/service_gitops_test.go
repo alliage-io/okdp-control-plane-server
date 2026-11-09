@@ -9,6 +9,7 @@ import (
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,11 +105,11 @@ func trinoSchema() map[string]any {
 func newGitServiceUnderTest(t *testing.T, engine repository.EngineAdapter, descriptors repository.DescriptorRepository) (*DefaultServiceService, *gitops.MemoryStore) {
 	t.Helper()
 	store := gitops.NewMemoryStore(map[string]string{
-		gitops.PlatformValuesPath:                 "{}\n",
-		"projects/demo/connections/lake-hms.yaml": "connections:\n  lake-hms:\n    contract: hive\n    thriftUri: thrift://hms:9083\n",
+		compiler.PlatformFile:        "{}\n",
+		"projects/demo/project.yaml": "connections:\n  lake-hms:\n    contract: hive\n    thriftUri: thrift://hms:9083\n",
 	})
 	svc := NewDefaultServiceService(ServiceDeps{
-		Deployments:   gitops.NewDeployments(store, nil),
+		Deployments:   gitops.NewDeployments(store),
 		PlatformRepo:  stubPlatform{},
 		SchemaService: stubSchema{schema: trinoSchema()},
 		Engine:        engine,
@@ -140,9 +141,9 @@ func TestDeployCommitsTheInstanceFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	files := store.Files()
-	assert.Equal(t, "name: sql\nproject: demo\nservice: trino\nversion: 480.0.0-p21\nconnections:\n  - lake-hms\n", files["projects/demo/services/sql/instance.yaml"],
-		"the external connection the parameters name is layered in; the internal one (demo-hive) is not a file")
-	assert.Contains(t, files["projects/demo/services/sql/values.yaml"], "workers: 2")
+	assert.Equal(t, "service: trino\nversion: 480.0.0-p21\n", files["projects/demo/instances/sql/instance.yaml"])
+	assert.Contains(t, files["projects/demo/instances/sql/config.yaml"], "workers: 2")
+	assert.Contains(t, files["projects/demo/instances/sql/config.yaml"], "hive: lake-hms", "a connection is named in the parameters only")
 	assertNoOutput(t, files)
 	assert.Equal(t, "okdp: deploy demo/sql by alice"+coAuthor, store.Messages[len(store.Messages)-1])
 	assert.Equal(t, &gitops.Signature{Name: "Alice Martin", Email: "alice@example.com"}, store.Commits[len(store.Commits)-1].Author)
@@ -151,60 +152,12 @@ func TestDeployCommitsTheInstanceFiles(t *testing.T) {
 	assert.Equal(t, repository.PhasePending, instance.Status, "committed, the engine has not seen it yet")
 	assert.NotEmpty(t, instance.Revision)
 
-	// What the CI compiles from the sources committed.
-	compileAll(t, svc.deployments)
-	files = store.Files()
-	compiled := files["compiled/projects/demo/services/sql/values.yaml"]
-	assert.Contains(t, compiled, "workers: 2")
-	assert.Contains(t, compiled, "thriftUri: thrift://hms:9083", "the connection is compiled in")
-	assert.Contains(t, files["compiled/projects/demo/services/sql/helmrelease.yaml"], `name: "values-demo-sql"`)
-	assert.Contains(t, files, "compiled/projects/demo/services/sql/kustomization.yaml")
-
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql"})
 	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
 }
 
-// Picking an output another instance publishes (a managed connection of the
-// picker), whatever its contract, writes its name in the parameter only:
-// instance.yaml lists the project's connection files the parameters name,
-// and an output is none.
-func TestAnOutputPickedIsWrittenInTheParameterOnly(t *testing.T) {
-	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
-	schema := trinoSchema()
-	schema["properties"].(map[string]any)["storage"] = map[string]any{"type": "string", "x-okdp-connection-ref": map[string]any{"contract": "s3"}}
-	svc.schemaService = stubSchema{schema: schema}
-	const instanceFile = "name: sql\nproject: demo\nservice: trino\nversion: 480.0.0-p21\nconnections:\n  - lake-hms\n"
-
-	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql", Parameters: map[string]any{
-		"storage":  "demo-store-lake",
-		"catalogs": []any{map[string]any{"name": "lake", "hive": "lake-hms"}},
-	}})
-	require.NoError(t, err)
-	files := store.Files()
-	assert.Equal(t, instanceFile, files["projects/demo/services/sql/instance.yaml"])
-	assert.Contains(t, files["projects/demo/services/sql/values.yaml"], "storage: demo-store-lake\n")
-
-	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "sql", models.ServiceUpdateRequest{Parameters: map[string]any{"storage": "demo-pg-lake"}})
-	require.NoError(t, err)
-	files = store.Files()
-	assert.Equal(t, instanceFile, files["projects/demo/services/sql/instance.yaml"])
-	assert.Contains(t, files["projects/demo/services/sql/values.yaml"], "storage: demo-pg-lake\n")
-}
-
-// compileAll is what a CI runs on each commit of the sources: okdp-gitops
-// compile, the whole output from the sources, in one commit.
-func compileAll(t *testing.T, d *gitops.Deployments) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := d.Store.Update(ctx, gitops.Commit{Subject: "okdp: compile"}, func(tx gitops.Tx) error {
-		return d.CompileRepository(ctx, tx)
-	})
-	require.NoError(t, err)
-}
-
-// assertNoOutput fails for each file of the output (compiled/, flux/,
-// argocd/) in files: the console commits the sources only, the CI writes
-// the output.
+// assertNoOutput fails for each file of the output (compiled/, argocd/) in
+// files: the console commits the tree only, the CI writes the output.
 func assertNoOutput(t *testing.T, files map[string]string) {
 	t.Helper()
 	for p := range files {
@@ -259,11 +212,10 @@ func TestUpdateMergesIntoValuesAndMovesTheVersion(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	values := store.Files()["projects/demo/services/trino/values.yaml"]
+	values := store.Files()["projects/demo/instances/trino/config.yaml"]
 	assert.Contains(t, values, "workers: 2", "keys not submitted are kept")
 	assert.Contains(t, values, "hive: lake-hms")
-	assert.Contains(t, store.Files()["projects/demo/services/trino/instance.yaml"], "version: 481.0.0-p01")
-	assert.Contains(t, store.Files()["projects/demo/services/trino/instance.yaml"], "- lake-hms")
+	assert.Equal(t, "service: trino\nversion: 481.0.0-p01\n", store.Files()["projects/demo/instances/trino/instance.yaml"])
 	assert.Equal(t, "okdp: update demo/trino by alice"+coAuthor, store.Messages[len(store.Messages)-1])
 	assertNoOutput(t, store.Files())
 	assert.Equal(t, repository.PhaseUpdating, instance.Status, "the engine still runs the previous version")
@@ -294,11 +246,12 @@ func TestListAssemblesGitAndClusterState(t *testing.T) {
 	}}}
 	svc, _ := newGitServiceUnderTest(t, engine, descriptors)
 	d := svc.deployments
-	for _, st := range []gitops.InstanceState{
-		{Instance: gitops.Instance{Name: "hive", Project: "demo", Service: "hive-metastore", Chart: "oci://r/hive-metastore", Version: "1.0.0"}},
-		{Instance: gitops.Instance{Name: "sql", Project: "demo", Service: "trino", Chart: "oci://r/trino", Version: "480.0.0-p21"},
+	for _, st := range []gitops.Instance{
+		{Name: "hive", Project: "demo", Service: "hive-metastore", Version: "1.0.0"},
+		{Name: "sql", Project: "demo", Service: "trino", Version: "480.0.0-p21",
 			Values: map[string]any{"catalogs": []any{map[string]any{"hive": "demo-hive"}}}},
-		{Instance: gitops.Instance{Name: "new", Project: "demo", Service: "trino", Chart: "oci://r/trino", Version: "480.0.0-p21"}},
+		{Name: "new", Project: "demo", Service: "trino", Version: "480.0.0-p21",
+			Values: map[string]any{"catalogs": []any{map[string]any{"hive": "lake-hms"}}}},
 	} {
 		_, err := d.CreateInstance(context.Background(), auth.Actor{Username: "bob"}, st)
 		require.NoError(t, err)
@@ -324,26 +277,28 @@ func TestListAssemblesGitAndClusterState(t *testing.T) {
 
 	assert.Equal(t, "Pending", byName["new"].Status)
 	assert.True(t, strings.Contains(byName["new"].StatusMessage, "flux"))
+	assert.Equal(t, []models.ServiceConnection{{Name: "lake-hms", Namespace: "demo", Kind: models.ConnectionKindExternal, Resolved: true}}, byName["new"].Connections,
+		"a connection of the project the parameters name")
 }
 
 func TestDeleteRemovesTheInstanceDirectory(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino"})
 	require.NoError(t, err)
-	compileAll(t, svc.deployments)
-	const compiled = "compiled/projects/demo/services/trino/helmrelease.yaml"
-	require.Contains(t, store.Files(), compiled)
+	// What a CI compiled: the output is the CI's to remove.
+	const compiled = "compiled/projects/demo/instances/demo-trino/helmrelease.yaml"
+	_, err = store.Update(context.Background(), gitops.Commit{Subject: "okdp: compile"}, func(tx gitops.Tx) error {
+		return tx.WriteFile(compiled, []byte("kind: HelmRelease\n"))
+	})
+	require.NoError(t, err)
 
 	require.NoError(t, svc.DeleteService(aliceContext(), "demo", "trino"))
 	for p := range store.Files() {
-		assert.False(t, strings.HasPrefix(p, "projects/demo/services/trino/"), "left behind: %s", p)
+		assert.False(t, strings.HasPrefix(p, "projects/demo/instances/trino/"), "left behind: %s", p)
 	}
 	assert.Equal(t, "okdp: delete demo/trino by alice"+coAuthor, store.Messages[len(store.Messages)-1])
 	assert.Contains(t, store.Files(), compiled, "the output is the CI's to remove")
 	assert.True(t, apierrors.IsNotFound(svc.DeleteService(aliceContext(), "demo", "trino")))
-
-	compileAll(t, svc.deployments)
-	assert.NotContains(t, store.Files(), compiled, "the next compile prunes it")
 }
 
 func TestWatchStreamsTheConsoleCommitsAndEngineChanges(t *testing.T) {
@@ -387,15 +342,6 @@ func next(t *testing.T, stream <-chan ServiceEvent) ServiceEvent {
 	}
 }
 
-func TestReferencedConnectionsOnlyMatchesDeclaredOnes(t *testing.T) {
-	values := map[string]any{
-		"engine":   "warehouse",
-		"catalogs": []any{map[string]any{"hive": "lake"}, "other"},
-	}
-	got := referencedConnections(values, map[string]bool{"lake": true, "warehouse": true, "unused": true})
-	assert.Equal(t, []string{"lake", "warehouse"}, got)
-}
-
 func TestInstanceStatusVocabulary(t *testing.T) {
 	inst := gitops.Instance{Version: "2.0.0"}
 	status, msg := instanceStatus(inst, repository.EngineStatus{}, "argocd")
@@ -432,7 +378,7 @@ func TestMergePatchFollowsRFC7386(t *testing.T) {
 	assert.Equal(t, map[string]any{}, MergePatch(map[string]any{"a": float64(1)}, map[string]any{"a": nil}))
 }
 
-func TestPatchWithNullDeletesFromValuesYAML(t *testing.T) {
+func TestPatchWithNullDeletesFromConfigYAML(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{
 		"workers":  float64(2),
@@ -444,7 +390,7 @@ func TestPatchWithNullDeletesFromValuesYAML(t *testing.T) {
 		Parameters: map[string]any{"catalogs": []any{map[string]any{"name": "c"}}},
 	})
 	require.NoError(t, err)
-	values := store.Files()["projects/demo/services/trino/values.yaml"]
+	values := store.Files()["projects/demo/instances/trino/config.yaml"]
 	assert.Contains(t, values, "name: c")
 	assert.NotContains(t, values, "name: a", "arrays replace, they do not merge")
 
@@ -452,7 +398,7 @@ func TestPatchWithNullDeletesFromValuesYAML(t *testing.T) {
 		Parameters: map[string]any{"workers": nil, "catalogs": nil},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "{}\n", store.Files()["projects/demo/services/trino/values.yaml"])
+	assert.Equal(t, "{}\n", store.Files()["projects/demo/instances/trino/config.yaml"])
 
 	// Validation runs on the merged result: removing a required key is refused.
 	svc.schemaService = stubSchema{schema: map[string]any{
@@ -463,8 +409,9 @@ func TestPatchWithNullDeletesFromValuesYAML(t *testing.T) {
 	assert.True(t, IsValidationError(err), "got %v", err)
 }
 
-// The chart's defaults apply at render time; values.yaml holds only what the
-// user submitted, never the schema's defaults.
+// The chart's defaults apply at render time; config.yaml holds only what the
+// user submitted, never the schema's defaults, and an instance without
+// values has none.
 func TestDeployWritesOnlyTheSubmittedParameters(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
 	svc.schemaService = stubSchema{schema: map[string]any{
@@ -477,16 +424,21 @@ func TestDeployWritesOnlyTheSubmittedParameters(t *testing.T) {
 	}}
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "a", Parameters: map[string]any{"memory": "8Gi"}})
 	require.NoError(t, err)
-	assert.Equal(t, "memory: 8Gi\n", store.Files()["projects/demo/services/a/values.yaml"])
+	assert.Equal(t, "memory: 8Gi\n", store.Files()["projects/demo/instances/a/config.yaml"])
 
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "b"})
 	require.NoError(t, err)
-	assert.Equal(t, "{}\n", store.Files()["projects/demo/services/b/values.yaml"])
+	assert.Contains(t, store.Files(), "projects/demo/instances/b/instance.yaml")
+	assert.NotContains(t, store.Files(), "projects/demo/instances/b/config.yaml")
 }
 
 func TestReleaseNameCollisionIsNotADuplicateInstance(t *testing.T) {
-	svc, _ := newGitServiceUnderTest(t, stubEngine{}, nil)
-	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql-x"})
+	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	_, err := store.Update(context.Background(), gitops.Commit{Subject: "a project"}, func(tx gitops.Tx) error {
+		return tx.WriteFile("projects/demo-sql/project.yaml", []byte("{}\n"))
+	})
+	require.NoError(t, err)
+	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql-x"})
 	require.NoError(t, err)
 
 	_, err = svc.DeployService(aliceContext(), "demo-sql", models.ServiceRequest{Service: "trino", InstanceName: "x"})
@@ -499,21 +451,17 @@ func TestReleaseNameCollisionIsNotADuplicateInstance(t *testing.T) {
 	assert.False(t, IsReleaseNameTaken(err))
 }
 
-// A refused compile is a validation error with its code, and commits nothing.
+// A refused compile is a validation error with its code, and commits
+// nothing: the tree has no catalog, the package of the instance is in none.
 func TestDeployThatDoesNotCompileIsRefusedWithItsCode(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
-	svc.deployments.Compiler = refusingCompiler{}
+	svc.deployments.Compiler = gitops.NewCompiler(&catalog.Loader{})
 	before := len(store.Messages)
 
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql"})
 	require.True(t, IsValidationError(err), "got %v", err)
 	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err))
-	assert.Equal(t, "instance demo/sql does not compile: workers: must be >= 1", err.Error())
+	assert.True(t, strings.HasPrefix(err.Error(), "instance demo/sql does not compile: "), err.Error())
+	assert.Contains(t, err.Error(), `service "trino" is in the catalog of no repository`)
 	assert.Len(t, store.Messages, before)
-}
-
-type refusingCompiler struct{}
-
-func (refusingCompiler) Compile(_ context.Context, _ gitops.Reader, st gitops.InstanceState, _ map[string]compiler.Info) (*gitops.Compiled, error) {
-	return nil, &gitops.CompileError{Project: st.Instance.Project, Instance: st.Instance.Name, Err: errors.New("workers: must be >= 1")}
 }

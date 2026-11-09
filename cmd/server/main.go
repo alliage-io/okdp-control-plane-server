@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/charts"
-	"github.com/okdp/okdp-gitops/compile"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/sirupsen/logrus"
 
@@ -83,9 +82,10 @@ func main() {
 
 	// The deployments Git repositories, the only desired-state store: the
 	// platform, the projects and the output, where the topology says. The
-	// console commits the sources (platform/, projects/) only; a CI running
-	// okdp-gitops compile on each of their commits writes the output. The
-	// commits a user authors name the server in their co-author trailer.
+	// console commits the tree (platform.yaml, catalogs.yaml, projects/)
+	// only; a CI running okdp-gitops compile on each of their commits writes
+	// the output. The commits a user authors name the server in their
+	// co-author trailer.
 	gitops.Program = buildinfo.Program
 	if err := cfg.GitOps.Validate(); err != nil {
 		logrus.Fatalf("Invalid GitOps configuration: %v", err)
@@ -98,18 +98,17 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Failed to prepare the deployments repositories: %v", err)
 	}
-	// The packages come from the catalogs platform/catalog.yaml names, git
+	// The packages come from the catalogs catalogs.yaml names, git
 	// repositories fetched at their ref, on the host of the platform's
-	// repository with its credentials. Every write compiles the instances it
-	// changes, as a check: the packages with okdp-compiler, checked against
-	// their upstream charts (the chart cache), the plain charts with their
-	// values layers.
+	// repository with its credentials. Every write is checked by a compile
+	// of the whole tree with okdp-compiler (okdp-gitops: each claim bound to
+	// its provider, of any namespace), against the upstream charts (the
+	// chart cache); the read paths get the same compile (deployments.Tree).
 	catalogs := &catalog.Loader{Auth: gitops.CatalogAuth(topology.Platform.URL, cfg.GitOps.CredentialsDir, cfg.GitOps.InsecureIgnoreHostKey)}
 	chartCache := charts.NewCache(cfg.GitOps.ChartCacheDir, charts.NewRepositoryPuller(cfg.InsecureOCIRegistries))
-	compiler := compile.New(catalogs)
-	compiler.Charts = chartCache
-	deployments.Compiler = compiler
-	catalogSource := compile.CatalogSource(deployments, catalogs)
+	deployments.Compiler = gitops.NewCompiler(catalogs)
+	deployments.Compiler.Charts = chartCache
+	catalogSource := deployments.Catalogs
 	var engine repository.EngineAdapter
 	switch cfg.GitOps.Engine {
 	case config.EngineArgoCD:
@@ -127,10 +126,10 @@ func main() {
 	projectService := service.NewDefaultProjectService(projectNamespaces, deployments)
 	projectHandler := handlers.NewProjectHandler(projectService)
 
-	// Platform configuration: the platform values (global.okdp) and the
-	// service catalog (platform/catalog.yaml). Shared by capabilities, catalog
-	// and Spark.
-	contextRepo := repository.NewPlatformRepository(k8sTypedClient, cfg.GitOps.ReleasesNamespace, deployments)
+	// Platform configuration: the platform values (platform.yaml, its
+	// global.okdp) and the service catalog (catalogs.yaml). Shared by
+	// capabilities, catalog and Spark.
+	contextRepo := repository.NewPlatformRepository(deployments)
 	catalogWriter := repository.NewCatalogWriterRepository(deployments)
 
 	// Initialize Identity stack: users and groups in the platform Keycloak
@@ -166,6 +165,20 @@ func main() {
 	externalSecretService := service.NewDefaultExternalSecretService(externalSecretRepo, secretStoreRepo)
 	externalSecretHandler := handlers.NewExternalSecretHandler(externalSecretService)
 
+	// The contracts are the catalogs' (contracts/ of each repository): the
+	// connection forms, and what a claim may request (x-okdp-claim).
+	contractCatalog := service.NewCatalogContracts(func(ctx context.Context) (fs.FS, error) {
+		cats, err := catalogSource(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return cats.Contracts()
+	})
+	// Claims: the named claims of the projects, the classes a claim may be
+	// of, the claims of an instance, bound by the compile of the tree.
+	claimService := service.NewDefaultClaimService(deployments, contractCatalog)
+	claimHandler := handlers.NewClaimHandler(claimService)
+
 	// Initialize Service stack (instances in Git, status from the cluster)
 	schemaService := service.NewDefaultPackageSchemaService(contextRepo, catalogSource)
 	// OIDC client provisioning (backend selected per call from the platform values)
@@ -181,6 +194,7 @@ func main() {
 		K8sClient:       k8sClient,
 		TypedClient:     k8sTypedClient,
 		SidecarPrefixes: cfg.ExcludedSidecarPrefixes,
+		Claims:          claimService,
 	})
 	serviceHandler := handlers.NewServiceHandler(serviceService, schemaService)
 	// What each chart of an instance is rendered with: its compiled values
@@ -192,16 +206,9 @@ func main() {
 	sparkService := service.NewDefaultSparkService(sparkRepo, contextRepo, k8sTypedClient)
 	sparkHandler := handlers.NewSparkHandler(sparkService)
 
-	// Initialize Connection stack (external connections declared in Git +
-	// internal ones published by the instances deployed in a project)
-	// The contracts are the catalogs' (contracts/ of each repository).
-	contractCatalog := service.NewCatalogContracts(func(ctx context.Context) (fs.FS, error) {
-		cats, err := catalogSource(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return cats.Contracts()
-	})
+	// Initialize Connection stack (connections declared in Git, the
+	// project's and the platform's, + internal ones published by the
+	// instances deployed in a project)
 	connectionSecrets := repository.NewConnectionSecretRepository(k8sTypedClient)
 	connectionService := service.NewDefaultConnectionService(deployments, connectionSecrets, descriptors, serviceService.ListServices, contractCatalog)
 	connectionHandler := handlers.NewConnectionHandler(connectionService)
@@ -230,7 +237,7 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	r := router.SetupRouter(cfg, verifier, capabilitiesHandler, projectHandler, identityHandler, secretStoreHandler, externalSecretHandler, serviceHandler, sparkHandler, connectionHandler, sqlHandler)
+	r := router.SetupRouter(cfg, verifier, capabilitiesHandler, projectHandler, identityHandler, secretStoreHandler, externalSecretHandler, serviceHandler, sparkHandler, connectionHandler, sqlHandler, claimHandler)
 
 	// Start Server
 	//
@@ -375,7 +382,7 @@ func buildDeployments(cfg config.GitOpsConfig, topology *gitops.Topology) (*gito
 			CloneDir:    cloneDir,
 		})
 	}
-	d := gitops.NewDeployments(gitops.NewRepositories(topology, open), gitops.NewDefaultFluxRenderer())
+	d := gitops.NewDeployments(gitops.NewRepositories(topology, open))
 	if topology.Forgejo != nil {
 		d.Forgejo = gitops.NewForgejoClient(*topology.Forgejo)
 	}

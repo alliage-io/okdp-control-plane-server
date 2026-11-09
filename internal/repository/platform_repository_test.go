@@ -7,15 +7,12 @@ import (
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-gitops/gitops"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 // newContextWith builds a platform repository whose global.okdp is the given
-// body, served by the okdp-platform-values ConfigMap; a serviceCatalog key
-// becomes platform/catalog.yaml in Git instead, where the catalog now lives.
+// body, platform.yaml in Git; a serviceCatalog key becomes catalogs.yaml.
 func newContextWith(t *testing.T, body map[string]interface{}) PlatformRepository {
 	t.Helper()
 	values := map[string]interface{}{}
@@ -26,7 +23,7 @@ func newContextWith(t *testing.T, body map[string]interface{}) PlatformRepositor
 			if err != nil {
 				t.Fatal(err)
 			}
-			files[gitops.CatalogPath] = string(catalog)
+			files[gitops.CatalogsFile] = string(catalog)
 			continue
 		}
 		values[k] = v
@@ -35,11 +32,8 @@ func newContextWith(t *testing.T, body map[string]interface{}) PlatformRepositor
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := fake.NewSimpleClientset(&corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: gitops.PlatformValuesConfigMap, Namespace: gitops.ReleasesNamespace},
-		Data:       map[string]string{gitops.ValuesKey: string(raw)},
-	})
-	return NewPlatformRepository(client, gitops.ReleasesNamespace, gitops.NewDeployments(gitops.NewMemoryStore(files), nil))
+	files[compiler.PlatformFile] = string(raw)
+	return NewPlatformRepository(gitops.NewDeployments(gitops.NewMemoryStore(files)))
 }
 
 func TestGetMenuCategories(t *testing.T) {

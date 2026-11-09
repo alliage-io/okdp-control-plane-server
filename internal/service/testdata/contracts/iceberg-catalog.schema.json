@@ -9,10 +9,6 @@
   "x-okdp-category": "catalog",
   "x-okdp-external": true,
   "x-okdp-endpoint-from": ["internalUri", "uri"],
-  "x-okdp-internal": {
-    "uri": "https://polaris-${namespace}.${suffix}/api/catalog",
-    "internalUri": "http://${ref}-polaris.${namespace}.svc:8181/api/catalog"
-  },
   "properties": {
     "uri": {
       "type": "string",

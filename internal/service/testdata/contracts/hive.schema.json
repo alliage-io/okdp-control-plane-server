@@ -9,9 +9,6 @@
   "x-okdp-category": "catalog",
   "x-okdp-external": true,
   "x-okdp-endpoint-from": ["thriftUri"],
-  "x-okdp-internal": {
-    "thriftUri": "thrift://${ref}-hive-metastore.${namespace}.svc:9083"
-  },
   "properties": {
     "thriftUri": {
       "type": "string",

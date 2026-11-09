@@ -56,12 +56,12 @@ const (
 type GitOpsConfig struct {
 	// ConfigFile is the topology file (GITOPS_CONFIG): where the platform,
 	// the projects and the output live. Without it, RepoURL, Branch and Path
-	// hold the whole layout (mono).
+	// hold the whole tree (mono).
 	ConfigFile string
 	// RepoURL is the deployments repository (https://, ssh:// or git@host:path).
 	RepoURL string
 	Branch  string
-	// Path is the directory of the repository holding the layout, empty for the root.
+	// Path is the directory of the repository holding the tree, empty for the root.
 	Path string
 	// CredentialsDir holds the mounted credentials Secret (Flux GitRepository
 	// keys: username/password, bearerToken, or identity/known_hosts).
@@ -80,8 +80,8 @@ type GitOpsConfig struct {
 	ChartCacheDir string
 	// Engine is flux or argocd: which objects carry the render/sync status.
 	Engine string
-	// ReleasesNamespace holds the Flux HelmReleases and the values ConfigMaps,
-	// including okdp-platform-values.
+	// ReleasesNamespace holds the Flux HelmReleases and their values
+	// ConfigMaps.
 	ReleasesNamespace string
 	// ArgoCDNamespace holds the Argo CD Applications.
 	ArgoCDNamespace string
@@ -98,8 +98,8 @@ func (g GitOpsConfig) Validate() error {
 	return nil
 }
 
-// Topology returns where the parts of the layout live: the GITOPS_CONFIG
-// file, else the layout under GITOPS_PATH of GITOPS_REPO_URL (mono).
+// Topology returns where the parts of the tree live: the GITOPS_CONFIG
+// file, else the tree under GITOPS_PATH of GITOPS_REPO_URL (mono).
 func (g GitOpsConfig) Topology() (*gitops.Topology, error) {
 	if g.ConfigFile != "" {
 		return gitops.LoadTopology(g.ConfigFile)

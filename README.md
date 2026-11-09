@@ -55,12 +55,12 @@ Project layout:
 - `internal/config`: configuration loaded from environment variables.
 - `chart/`: Helm chart.
 
-The deployments repositories (topology, go-git writer, layout, the write operations on
-the sources, Flux and Argo CD files), the catalogs of packages, the compile of an
-instance with okdp-compiler and the chart cache are the packages `gitops`, `catalog`,
-`compile` and `charts` of [okdp-gitops](https://github.com/OKDP/okdp-gitops), a module of
-its own (`go.mod` replaces it with `../okdp-gitops`, a checkout next to this one, until
-it is published).
+The deployments repositories (topology, go-git writer, the transactions on the tree, each
+checked by a compile of the whole tree), the compile of the tree with okdp-compiler (each
+instance's outcome, the claims bound to each provider), the catalogs of packages and the
+chart cache are the packages `gitops`, `catalog` and `charts` of
+[okdp-gitops](https://github.com/OKDP/okdp-gitops), a module of its own (`go.mod` replaces
+it with `../okdp-gitops`, a checkout next to this one, until it is published).
 
 ---
 
@@ -72,7 +72,7 @@ it is published).
 
 > **OKDP deployment context:** the server runs **in-cluster**. **Git is the only
 > desired-state store**: the server never creates HelmReleases, Applications or workloads;
-> it commits the sources to the deployments repositories, a CI running `okdp-gitops
+> it commits the tree to the deployments repositories, a CI running `okdp-gitops
 > compile` on each of their commits writes the output, and a GitOps engine (FluxCD or
 > Argo CD) deploys each instance from its compiled directory in the output repository, the
 > same under both engines. What an instance publishes (its URL, its usage, the connections
@@ -81,51 +81,53 @@ it is published).
 > render/sync errors. There is no database; the local clones are a cache. Authentication
 > (OIDC) is verified on every `/api` call; TLS is provided by the platform ingress.
 
-The layout has three parts, each in the repository the topology says (below):
+The tree is okdp-compiler's
+([repository layout](https://github.com/OKDP/okdp-compiler/blob/main/docs/01_usage.md#repository-layout)),
+its parts each in the repository the topology says (below):
 
 ```
-platform/catalog.yaml                                   # the catalogs (repositories) and the console menu
-platform/projects.yaml                                  # split topology: the projects
-projects/<project>/project.yaml                         # {name, description, …}: declares the project
-projects/<project>/connections/<name>.yaml              # external connection (credentials stay in a Secret)
-projects/<project>/services/<instance>/instance.yaml    # service and version of a package (or a plain chart), connection files
-projects/<project>/services/<instance>/values.yaml      # the submitted parameters only
-compiled/projects/<project>/kustomization.yaml          # Flux: the compiled services
-compiled/projects/<project>/services/<instance>/        # okdp-compiler's umbrella chart (Chart.yaml, instance.values.yaml,
-                                                        # okdp.objects.yaml, okdp.info.yaml),
-                                                        # helmrelease.yaml, kustomization.yaml (Flux), application.yaml (Argo CD)
+platform.yaml                                           # the platform: global.okdp, the classes of the claims, the platform's connections
+catalogs.yaml                                           # okdp-gitops': the catalogs (repositories) and the console menu
+projects.yaml                                           # okdp-gitops', split topology: the projects
+projects/<project>/project.yaml                         # declares the project: its globals, classes, connections, named claims
+projects/<project>/instances/<instance>/instance.yaml   # {service, version}: the package
+projects/<project>/instances/<instance>/config.yaml     # the submitted parameters only (none without parameters)
+compiled/projects/<project>/instances/<project>-<instance>/
+                                                        # okdp-compiler's umbrella chart (Chart.yaml, instance.values.yaml,
+                                                        # okdp.objects.yaml, okdp.info.yaml), helmrelease.yaml,
+                                                        # kustomization.yaml (Flux), application.yaml (Argo CD)
 ```
 
-`projects/` and `platform/` hold what people and the console write (the sources);
-`compiled/` (with `flux/` and `argocd/`, the output) is generated from them by
-okdp-gitops, in a CI on each commit of the sources, mirrors their paths, and is the only
-thing the engines read. The console never writes it: what it reads there (what an
+`platform.yaml`, `catalogs.yaml` and `projects/` hold what people and the console write
+(the tree); `compiled/` (the output) is generated from them by okdp-gitops, the files of
+okdp-compiler's Flux and Argo CD targets, in a CI on each commit of the tree, and is the
+only thing the engines read. The console never writes it: what it reads there (what an
 instance publishes, its compiled values) is what the last run wrote, and lags behind the
-sources for the time of a run. An instance directory may also hold
-the instance's own upstream values, `upstream.<key>.yaml` (written by hand; the server
-keeps them).
+tree for the time of a run. The platform's own services (the database servers, the
+ingress, the control plane) are instances of projects too: there are no platform
+components, and the deployment graph (connection references, claims) is the only order.
 
 ### Topology: where the parts live
 
 `GITOPS_CONFIG` names a topology file (the chart's `gitops.topology`):
 
 ```yaml
-platform: {url: <git url>, branch: main, path: platform}
+platform: {url: <git url>, branch: main, path: ""}   # the directory of platform.yaml, catalogs.yaml
 projects: {url: <git url, may contain {project}>, branch: main, path: "projects/{project}"}
-output:   {url: <git url>, branch: main, path: ""}   # the directory of compiled/, flux/, argocd/
+output:   {url: <git url>, branch: main, path: ""}   # the directory of compiled/ (and argocd/root.yaml)
 forgejo:                                             # optional: creates the repository of a new project
   url: http://forgejo-http.forgejo.svc.cluster.local:3000
   owner: okdp
   tokenFile: /etc/okdp/forgejo/token
 ```
 
-Without it, `GITOPS_REPO_URL`/`GITOPS_BRANCH`/`GITOPS_PATH` hold the whole layout (mono:
-platform `<path>/platform`, projects `<path>/projects/{project}`, output `<path>`). Sources
-and output may live apart (`io`: one repository of sources, one of output), and each
-project in a repository of its own (`split`: `projects.url` names `{project}`; the projects
-are listed in `platform/projects.yaml`, `projects: [{name: demo}]`, each entry optionally
-overriding `url`, `branch` or `path`). Without `{project}` in its url, `projects.path`
-ends with `/{project}`: the projects are the directories of its parent.
+Without it, `GITOPS_REPO_URL`/`GITOPS_BRANCH`/`GITOPS_PATH` hold the whole tree (mono:
+platform `<path>`, projects `<path>/projects/{project}`, output `<path>`). The tree and the
+output may live apart (`io`: one repository of the tree, one of output), and each project
+in a repository of its own (`split`: `projects.url` names `{project}`; the projects are
+listed in `projects.yaml`, beside `platform.yaml`, `projects: [{name: demo}]`, each entry
+optionally overriding `url`, `branch` or `path`). Without `{project}` in its url,
+`projects.path` ends with `/{project}`: the projects are the directories of its parent.
 
 A console change in one repository is one commit. Across repositories it is one commit per
 repository, with the same message: the projects' repositories, then the platform's (a
@@ -134,24 +136,25 @@ writes nothing to the output repository: the CI of the sources compiles each of 
 commits into it. In a split topology, creating a project creates
 `<owner>/okdp-project-<project>` through the Forgejo API (the token of `tokenFile`), pushes
 its `project.yaml` with the workflow `.forgejo/workflows/okdp-gitops.yaml` (its commits
-start the compile), then adds it to `platform/projects.yaml`; without a `forgejo` section
-that creation fails with a message saying so. Deleting it removes its entry (the next
-compile, its compiled tree); its repository is kept.
+start the compile), then adds it to `projects.yaml`; without a `forgejo` section that
+creation fails with a message saying so. Deleting it removes its entry (the next compile,
+its compiled tree); its repository is kept.
 
 Projects are the `projects/<project>/project.yaml` files (the namespace is the project
 name), whoever wrote them: a project declared by hand in Git is listed, served and edited
 by the console like one the console created (in a split topology, the projects of
-`platform/projects.yaml`), and `/api/projects/stream` reports the
-files as they change (read every few seconds). Creating a project from the console also
-creates its Namespace (label `okdp.io/project`) so it can hold Secrets before any
-deployment, and refuses a name that is already a Namespace without that label
-(`kube-system`, …). Deleting a project removes `projects/<project>/` (the compile of that
-commit removes its compiled tree, and the engine uninstalls its releases), then the
-Namespace only if it carries the label; a namespace
-the engine created is left, as when the directory is removed by hand. An update rewrites
-`description` and keeps the other keys and the comments of the file.
+`projects.yaml`), and `/api/projects/stream` reports the files as they change (read every
+few seconds). A project's description is the key `description` of its `project.yaml`,
+the project's own (okdp-compiler leaves it out of the context of the project's instances);
+an update rewrites that key and keeps the rest of the file. Creating a project from the console also creates its Namespace (label
+`okdp.io/project`) so it can hold Secrets before any deployment, and refuses a name that
+is already a Namespace without that label (`kube-system`, …). Deleting a project removes
+`projects/<project>/` (the compile of that commit removes its compiled tree, and the
+engine uninstalls its releases), refused while an instance of another project uses one of
+its instances, then the Namespace only if it carries the label; a namespace the engine
+created is left, as when the directory is removed by hand.
 
-Commits read `okdp: <action> <project>/<instance> by <user>`. The logged-in user is the
+Commits read `okdp: <action> <project>/<name> by <user>`. The logged-in user is the
 commit author; the configured GitOps identity (`GITOPS_AUTHOR_NAME` / `GITOPS_AUTHOR_EMAIL`)
 is the committer, and the server names itself as co-author in a trailer:
 
@@ -168,7 +171,7 @@ The trailer names the program (the last element of the Go module path) and its v
 (the server sets okdp-gitops' `gitops.Program` to its own), set at build time
 (`-ldflags "-X github.com/okdp/okdp-control-plane-server/internal/buildinfo.Version=<v>"`:
 the image build passes the release version as the `VERSION` build argument, `make build`
-passes `git describe`; `dev` otherwise), with the committer email. The author comes from
+passes `/usr/bin/git describe`; `dev` otherwise), with the committer email. The author comes from
 the access token: the `email` claim (Keycloak: the `email` client scope on the console
 client) and the `name` claim (the `profile` scope; the user name when absent). Without an
 email (the claim is missing or not an address, or authentication is disabled) the GitOps
@@ -177,54 +180,106 @@ no trailer, and the server logs a warning once per user. CR, LF, `<` and `>` are
 from the name and email. Writes are serialised and
 replayed on top of the new revision when someone else pushed in between.
 
-### Compiling an instance
+### Checking a write
 
-Every write compiles the instances it changes, inside the write, from the sources it
-writes, as a check: deploying or updating an instance compiles it; changing a connection
-file compiles the instances that layer it in; deleting an instance compiles the project's
-other instances, and refuses while one of them references it. A compile that fails
-commits nothing, and the API answers `400` with the compiler's message (code
-`does-not-compile`). The compiled files are not committed: the CI of the sources compiles
-the commit again, the whole layout, and writes them (below,
+Every write is checked, inside the write, by a compile of the whole tree it leaves
+(okdp-gitops: `compiler.LoadRepository` of the tree and the catalogs, `CompileAll`,
+`NewGraph`), compared with the compile of the tree before it: deploying or updating an
+instance, changing a connection, a named claim or a project. It is refused, nothing
+committed, when the instance it writes does not compile, when an instance that compiled
+before does not any more (a class, a named claim or a connection of a project reaches
+every instance of it, a claim binds across projects), or when the tree no longer loads;
+the API answers `400` with the compiler's message (code `does-not-compile`). Removing an
+instance, a connection, a named claim or a project is refused (`400`, naming them) while
+instances use it: they would not compile without it. The compiled files are not committed:
+the CI of the sources compiles the commit again, the whole tree, and writes them (below,
 [the output](#the-output-okdp-gitops)), so a commit made by hand and a console one are
 compiled the same way.
 
 An instance names a package: `service` and `version` in `instance.yaml`, the directory
 `catalog/<service>/<version>/` of a catalog (below). [okdp-compiler](https://github.com/OKDP/okdp-compiler)
-runs it on the instance's inputs, under the release `<project>-<instance>` in the namespace
-`<project>`:
+compiles it under the release `<project>-<instance>` in the namespace `<project>`, with the
+context of `platform.yaml` (level 0), its project's `project.yaml` (level 1: its globals,
+its classes, its connections, its named claims) and its own `connections.yaml` (level 2,
+rare), its values `config.yaml`, the contracts of the catalogs, what the other instances
+publish, each claim of a connection reference bound to the instance that provisions its
+contract, of any namespace. The parameters are checked against the package's
+`config.schema.json`, the connections against their contracts, and the values of each
+upstream chart computed; the instance is written as one chart, an umbrella over its
+upstream charts (`Chart.yaml`, `instance.values.yaml`, OKDP's own objects in
+`okdp.objects.yaml`, what it publishes in `okdp.info.yaml`). Each connection reference to
+another instance (an output it publishes, by its name, or a claim it provisions) becomes a
+`dependsOn` of the HelmRelease and a later Argo CD sync wave.
 
-| Input | From |
+The server compiles with a chart cache: it pulls each chart the umbrellas name, from its
+own repository (an OCI registry or an https chart repository, anonymously), into its chart
+cache (`GITOPS_CHART_CACHE_DIR`, laid out as okdp-compiler reads it,
+`<repository>/<chart>-<version>/<chart>/`), and compiles again with it (the chart's
+`values.schema.json`, the lists an instance appends to). A chart that cannot be fetched is
+logged and the tree compiled without the checks: never a failure. The compile of the same
+tree and catalog revisions is kept, for the reads that follow. The same cache gives the
+chart defaults of the rendered values view (`GET .../services/:serviceName/values`: each
+chart's defaults coalesced under its compiled values, the lines set by OKDP or the
+instance marked).
+
+### Connections
+
+A project's connections are the entries `connections.<name>` of its `project.yaml`:
+`contract`, `description`, the contract's fields, `secretRef: {name: <secret>}`, the
+Secret of the project namespace holding its credentials, which the console writes
+(`<name>-credentials`) or that was already there (projected from a vault). The platform's
+connections are the entries of `platform.yaml` (an S3 store or a database the platform
+uses and does not deploy, their credentials from the platform's secret store,
+`secretRef: {remoteKey: <key>}`): every instance may reference them, the deployment forms
+offer them (`GET .../connections/selectable`, scope `platform`), and the platform's
+administrators write them in Git; a project connection may not take the name of one. An
+instance references a connection by its name, in its parameters; nothing else lists it.
+
+### Claims
+
+A connection reference of a package (`x-okdp-connection-ref` with `provision: true`) may
+claim its connection instead of naming one: a database, a bucket of its own, which the
+instance that provisions the contract creates and publishes, under the claim's ID
+(`<project>.<release>.<parameter>`, `<project>.<name>` for a named claim), its credentials
+copied into the claimer's namespace through the platform's secret store
+(`global.okdp.secrets.store`) when the provider is of another one
+([okdp-compiler: claims](https://github.com/OKDP/okdp-compiler/blob/main/docs/specs/01_inputs_outputs.md#claims)):
+
+| Value of the parameter | Means |
 |---|---|
-| context, level 0 | `platform/platform-values.yaml`, then every `platform/connections/<name>.yaml` |
-| context, level 1 | the `global` and `connections` keys of `projects/<project>/project.yaml`, when set |
-| context, level 2 | the project connection files `instance.yaml` names (a platform component has none: its connections are the platform's) |
-| values | `values.yaml`, then each `upstream.<key>.yaml` of the instance directory as `upstream: {<key>: ...}` |
-| contracts | the union of the catalogs' `contracts/` |
-| chart cache | the upstream charts the compile renders, for its checks (below) |
+| `{}` (a package's default) | a connection of its own, of the default class of the contract |
+| `{class: <class>}`, `{provider: <namespace>/<instance>}` | of that class, of that provider |
+| `{request: {...}}`, with any | what the claim requests, as the contract's `x-okdp-claim` allows |
+| `<name>` | a connection, a named claim of the project, or an output of an instance of the project |
 
-The parameters are checked against the package's `config.schema.json`, the connections
-against their contracts, and the values of each upstream chart computed; the instance is
-written as one chart, an umbrella over its upstream charts (`compiler.Write`: `Chart.yaml`,
-`instance.values.yaml`, OKDP's own objects in `okdp.objects.yaml`, what it publishes in
-`okdp.info.yaml`). Each connection reference to another instance of the project (by
-its release name, one of the compile's dependencies) becomes a `dependsOn` of the
-HelmRelease and a later Argo CD sync wave; it must name an instance of the project, and
-an instance another one references cannot be deleted.
+The classes are the platform's and the projects' (`global.okdp.provisioning.<contract>`:
+`default`, and `classes.<name>: {provider, request}`, in `platform.yaml` and in a project's
+`project.yaml`, a provider named `<namespace>/<instance>` or by its release); a project's named claims are its
+`project.yaml` `claims.<name>: {contract, class, provider, request}`, one connection for
+every instance of the project that names it.
 
-Before it commits, the server checks the final values against the upstream charts: it
-pulls each chart the umbrella names, from its own repository (an OCI registry or an https
-chart repository, anonymously), into its chart cache (`GITOPS_CHART_CACHE_DIR`, laid out
-as okdp-compiler reads it, `<repository>/<chart>-<version>/<chart>/`), and compiles again
-with it (the chart's `values.schema.json`, the lists an instance appends to). A chart
-that cannot be fetched is logged and the instance compiled without the checks: never a
-failure. The same cache gives the chart defaults of the rendered values view
-(`GET .../services/:serviceName/values`: each chart's defaults coalesced under its
-compiled values, the lines set by OKDP or the instance marked).
+No connection is computed from a name: a provider publishes its connections
+(`okdp.info.yaml`), an instance's own output named after its release by default, and the
+connection forms list the outputs of the project's instances by their names
+(`GET .../connections/selectable`, `.../internal`), but the connections a provider
+publishes for its claims, named after the claims' IDs (dotted), which are their
+claimers'. `GET /api/contracts` gives each contract's claim schema (`claimSchema`, the
+contract's `x-okdp-claim`): what a claim may request.
 
-A **plain chart** (`instance.yaml` with `chart:`, no package: Forgejo, an operator) gets
-its values layers merged as Helm merges `-f` files: `platform/platform-values.yaml`, each
-connection file of `instance.yaml`, `values.yaml`.
+| Route | |
+|---|---|
+| `GET /api/projects/:name/claims` | the project's named claims, each with the provider the compile binds it to, the instances that name it, and why it does not bind |
+| `POST /api/projects/:name/claims`, `PUT`, `DELETE .../claims/:claimName` | declare, change, remove a named claim in `project.yaml` (its comments kept): checked (the contract, the class or the provider, the request against `x-okdp-claim` and the class), then by the compile of the tree, refused when an instance that compiled stops compiling; a named claim an instance names is not removed |
+| `GET /api/projects/:name/provisioning` | the classes of each contract's claims, the platform's and the project's, the default class, the claim schema |
+| `GET /api/projects/:name/services/:serviceName/claims` | the claims of the instance's references, each bound and what its provider granted (`okdp.info.yaml`); for a provider (its package's `provisions`), the claims bound to it, their claimers and what it granted each |
+
+Deploying or updating an instance checks the claims its parameters write or name before
+the compile does: the keys of a claim (`class`, `provider`, `request`), its class (of the
+project or the platform), its request (the package's fixed one, the instance's merged
+over it) against the contract's claim schema and what the class fixes. The deployment
+form reads, for each connection reference (`GET .../inputs`), whether it takes a claim
+(`provision`), the package's fixed `request`, what it requires of the connection
+(`require`) and its default claim (`defaultClaim`).
 
 ### Packages and catalogs
 
@@ -238,7 +293,7 @@ catalog/<service>/<version>/   Chart.yaml (name, version, the upstream charts as
 contracts/<contract>.schema.json
 ```
 
-`platform/catalog.yaml` names the catalogs and the console menu:
+`catalogs.yaml`, beside `platform.yaml`, names the catalogs and the console menu:
 
 ```yaml
 repositories:
@@ -259,183 +314,24 @@ catalogs, and a contract two catalogs hold must be the same bytes in both (else 
 naming both). The console's deployment form is the package's `config.schema.json`; the
 contracts of the connection forms are the catalogs'.
 
-### Generated files: byte-exact format
-
-The output is okdp-gitops', which writes the same bytes whoever runs it (the CI of the
-sources, a person), so that two runs never fight; the server reads it back (what an
-instance publishes, its compiled values, the labels of the engine objects). Common rules: UTF-8, LF, 2-space
-indentation, no tabs, no trailing spaces, no blank lines, a single final newline, first
-line `# Generated by okdp compile. Do not edit.`. Values from `instance.yaml` and names are
-written in double quotes, without escaping; lists from directories are sorted (`LC_ALL=C`).
-The compiled `values.yaml` of a plain chart is that line followed by the values in YAML
-(yaml.v3, keys sorted, 2-space indentation); the files of a package's compile are
-okdp-compiler's, as `okdp-compile -o` writes them.
-
-`helmrelease.yaml` of a package instance (`{{r}}` the release, `{{p}}` the project,
-`{{dir}}` the compiled directory in the output repository; the `dependsOn` block only when
-the instance references other instances, sorted): the umbrella of its compiled directory,
-built by Flux from the output's `GitRepository` (`okdp-gitops`, in `flux-system`), with
-`instance.values.yaml` (through `valuesFrom`: as the chart's own values they would be its
-defaults, and lose their nulls):
-
-```yaml
-# Generated by okdp compile. Do not edit.
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: "{{r}}"
-  namespace: okdp-releases
-  labels:
-    okdp.io/project: "{{p}}"
-    okdp.io/instance: "{{r}}"
-spec:
-  interval: 10m
-  releaseName: "{{r}}"
-  targetNamespace: "{{p}}"
-  storageNamespace: "{{p}}"
-  chart:
-    spec:
-      chart: "./{{dir}}"
-      reconcileStrategy: Revision
-      sourceRef:
-        kind: GitRepository
-        name: okdp-gitops
-        namespace: flux-system
-  dependsOn:
-    - name: "{{dependency}}"
-  timeout: 15m
-  # install, upgrade, driftDetection: as below
-  valuesFrom:
-    - kind: ConfigMap
-      name: "values-{{p}}-{{i}}"
-      valuesKey: instance.values.yaml
-```
-
-Of a plain chart of an OCI registry (one of an https chart repository has a
-`HelmRepository` and `chart.spec: {chart, version, sourceRef}` instead):
-
-```yaml
-# Generated by okdp compile. Do not edit.
----
-apiVersion: source.toolkit.fluxcd.io/v1
-kind: OCIRepository
-metadata:
-  name: "{{r}}"
-  namespace: okdp-releases
-  labels:
-    okdp.io/project: "{{p}}"
-    okdp.io/instance: "{{r}}"
-spec:
-  interval: 10m
-  url: "{{chart}}"
-  ref:
-    tag: "{{version}}"
-  layerSelector:
-    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
-    operation: copy
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: "{{r}}"
-  namespace: okdp-releases
-  labels:
-    okdp.io/project: "{{p}}"
-    okdp.io/instance: "{{r}}"
-spec:
-  interval: 10m
-  releaseName: "{{r}}"
-  targetNamespace: "{{p}}"
-  storageNamespace: "{{p}}"
-  chartRef:
-    kind: OCIRepository
-    name: "{{r}}"
-  dependsOn:
-    - name: "{{dependency}}"
-  timeout: 15m
-  install:
-    createNamespace: true
-    strategy:
-      name: RetryOnFailure
-      retryInterval: 2m
-  upgrade:
-    remediation:
-      retries: 3
-      strategy: rollback
-  driftDetection:
-    mode: enabled
-  valuesFrom:
-    - kind: ConfigMap
-      name: "values-{{p}}-{{i}}"
-      valuesKey: values.yaml
-```
-
-`kustomization.yaml` of an instance (`instance.values.yaml` for a package), and of a
-project (`resources: []` without services):
-
-```yaml
-# Generated by okdp compile. Do not edit.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: okdp-releases
-resources:
-  - helmrelease.yaml
-configMapGenerator:
-  - name: "values-{{p}}-{{i}}"
-    files:
-      - values.yaml
-    options:
-      disableNameSuffixHash: true
-      labels:
-        reconcile.fluxcd.io/watch: Enabled
-```
-
-```yaml
-# Generated by okdp compile. Do not edit.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: okdp-releases
-resources:
-  - services/{{i}}
-```
-
-A compile of the whole repository also writes:
-
-- `compiled/platform/components/<NN>-<name>/`: the same three files for each platform
-  component (`platform/components/<NN>-<name>/`: `instance.yaml`, `values.yaml`, its
-  connection files under `platform/connections/`);
-- `compiled/platform/kustomization.yaml`, the ConfigMap `okdp-platform-values` the
-  server reads, from `compiled/platform/platform-values.yaml`, a copy of
-  `platform/platform-values.yaml` (kustomize reads no file outside its directory);
-- `flux/components.yaml`: one Flux `Kustomization` per component, path
-  `./<prefix>/compiled/platform/components/<NN>-<name>`, `wait: true`, depending on every
-  component of the nearest lower non-empty layer (`00`, `10`, `20`, `30`; the lowest on
-  `okdp-platform-values`), then `okdp-projects` (path `./<prefix>/compiled/projects`, no
-  `wait`) depending on the highest layer.
-
-`application.yaml`, when the output holds `argocd/root.yaml` (an Argo CD Application with
-`spec.source.repoURL`, the repository the engine reads the output from): the Application
-`argocd/<p>-<i>` of the instance, reading the same repository and `targetRevision`: a
-package's compiled directory as a Helm source with `valueFiles: [instance.values.yaml]`,
-a plain chart's chart with the compiled `values.yaml` as `$values`. Its
-`argocd.argoproj.io/sync-wave` is 0 without dependency, one more than the instances it
-depends on otherwise, plus `<NN>` for a platform component, for an app-of-apps to order
-them. Without `argocd/root.yaml`, no Application is written.
-
-The golden files of okdp-gitops' `gitops/testdata/golden` are the reference of the plain
-charts, its `compile/testdata` the fixtures of the packages. The first compile of a
-repository whose Flux files were generated next to the sources (`# Generated by
-scripts/render-flux.sh`) removes them; a compiled directory whose sources were removed
-goes with the next compile.
-
 ### The output: `okdp-gitops`
 
 [okdp-gitops](https://github.com/OKDP/okdp-gitops) writes the output: a CI runs
-`okdp-gitops compile` on each commit of the sources, the console's and those made by
-hand alike, and commits what changed to the output repository (`okdp: compile`), which
-the engines reconcile. It is no longer built from this repository; from a checkout of
-okdp-gitops (next to one of okdp-compiler):
+`okdp-gitops compile` on each commit of the tree, the console's and those made by hand
+alike, and commits what changed to the output repository (`okdp: compile`), which the
+engines reconcile. `compiled/` holds the files of okdp-compiler's targets as they write
+them ([targets](https://github.com/OKDP/okdp-compiler/blob/main/docs/specs/01_inputs_outputs.md#targets)):
+per instance, `compiled/projects/<project>/instances/<project>-<instance>/`, its umbrella
+chart, its Flux HelmRelease (`okdp-releases/<project>-<instance>`, built from the output's
+`GitRepository` `flux-system/okdp-gitops`, `dependsOn` the releases it waits for) and the
+kustomization of its values ConfigMap, and its Argo CD Application
+(`argocd/<project>-<instance>`, its sync wave after those it waits for) when the output
+holds `argocd/root.yaml` (an Argo CD Application whose `spec.source` is the repository the
+engine reads the output from); per project, a Flux kustomization; and what the engines
+need to sync the whole tree. The server reads it back: what an instance publishes
+(`okdp.info.yaml`, with the package of the `Chart.yaml` beside it), its compiled values,
+the labels of the engine objects (`okdp.io/project`, `okdp.io/instance`). From a checkout
+of okdp-gitops (next to one of okdp-compiler):
 
 ```sh
 make build
@@ -445,21 +341,15 @@ bin/okdp-gitops compile --config topology.yaml --catalog platform-charts=../plat
 bin/okdp-gitops workflow --branch main                                  # the CI workflow of a repository of the sources
 ```
 
-`--root DIR` is a layout whose parts are all in one local directory; `--config FILE` a
+`--root DIR` is a tree whose parts are all in one local directory; `--config FILE` a
 topology file, whose urls are git repositories (cloned; the changes committed and pushed
 as `okdp: compile`, with the credentials of `$GITOPS_CREDENTIALS_DIR`) or local
 directories (an absolute path, or one relative to the file: read and written in place).
-`--catalog NAME=DIR` reads the catalog `NAME` of `platform/catalog.yaml` from a local
-checkout instead of its url; `--charts DIR` checks the values against the upstream
-charts, pulled into that chart cache, as the server checks them.
-
-It checks every declaration first (the names, the keys of `instance.yaml` and their
-types, the connection files, the release names unique across projects and components,
-the layers), compiles every project service and platform component, and rewrites the
-generated files above; it removes the ones no source produces any more, and the Flux
-files `render-flux.sh` wrote next to the sources. Every problem is reported at once, and
-nothing is written: the engines keep deploying the last output. `--path-prefix` is the
-path of the output in its Git repository, for the paths of the engine files (default:
+`--catalog NAME=DIR` reads the catalog `NAME` of `catalogs.yaml` from a local checkout
+instead of its url; `--charts DIR` checks the values against the upstream charts, pulled
+into that chart cache, as the server checks them. Every problem of the tree is reported at
+once, and nothing is written: the engines keep deploying the last output. `--path-prefix`
+is the path of the output in its Git repository, for the paths the engines read (default:
 the topology's output path; with `--root`, from `git`, `""` at the repository root).
 
 Each repository of the sources holds the workflow `.forgejo/workflows/okdp-gitops.yaml`
@@ -474,9 +364,9 @@ others get it by hand. The runner it needs is described in
 
 - Kubernetes cluster reconciled by [FluxCD](https://fluxcd.io) (helm-controller,
   source-controller, kustomize-controller) or [Argo CD](https://argo-cd.readthedocs.io),
-  from the output repository of the deployments layout above
+  from the output repository of the deployments above
 - A CI running [okdp-gitops](https://github.com/OKDP/okdp-gitops) on each commit of the
-  sources (Forgejo Actions, `.forgejo/workflows/okdp-gitops.yaml`): it writes the output
+  tree (Forgejo Actions, `.forgejo/workflows/okdp-gitops.yaml`): it writes the output
 - The catalogs of packages (git repositories) the server can fetch, and the upstream
   charts' repositories (for the checks and the chart defaults)
 - Write access to the deployments repositories of the sources, read access to the
@@ -511,11 +401,8 @@ kubectl create secret generic okdp-gitops-credentials -n okdp-system \
 # or, over SSH: --from-file=identity=./id_ed25519 --from-file=known_hosts=./known_hosts
 ```
 
-The platform values (`global.okdp`) are read from the ConfigMap `okdp-platform-values`
-(key `values.yaml`) that Flux generates in `okdp-releases`, or from
-`platform/platform-values.yaml` in Git when there is none (Argo CD). A compile (the
-server's check, the CI's) always reads `platform/platform-values.yaml` from the sources it
-compiles.
+The platform values (`global.okdp`) are read from `platform.yaml` in Git, the context
+every instance is compiled with (the server's check, the CI's).
 
 Install the chart from the OKDP registry:
 
@@ -529,7 +416,7 @@ helm install okdp-control-plane-server oci://quay.io/okdp/charts/okdp-control-pl
 ```
 <!-- x-release-please-end -->
 
-With the parts of the layout in several repositories, set `gitops.topology` instead of
+With the parts of the tree in several repositories, set `gitops.topology` instead of
 `gitops.repoURL` (written to a ConfigMap mounted at `/etc/okdp/gitops/topology.yaml`), and
 `gitops.forgejoTokenSecret` (a Secret with the key `token`) for the server to create the
 repository of a new project.
@@ -616,16 +503,16 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `LOG_LEVEL` | Log verbosity (`debug`, `info`, `warn`, `error`) | `info` | No |
 | `GIN_MODE` | HTTP framework mode (`debug` prints every route) | `release` | No |
 | `GITOPS_CONFIG` | Topology file: the repositories of the platform, the projects and the output, and Forgejo ([topology](#topology-where-the-parts-live)) | | One of the two |
-| `GITOPS_REPO_URL` | Deployments repository holding the whole layout (`https://…`, `ssh://…`, `git@host:path`, `file://…`) | | One of the two |
+| `GITOPS_REPO_URL` | Deployments repository holding the whole tree (`https://…`, `ssh://…`, `git@host:path`, `file://…`) | | One of the two |
 | `GITOPS_BRANCH` | Branch holding the desired state | `main` | No |
-| `GITOPS_PATH` | Directory of the repository holding the layout | repository root | No |
+| `GITOPS_PATH` | Directory of the repository holding the tree | repository root | No |
 | `GITOPS_CREDENTIALS_DIR` | Mounted credentials Secret (`username`/`password`, `bearerToken`, or `identity`/`known_hosts`), for every deployments repository, and the catalogs on their host | `/etc/okdp/gitops-credentials` | No |
 | `GITOPS_SSH_INSECURE_IGNORE_HOST_KEY` | Accept any SSH host key (sandboxes only) | `false` | No |
 | `GITOPS_AUTHOR_NAME` / `GITOPS_AUTHOR_EMAIL` | Commit committer (and author when the user has no email; the logged-in user authors the commit otherwise) | `OKDP control plane` / `okdp-control-plane@okdp.io` | No |
 | `GITOPS_CLONE_DIR` | Local clones, a cache, one per repository under `repos/` (empty: in memory) | in memory | No |
 | `GITOPS_CHART_CACHE_DIR` | Chart cache: the upstream charts of the compiled instances | `<GITOPS_CLONE_DIR>/charts`, else under the temporary directory | No |
 | `GITOPS_ENGINE` | `flux` or `argocd`: whose objects carry render/sync errors | `flux` | No |
-| `GITOPS_RELEASES_NAMESPACE` | Flux HelmReleases and values ConfigMaps, `okdp-platform-values` included | `okdp-releases` | No |
+| `GITOPS_RELEASES_NAMESPACE` | Flux HelmReleases and their values ConfigMaps | `okdp-releases` | No |
 | `ARGOCD_NAMESPACE` | Argo CD Applications | `argocd` | No |
 | `INSECURE_OCI_REGISTRIES` | Registry hosts reached over plain HTTP to pull the upstream charts into the chart cache (sandboxes) | | No |
 | `KEYCLOAK_CLIENT_ID` | Keycloak service-account client of the platform realm (chart: `keycloak.credentialsSecret`, key `client_id`) | `okdp-control-plane` | No |
@@ -693,7 +580,7 @@ origin the console is served from, the browser blocks the response and its conso
 
 ### The service catalog is empty, or `GET /api/platform-services` returns `500`
 
-**Cause:** the menu is `platform/catalog.yaml` of the platform repository, the versions
+**Cause:** the menu is `catalogs.yaml` of the platform repository, the versions
 the catalogs of its `repositories`. A `500` means the platform repository cannot be
 reached (URL, branch or credentials; the log names the fetch error). An empty but
 successful catalog means the file is missing or has no `categories`. Services without
@@ -705,14 +592,16 @@ the file exists on the platform branch, and the `url` and `ref` of each reposito
 
 ### A deploy or an update answers `400 … does not compile`
 
-**Cause:** okdp-compiler refused the instance: a parameter its schema refuses, a
-connection of the wrong contract, a platform value the service requires
-(`global.okdp…`), an upstream value the service protects, or a reference to an instance
-the project does not have. The message names the parameter, the chart or the file.
+**Cause:** okdp-compiler refused the instance, or another one that compiled before the
+write: a parameter its schema refuses, a connection of the wrong contract, a claim no
+class binds, a platform value the service requires (`global.okdp…`), an upstream value
+the service protects, or a reference to an output no instance publishes. The message
+names the instance, the parameter, the chart or the file; `the deployments do not
+compile` names a file of the tree that does not load (a package or a version no catalog
+has, a file that does not parse).
 
 **Fix:** change what the message names. Nothing was committed. A `500` naming a
-catalog (`catalog <name> (<url>@<ref>)`) or a `package` is the catalog's, not the
-instance's; a package or a version no catalog has is the instance's (`400`).
+catalog (`catalog <name> (<url>@<ref>)`) is the catalog's, not the write's.
 
 ### A deployed service stays `Pending`
 

@@ -29,11 +29,11 @@ func gitBackedRouter(t *testing.T) (*gin.Engine, *gitops.MemoryStore) {
 		"projects/other/services/spark/instance.yaml":   "name: spark\n",
 		"projects/demo/services/trino/helmrelease.yaml": "kind: HelmRelease\n",
 	})
-	deployments := gitops.NewDeployments(store, nil)
+	deployments := gitops.NewDeployments(store)
 	projects := handlers.NewProjectHandler(service.NewDefaultProjectService(nil, deployments))
 	services := handlers.NewServiceHandler(service.NewDefaultServiceService(service.ServiceDeps{Deployments: deployments}), nil)
 	cfg := &config.Config{AllowedOrigins: "https://console.example"}
-	return SetupRouter(cfg, nil, nil, projects, nil, nil, nil, services, nil, nil, nil), store
+	return SetupRouter(cfg, nil, nil, projects, nil, nil, nil, services, nil, nil, nil, nil), store
 }
 
 // DELETE …/services/.. used to resolve to projects/demo and remove the whole
@@ -98,7 +98,7 @@ func TestObjectNamesInThePathAreValidated(t *testing.T) {
 
 func testRouterWithoutAuth() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	return SetupRouter(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return SetupRouter(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestResponsesCarryTheSecurityHeaders(t *testing.T) {

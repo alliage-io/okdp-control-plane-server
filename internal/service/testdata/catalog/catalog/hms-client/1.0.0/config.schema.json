@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "metastore": {
+      "description": "The Hive metastore: a connection's name.",
+      "type": "string",
+      "x-okdp-connection-ref": {"contract": "hive"}
+    }
+  }
+}

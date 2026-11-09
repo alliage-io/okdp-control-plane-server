@@ -13,7 +13,7 @@ import (
 const LabelAppInstance = "app.kubernetes.io/instance"
 
 // Descriptor is what a compiled instance publishes: its okdp.info.yaml
-// in the output of the deployments layout (url, usage, the connections it
+// in the output of the deployments (url, usage, the connections it
 // provides), and the package of the Chart.yaml beside it.
 type Descriptor struct {
 	// Release is the Helm release name (<project>-<instance>).
@@ -45,8 +45,8 @@ type DescriptorRepository interface {
 	List(ctx context.Context, namespace string) ([]Descriptor, error)
 }
 
-// publishedRepository reads compiled/projects/<p>/services/<i>/okdp.info.yaml
-// in the output of the deployments layout.
+// publishedRepository reads compiled/projects/<p>/instances/<release>/okdp.info.yaml
+// in the output of the deployments.
 type publishedRepository struct {
 	deployments *gitops.Deployments
 }

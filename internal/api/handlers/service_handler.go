@@ -19,10 +19,10 @@ const (
 	// ErrorCodeInstanceExists: the project already has an instance of that name.
 	ErrorCodeInstanceExists = "instance-exists"
 	// ErrorCodeReleaseNameTaken: the release name <project>-<instance> is
-	// already used by an instance of another project (or a platform component).
+	// already used by an instance of another project.
 	ErrorCodeReleaseNameTaken = "release-name-taken"
-	// ErrorCodeDoesNotCompile: the instance, or one that layers in the
-	// connection written, does not compile; the message is the compiler's.
+	// ErrorCodeDoesNotCompile: the instance written, or one that compiled
+	// before the write, does not compile; the message is the compiler's.
 	ErrorCodeDoesNotCompile = service.ErrorCodeDoesNotCompile
 )
 
@@ -93,7 +93,7 @@ func (h *ServiceHandler) GetMenuCategories(c *gin.Context) {
 
 // CreatePlatformService godoc
 // @Summary      Add a service to the catalog
-// @Description  Expose a service of the catalogs in the console menu (commits platform/catalog.yaml to the platform repository); its package must be in a catalog repository, its versions are the catalogs' (those given are checked, not stored)
+// @Description  Expose a service of the catalogs in the console menu (commits catalogs.yaml to the platform repository); its package must be in a catalog repository, its versions are the catalogs' (those given are checked, not stored)
 // @Tags         platform-services
 // @Accept       json
 // @Produce      json
@@ -147,7 +147,7 @@ func (h *ServiceHandler) UpdatePlatformService(c *gin.Context) {
 
 // DeletePlatformService godoc
 // @Summary      Remove a catalog service
-// @Description  Remove an exposed service from the catalog (commits platform/catalog.yaml to the deployments repository)
+// @Description  Remove an exposed service from the catalog (commits catalogs.yaml to the deployments repository)
 // @Tags         platform-services
 // @Produce      json
 // @Param        serviceName path string true "Service name"
@@ -367,7 +367,7 @@ func (h *ServiceHandler) StreamServices(c *gin.Context) {
 
 // GetServiceVersions godoc
 // @Summary      List available versions for a platform service
-// @Description  Returns the versions of the service's package in the catalogs (the directories catalog/<service>/<version>/ of the repository of platform/catalog.yaml holding it), highest first, and the default: the menu entry's, else the highest
+// @Description  Returns the versions of the service's package in the catalogs (the directories catalog/<service>/<version>/ of the repository of catalogs.yaml holding it), highest first, and the default: the menu entry's, else the highest
 // @Tags         platform-services
 // @Produce      json
 // @Param        serviceName path string true "Service name"
@@ -458,7 +458,7 @@ func (h *ServiceHandler) GetProfileImages(c *gin.Context) {
 
 // UpdateServiceParameters godoc
 // @Summary      Update service parameters and/or version
-// @Description  JSON Merge Patch (RFC 7386) of the parameters (null deletes a key, objects merge, arrays replace) and optionally update the package version of a deployed service, compiled as a check and committed to values.yaml/instance.yaml; okdp-gitops compile, in CI, writes the compiled tree in the output of the deployments Git repositories. 400 on invalid parameters, or with code does-not-compile when the instance does not compile.
+// @Description  JSON Merge Patch (RFC 7386) of the parameters (null deletes a key, objects merge, arrays replace) and optionally update the package version of a deployed service, checked by a compile of the tree and committed to config.yaml/instance.yaml; okdp-gitops compile, in CI, writes the compiled tree in the output of the deployments Git repositories. 400 on invalid parameters, or with code does-not-compile when the instance, or one that compiled before, does not compile.
 // @Tags         services
 // @Accept       json
 // @Produce      json

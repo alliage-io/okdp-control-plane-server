@@ -9,11 +9,6 @@
   "x-okdp-category": "query-engine",
   "x-okdp-external": true,
   "x-okdp-endpoint-from": ["internalUri", "uri", "url"],
-  "x-okdp-internal": {
-    "url": "https://trino-${namespace}.${suffix}",
-    "uri": "trino://trino@trino-${namespace}.${suffix}:443",
-    "internalUri": "trino://trino@${ref}-trino.${namespace}.svc:8080"
-  },
   "properties": {
     "url": {
       "type": "string",

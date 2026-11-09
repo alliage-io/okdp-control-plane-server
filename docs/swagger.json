@@ -122,7 +122,7 @@
                 }
             },
             "post": {
-                "description": "Expose a service of the catalogs in the console menu (commits platform/catalog.yaml to the platform repository); its package must be in a catalog repository, its versions are the catalogs' (those given are checked, not stored)",
+                "description": "Expose a service of the catalogs in the console menu (commits catalogs.yaml to the platform repository); its package must be in a catalog repository, its versions are the catalogs' (those given are checked, not stored)",
                 "consumes": [
                     "application/json"
                 ],
@@ -249,7 +249,7 @@
                 }
             },
             "delete": {
-                "description": "Remove an exposed service from the catalog (commits platform/catalog.yaml to the deployments repository)",
+                "description": "Remove an exposed service from the catalog (commits catalogs.yaml to the deployments repository)",
                 "produces": [
                     "application/json"
                 ],
@@ -384,7 +384,7 @@
         },
         "/api/platform-services/{serviceName}/versions": {
             "get": {
-                "description": "Returns the versions of the service's package in the catalogs (the directories catalog/\u003cservice\u003e/\u003cversion\u003e/ of the repository of platform/catalog.yaml holding it), highest first, and the default: the menu entry's, else the highest",
+                "description": "Returns the versions of the service's package in the catalogs (the directories catalog/\u003cservice\u003e/\u003cversion\u003e/ of the repository of catalogs.yaml holding it), highest first, and the default: the menu entry's, else the highest",
                 "produces": [
                     "application/json"
                 ],
@@ -739,9 +739,264 @@
                 }
             }
         },
+        "/api/projects/{name}/claims": {
+            "get": {
+                "description": "The named claims of the project (claims.\u003cname\u003e of projects/\u003cp\u003e/project.yaml): each a connection of its contract, declared once, that every instance of the project naming it shares; with the provider the compile of the tree binds it to (its class, or the provider it names), the instances that name it, and why it does not bind",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "claims"
+                ],
+                "summary": "List the named claims of a project",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name (= Kubernetes namespace)",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.NamedClaimView"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Commits claims.\u003cname\u003e to the project's project.yaml (its comments and other keys kept): a contract, a class of the project or the platform or a provider (\u003cinstance\u003e, \u003crelease\u003e, \u003cnamespace\u003e/\u003cinstance\u003e or \u003cnamespace\u003e/\u003crelease\u003e), and a request the contract's claim schema allows (x-okdp-claim). Checked first (the class, the request), then by the compile of the tree: refused (400, code does-not-compile) when an instance that compiled no longer does",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "claims"
+                ],
+                "summary": "Declare a named claim",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "The claim, its name included",
+                        "name": "claim",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.NamedClaimRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.NamedClaimView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Project not found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "A named claim of that name exists",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/projects/{name}/claims/{claimName}": {
+            "put": {
+                "description": "Replaces the declaration of claims.\u003cclaimName\u003e in the project's project.yaml, checked as a creation is. A changed class or provider moves the claim to a new, empty connection: its former provider keeps what it held",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "claims"
+                ],
+                "summary": "Change a named claim",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Claim name",
+                        "name": "claimName",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "The claim",
+                        "name": "claim",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.NamedClaimRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.NamedClaimView"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "description": "Removes claims.\u003cclaimName\u003e from the project's project.yaml; refused (400) while an instance of the project names it. Its provider keeps what the claim's connection holds (a database, a bucket)",
+                "tags": [
+                    "claims"
+                ],
+                "summary": "Remove a named claim",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Claim name",
+                        "name": "claimName",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/projects/{name}/connections": {
             "get": {
-                "description": "Connections declared in the project (projects/\u003cp\u003e/connections/\u003cname\u003e.yaml in the deployments repository). Connections published by deployed instances are returned by the internal endpoint.",
+                "description": "Connections declared in the project (connections.\u003cname\u003e of projects/\u003cp\u003e/project.yaml in the deployments repository). Connections published by deployed instances are returned by the internal endpoint; the platform's connections (platform.yaml) are offered by the selectable endpoint.",
                 "produces": [
                     "application/json"
                 ],
@@ -780,7 +1035,7 @@
                 }
             },
             "post": {
-                "description": "Stores the credential fields in a Kubernetes Secret of the project namespace and commits the connection file referencing it (secretRef) to the deployments repository",
+                "description": "Stores the credential fields in a Kubernetes Secret of the project namespace and commits the connection, an entry of the project's project.yaml referencing it (secretRef), to the deployments repository, checked by a compile of the tree. A name of a platform connection is refused.",
                 "consumes": [
                     "application/json"
                 ],
@@ -889,6 +1144,7 @@
         },
         "/api/projects/{name}/connections/selectable": {
             "get": {
+                "description": "The project's connections (scope project), the platform's (scope platform: connections.\u003cname\u003e of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed)",
                 "produces": [
                     "application/json"
                 ],
@@ -976,7 +1232,7 @@
         },
         "/api/projects/{name}/connections/{connName}": {
             "put": {
-                "description": "Commits the connection file, once the instances that layer it in compile with it (a check: okdp-gitops compiles them again in CI, on the commit). 400 with code does-not-compile when one of them no longer compiles with it.",
+                "description": "Commits the connection, the entry of the project's project.yaml, once the instances that compiled still compile with it (a check: okdp-gitops compiles the whole tree, and again in CI, on the commit). 400 with code does-not-compile when one of them no longer compiles with it.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1049,7 +1305,7 @@
                 }
             },
             "delete": {
-                "description": "Removes the connection file from the deployments repository and the Secret the console wrote for it. 400 while an instance still layers the connection in.",
+                "description": "Removes the connection from the project's project.yaml and the Secret the console wrote for it. 400 while an instance still references the connection.",
                 "produces": [
                     "application/json"
                 ],
@@ -1237,6 +1493,53 @@
                             "type": "object",
                             "additionalProperties": {
                                 "$ref": "#/definitions/models.ServiceMetrics"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/projects/{name}/provisioning": {
+            "get": {
+                "description": "The classes a claim of the project may be of, by contract: the platform's (global.okdp.provisioning of platform.yaml) and the project's (of its project.yaml), each a provider and what it fixes of the request, the default class, and the contract's claim schema (x-okdp-claim): what a claim may request",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "claims"
+                ],
+                "summary": "List the classes of the claims",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.ProvisioningResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
                             }
                         }
                     },
@@ -1509,6 +1812,60 @@
                 }
             }
         },
+        "/api/projects/{name}/services/{serviceName}/claims": {
+            "get": {
+                "description": "The claims of the instance's connection references, each bound to its provider (the provider of its class, or the one it names) and what the provider granted; and, when its package provisions contracts (okdp.yaml provisions), the claims bound to it, their claimers, and what it granted each (the connection it publishes for the claim, its okdp.info.yaml). From the compile of the tree: what the next deployment binds",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "claims"
+                ],
+                "summary": "List the claims of an instance",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Project name",
+                        "name": "name",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Instance name",
+                        "name": "serviceName",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.InstanceClaims"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/projects/{name}/services/{serviceName}/metrics": {
             "get": {
                 "description": "Aggregate CPU/memory usage (from metrics-server) and limits for every pod belonging to the instance.",
@@ -1556,7 +1913,7 @@
         },
         "/api/projects/{name}/services/{serviceName}/parameters": {
             "patch": {
-                "description": "JSON Merge Patch (RFC 7386) of the parameters (null deletes a key, objects merge, arrays replace) and optionally update the package version of a deployed service, compiled as a check and committed to values.yaml/instance.yaml; okdp-gitops compile, in CI, writes the compiled tree in the output of the deployments Git repositories. 400 on invalid parameters, or with code does-not-compile when the instance does not compile.",
+                "description": "JSON Merge Patch (RFC 7386) of the parameters (null deletes a key, objects merge, arrays replace) and optionally update the package version of a deployed service, checked by a compile of the tree and committed to config.yaml/instance.yaml; okdp-gitops compile, in CI, writes the compiled tree in the output of the deployments Git repositories. 400 on invalid parameters, or with code does-not-compile when the instance, or one that compiled before, does not compile.",
                 "consumes": [
                     "application/json"
                 ],
@@ -3402,6 +3759,37 @@
         }
     },
     "definitions": {
+        "models.BoundClaim": {
+            "type": "object",
+            "properties": {
+                "binding": {
+                    "$ref": "#/definitions/models.ClaimBinding"
+                },
+                "contract": {
+                    "type": "string"
+                },
+                "field": {
+                    "description": "Field is the parameter path of the reference (database,\ncatalogs[1].storage).",
+                    "type": "string"
+                },
+                "granted": {
+                    "description": "Granted is the connection the provider publishes for the claim, when\nit compiles.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.GrantedConnection"
+                        }
+                    ]
+                },
+                "id": {
+                    "description": "ID is the claim's ID, the name of the connection its provider\npublishes for it.",
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is the named claim the reference names; empty for a claim\nwritten in the parameters (a claim template).",
+                    "type": "string"
+                }
+            }
+        },
         "models.Capabilities": {
             "type": "object",
             "properties": {
@@ -3410,6 +3798,62 @@
                 },
                 "oidcProvisioning": {
                     "$ref": "#/definitions/models.OidcProvisioningCapability"
+                }
+            }
+        },
+        "models.ClaimBinding": {
+            "type": "object",
+            "properties": {
+                "class": {
+                    "description": "Class is the class whose provider it is; empty when the claim names\nits provider.",
+                    "type": "string"
+                },
+                "default": {
+                    "description": "Default reports that the class is the default one of the contract\n(the claim names neither a class nor a provider).",
+                    "type": "boolean"
+                },
+                "instance": {
+                    "description": "Instance is the provider's instance name, in the project Namespace\n(projects/\u003cnamespace\u003e/instances/\u003cinstance\u003e).",
+                    "type": "string"
+                },
+                "namespace": {
+                    "description": "Namespace and Release are the provider's instance.",
+                    "type": "string"
+                },
+                "release": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.ClaimTemplate": {
+            "type": "object",
+            "properties": {
+                "class": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "request": {
+                    "type": "object",
+                    "additionalProperties": {}
+                }
+            }
+        },
+        "models.ClaimUser": {
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string"
+                },
+                "instance": {
+                    "type": "string"
+                },
+                "namespace": {
+                    "type": "string"
+                },
+                "release": {
+                    "type": "string"
                 }
             }
         },
@@ -3491,7 +3935,7 @@
                     "type": "boolean"
                 },
                 "secret": {
-                    "description": "Secret says where the value is stored: in the credentials Secret rather\nthan in the connection file. It says nothing about how it is typed in.",
+                    "description": "Secret says where the value is stored: in the credentials Secret rather\nthan in the connection's entry. It says nothing about how it is typed in.",
                     "type": "boolean"
                 },
                 "showWhen": {
@@ -3659,11 +4103,43 @@
                 }
             }
         },
+        "models.ContractClasses": {
+            "type": "object",
+            "properties": {
+                "claimSchema": {
+                    "description": "ClaimSchema is what a claim may request (the contract's x-okdp-claim,\na JSON Schema); nil when the contract takes no request.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "classes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.ProvisioningClass"
+                    }
+                },
+                "contract": {
+                    "type": "string"
+                },
+                "default": {
+                    "description": "Default is the default class, of the claims that name neither a class\nnor a provider; empty when there is none (such a claim is refused).",
+                    "type": "string"
+                },
+                "defaultLevel": {
+                    "description": "DefaultLevel is where the default is set.",
+                    "type": "string"
+                }
+            }
+        },
         "models.ContractDescriptor": {
             "type": "object",
             "properties": {
                 "category": {
                     "type": "string"
+                },
+                "claimSchema": {
+                    "description": "ClaimSchema is what a claim of the contract may request of the\ninstance that provisions it (x-okdp-claim, a JSON Schema: a database's\nextensions, a bucket's paths), nil when the contract takes no request.",
+                    "type": "object",
+                    "additionalProperties": {}
                 },
                 "description": {
                     "type": "string"
@@ -3683,6 +4159,7 @@
                     "type": "boolean"
                 },
                 "fields": {
+                    "description": "Fields are the connection's fields, what a provider publishes (the\ncontract's properties). An instance's output of any contract is\nselectable, by its name: no connection is computed from a name.",
                     "type": "array",
                     "items": {
                         "$ref": "#/definitions/models.ConnectionField"
@@ -3690,10 +4167,6 @@
                 },
                 "icon": {
                     "type": "string"
-                },
-                "internal": {
-                    "description": "Internal reports that the contract has a naming convention\n(x-okdp-internal in the contract schema: hive, iceberg-catalog, trino):\nan instance's output of it is named after the instance's release. An\noutput of any contract is selectable, by its name.",
-                    "type": "boolean"
                 },
                 "name": {
                     "description": "Name IS the contract this descriptor produces (x-okdp-connection-ref).\nOne descriptor, one contract, deliberately: an entry form that produced a\ndifferently named contract would mean nothing a chart asks for could be\nfound by its own name.",
@@ -3899,6 +4372,18 @@
                 }
             }
         },
+        "models.GrantedConnection": {
+            "type": "object",
+            "properties": {
+                "secretRef": {
+                    "type": "string"
+                },
+                "values": {
+                    "type": "object",
+                    "additionalProperties": {}
+                }
+            }
+        },
         "models.Group": {
             "type": "object",
             "properties": {
@@ -3949,6 +4434,36 @@
                 "scope": {
                     "description": "Scope overrides the UI default scopes when set.",
                     "type": "string"
+                }
+            }
+        },
+        "models.InstanceClaims": {
+            "type": "object",
+            "properties": {
+                "bound": {
+                    "description": "Bound are the claims of the instance's references.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.BoundClaim"
+                    }
+                },
+                "error": {
+                    "description": "Error is why the instance does not compile, the compiler's message:\nits claims are then unknown.",
+                    "type": "string"
+                },
+                "provided": {
+                    "description": "Provided are the claims bound to the instance, as a provider.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.ProvidedClaim"
+                    }
+                },
+                "provisions": {
+                    "description": "Provisions are the contracts the instance's package provisions\n(okdp.yaml provisions).",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -4046,6 +4561,80 @@
                 }
             }
         },
+        "models.NamedClaimRequest": {
+            "type": "object",
+            "required": [
+                "contract"
+            ],
+            "properties": {
+                "class": {
+                    "type": "string"
+                },
+                "contract": {
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is the claim's name, on creation (the path gives it on update).",
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "request": {
+                    "type": "object",
+                    "additionalProperties": {}
+                }
+            }
+        },
+        "models.NamedClaimView": {
+            "type": "object",
+            "properties": {
+                "binding": {
+                    "description": "Binding is where the compile of the project's sources binds it; nil\nwhen it does not bind (Error says why) or no instance compiles.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.ClaimBinding"
+                        }
+                    ]
+                },
+                "class": {
+                    "description": "Class names a class of the contract (the project's or the\nplatform's); empty with Provider, or for the default class.",
+                    "type": "string"
+                },
+                "contract": {
+                    "description": "Contract is the contract of its connection (database-server, s3).",
+                    "type": "string"
+                },
+                "error": {
+                    "description": "Error is why the claim does not bind, the compiler's message.",
+                    "type": "string"
+                },
+                "id": {
+                    "description": "ID is the claim's ID, \u003cproject\u003e.\u003cname\u003e: the name of the connection\nits provider publishes for it.",
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is the claim's name, a DNS-1123 label, no connection's name.",
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "Provider names the provider's instance, by its name or its release, of\nthe project or \u003cnamespace\u003e/\u003cinstance\u003e; never with Class.",
+                    "type": "string"
+                },
+                "request": {
+                    "description": "Request is what it requests of its provider, as the contract's claim\nschema allows (x-okdp-claim).",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "users": {
+                    "description": "Users are the instances of the project whose parameters name it.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "models.OidcProvisioningCapability": {
             "type": "object",
             "properties": {
@@ -4070,6 +4659,14 @@
                     "description": "Default is the connection the chart falls back to when the deployer picks\nnothing (the property's schema default). The console must leave the\nparameter out rather than send an empty string, which would win over it.",
                     "type": "string"
                 },
+                "defaultClaim": {
+                    "description": "DefaultClaim is set when the default is a claim, the package's claim\ntemplate ({} for a connection of its own of the default class): the\nparameter left out claims it.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.ClaimTemplate"
+                        }
+                    ]
+                },
                 "description": {
                     "description": "Description is shown next to the field.",
                     "type": "string"
@@ -4085,6 +4682,20 @@
                 "path": {
                     "description": "Path is the JSON path of the marked property: \"metadataDb\" at the root,\n\"hiveCatalogs[].metastore\" inside the items of a list.",
                     "type": "string"
+                },
+                "provision": {
+                    "description": "Provision reports that the reference takes a claim (a map in place of\na name: {}, {class}, {provider}, with a request) or a named claim of\nthe project (x-okdp-connection-ref's provision).",
+                    "type": "boolean"
+                },
+                "request": {
+                    "description": "Request is what the package fixes of the request of every claim of\nthe reference, the instance's merged over it.",
+                    "type": "object",
+                    "additionalProperties": {}
+                },
+                "require": {
+                    "description": "Require is what the package requires of the connection beyond its\ncontract, a JSON Schema (x-okdp-connection-ref's require).",
+                    "type": "object",
+                    "additionalProperties": {}
                 }
             }
         },
@@ -4171,6 +4782,79 @@
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "models.ProvidedClaim": {
+            "type": "object",
+            "properties": {
+                "claimers": {
+                    "description": "Claimers are the instances whose references claim it: one for a claim\ntemplate, every instance that names a named claim.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.ClaimUser"
+                    }
+                },
+                "class": {
+                    "description": "Class is the class the claim binds through, empty when it names its\nprovider; Default reports the default class.",
+                    "type": "string"
+                },
+                "contract": {
+                    "type": "string"
+                },
+                "default": {
+                    "type": "boolean"
+                },
+                "granted": {
+                    "description": "Granted is the connection the provider publishes for the claim (its\nokdp.info.yaml), nil when it publishes none.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.GrantedConnection"
+                        }
+                    ]
+                },
+                "id": {
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name is a named claim's name, empty for a claim template.",
+                    "type": "string"
+                },
+                "namespace": {
+                    "description": "Namespace is the claimers' namespace.",
+                    "type": "string"
+                }
+            }
+        },
+        "models.ProvisioningClass": {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "description": "Level is where the class is defined: platform (platform.yaml)\nor project (the project's project.yaml).",
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "provider": {
+                    "description": "Provider is the provider's instance, \u003crelease\u003e of the claimer's\nproject or \u003cnamespace\u003e/\u003crelease\u003e.",
+                    "type": "string"
+                },
+                "request": {
+                    "description": "Request is what the class fixes of the request of its claims: a claim\nthat sets one of its keys is refused.",
+                    "type": "object",
+                    "additionalProperties": {}
+                }
+            }
+        },
+        "models.ProvisioningResponse": {
+            "type": "object",
+            "properties": {
+                "contracts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/models.ContractClasses"
+                    }
                 }
             }
         },

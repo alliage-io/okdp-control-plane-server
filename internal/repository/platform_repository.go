@@ -7,28 +7,26 @@ import (
 	"sync"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/sirupsen/logrus"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/kubernetes"
 )
 
 // PlatformRepository reads the platform configuration: the platform values
-// every chart receives under global.okdp (the former KuboCD platform Context,
-// same keys), and the console service catalog (platform/catalog.yaml in Git).
+// every instance receives under global.okdp (platform.yaml in Git), and the
+// console service catalog (catalogs.yaml in Git).
 type PlatformRepository interface {
 	Invalidate()
 	// GetPlatformServices returns the managed OKDP services of the console
-	// menu (catalog.yaml categories[].services); their versions are the
+	// menu (catalogs.yaml categories[].services); their versions are the
 	// catalogs' (PackageSchemaService).
 	GetPlatformServices(ctx context.Context) ([]models.PlatformService, error)
 
-	// GetMenuCategories returns the console navigation sections (catalog.yaml categories).
+	// GetMenuCategories returns the console navigation sections (catalogs.yaml categories).
 	GetMenuCategories(ctx context.Context) ([]models.MenuCategory, error)
 
 	// GetIngressSuffix returns the ingress domain suffix (global.okdp.ingress.suffix).
@@ -71,14 +69,10 @@ type PlatformRepository interface {
 // change rarely, and every page reads several of them.
 const platformValuesCacheTTL = 5 * time.Second
 
-// platformRepository reads the platform values from the ConfigMap Flux layers
-// into every release (okdp-platform-values, key values.yaml), falling back to
-// platform/platform-values.yaml in Git when there is no such ConfigMap (Argo CD
-// reads the file straight from Git and creates none). The catalog always comes
-// from Git.
+// platformRepository reads the platform values and the catalog from Git:
+// platform.yaml, the context every instance is compiled with, and
+// catalogs.yaml.
 type platformRepository struct {
-	client      kubernetes.Interface
-	namespace   string
 	deployments *gitops.Deployments
 
 	mu       sync.Mutex
@@ -86,13 +80,10 @@ type platformRepository struct {
 	cachedAt time.Time
 }
 
-// NewPlatformRepository reads the platform values ConfigMap in namespace.
-func NewPlatformRepository(client kubernetes.Interface, namespace string, deployments *gitops.Deployments) PlatformRepository {
-	return &platformRepository{
-		client:      client,
-		namespace:   namespace,
-		deployments: deployments,
-	}
+// NewPlatformRepository reads the platform values and the catalog of
+// deployments.
+func NewPlatformRepository(deployments *gitops.Deployments) PlatformRepository {
+	return &platformRepository{deployments: deployments}
 }
 
 // catalogCategories returns the ordered sections of the catalog, each with its
@@ -100,7 +91,7 @@ func NewPlatformRepository(client kubernetes.Interface, namespace string, deploy
 func catalogCategories(v map[string]interface{}) ([]map[string]interface{}, bool, error) {
 	raw, found, err := unstructured.NestedSlice(v, "categories")
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read categories from %s: %w", gitops.CatalogPath, err)
+		return nil, false, fmt.Errorf("failed to read categories from %s: %w", gitops.CatalogsFile, err)
 	}
 	if !found {
 		return nil, false, nil
@@ -152,7 +143,7 @@ func (r *platformRepository) GetPlatformServices(ctx context.Context) ([]models.
 		return nil, err
 	}
 	if !found {
-		logrus.Warn("No categories found in " + gitops.CatalogPath)
+		logrus.Warn("No categories found in " + gitops.CatalogsFile)
 		return []models.PlatformService{}, nil
 	}
 
@@ -464,34 +455,17 @@ func (r *platformRepository) values(ctx context.Context) (map[string]interface{}
 }
 
 func (r *platformRepository) readPlatformValues(ctx context.Context) ([]byte, string, error) {
-	if r.client != nil {
-		cm, err := r.client.CoreV1().ConfigMaps(r.namespace).Get(ctx, gitops.PlatformValuesConfigMap, metav1.GetOptions{})
-		switch {
-		case err == nil:
-			source := fmt.Sprintf("ConfigMap %s/%s", r.namespace, gitops.PlatformValuesConfigMap)
-			data, ok := cm.Data[gitops.ValuesKey]
-			if !ok {
-				return nil, "", fmt.Errorf("%s has no %s key", source, gitops.ValuesKey)
-			}
-			return []byte(data), source, nil
-		case apierrors.IsNotFound(err):
-			logrus.Debugf("No ConfigMap %s/%s, reading the platform values from Git", r.namespace, gitops.PlatformValuesConfigMap)
-		default:
-			// Forbidden or unreachable: Git still answers.
-			logrus.WithError(err).Warn("Could not read the platform values ConfigMap, reading them from Git")
-		}
-	}
 	if r.deployments == nil {
-		return nil, "", fmt.Errorf("no platform values: ConfigMap %s/%s not found", r.namespace, gitops.PlatformValuesConfigMap)
+		return nil, "", errors.New("no platform values: no deployments repository configured")
 	}
 	raw, err := r.deployments.ReadPlatformValues(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("no platform values: ConfigMap %s/%s not found, and %w", r.namespace, gitops.PlatformValuesConfigMap, err)
+		return nil, "", fmt.Errorf("no platform values: %s: %w", compiler.PlatformFile, err)
 	}
-	return raw, gitops.PlatformValuesPath, nil
+	return raw, compiler.PlatformFile, nil
 }
 
-// catalog returns platform/catalog.yaml. It is the former serviceCatalog
+// catalog returns catalogs.yaml. It is the former serviceCatalog
 // block; a file that keeps the serviceCatalog wrapper is read as well.
 func (r *platformRepository) catalog(ctx context.Context) (map[string]interface{}, error) {
 	if r.deployments == nil {

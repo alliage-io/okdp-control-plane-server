@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://okdp.io/schemas/contracts/s3.schema.json",
   "title": "S3 object storage",
-  "description": "S3-compatible object storage (AWS S3, MinIO, SeaweedFS, RustFS, ...). The connection carries endpoints. Consumers usually bring their own identity (an s3SecretRef parameter); secretRef is set on stores declared by hand, and on a store's output only when it has credentials its consumers can use.",
+  "description": "S3-compatible object storage (AWS S3, MinIO, SeaweedFS, RustFS, ...). The connection carries endpoints. Consumers of a store bring their own identity (an s3SecretRef parameter) or claim a bucket: a store that provisions buckets (provisions: s3) creates one per claim, with an identity limited to it, and publishes its connection with the bucket and that identity's credentials Secret. secretRef is set on stores declared by hand, on a claim's connection, and on a store's output only when it has credentials its consumers can use. x-okdp-claim: what a claim may request of a store that provisions buckets.",
   "type": "object",
   "x-okdp-contract": "s3",
   "x-okdp-icon": "pi pi-box",
@@ -29,7 +29,13 @@
     "bucket": {
       "type": "string",
       "title": "Bucket",
-      "description": "Set when the store is declared by hand. A store published by a chart leaves it unset: its consumers name their own bucket."
+      "description": "Set when the store is declared by hand, and on a claim's connection: the bucket provisioned for the claim. A store's own output leaves it unset: its consumers name their own bucket."
+    },
+    "paths": {
+      "type": "array",
+      "title": "Paths",
+      "items": { "type": "string" },
+      "description": "The prefixes of the bucket a store seeded for a claim, as requested: each holds an empty .keep object."
     },
     "region": {
       "type": "string",
@@ -57,5 +63,24 @@
     }
   },
   "required": ["apiUrl"],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "x-okdp-claim": {
+    "title": "Bucket claim",
+    "description": "What a claim may request of a store that provisions buckets (provisions: s3): a bucket of its own, named after the claim's ID, and an identity that reads, lists and writes it, its keys in the credentials Secret; and the prefixes to seed in it. Defaults apply when a claim asks nothing.",
+    "type": "object",
+    "properties": {
+      "paths": {
+        "type": "array",
+        "title": "Paths",
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$"
+        },
+        "default": [],
+        "description": "Prefixes of the bucket that must exist before the consumer writes to them (Spark's event log directory): each is seeded with an empty .keep object. Segments joined by single slashes, no leading or trailing slash."
+      }
+    },
+    "additionalProperties": false
+  }
 }

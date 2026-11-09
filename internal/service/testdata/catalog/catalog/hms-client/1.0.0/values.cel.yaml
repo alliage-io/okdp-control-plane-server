@@ -1,0 +1,3 @@
+# The client chart's values: the metastore's address.
+client:
+  metastore: ${{ values.metastore.thriftUri }}

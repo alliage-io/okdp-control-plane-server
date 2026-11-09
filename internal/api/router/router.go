@@ -13,7 +13,7 @@ import (
 
 // SetupRouter initializes the Gin router and defines routes. A nil verifier
 // serves the API without token verification, which only AUTH_DISABLED produces.
-func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler *handlers.CapabilitiesHandler, projectHandler *handlers.ProjectHandler, identityHandler *handlers.IdentityHandler, secretStoreHandler *handlers.SecretStoreHandler, externalSecretHandler *handlers.ExternalSecretHandler, serviceHandler *handlers.ServiceHandler, sparkHandler *handlers.SparkHandler, connectionHandler *handlers.ConnectionHandler, sqlHandler *handlers.SqlHandler) *gin.Engine {
+func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler *handlers.CapabilitiesHandler, projectHandler *handlers.ProjectHandler, identityHandler *handlers.IdentityHandler, secretStoreHandler *handlers.SecretStoreHandler, externalSecretHandler *handlers.ExternalSecretHandler, serviceHandler *handlers.ServiceHandler, sparkHandler *handlers.SparkHandler, connectionHandler *handlers.ConnectionHandler, sqlHandler *handlers.SqlHandler, claimHandler *handlers.ClaimHandler) *gin.Engine {
 	r := gin.New() // Use New() to skip default logger/recovery (we add them manually)
 
 	// Middleware
@@ -159,6 +159,19 @@ func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler
 			services.POST("/:serviceName/sql", sqlHandler.ExecuteQuery)
 		}
 		api.GET("/projects/:name/metrics", requireProject, serviceHandler.GetProjectMetrics)
+
+		// Claims: the named claims of a project (its project.yaml), the
+		// classes a claim may be of, and the claims of an instance, bound to
+		// their providers.
+		claims := api.Group("/projects/:name/claims", requireProject)
+		{
+			claims.GET("", claimHandler.ListNamedClaims)
+			claims.POST("", claimHandler.CreateNamedClaim)
+			claims.PUT("/:claimName", claimHandler.UpdateNamedClaim)
+			claims.DELETE("/:claimName", claimHandler.DeleteNamedClaim)
+		}
+		api.GET("/projects/:name/provisioning", requireProject, claimHandler.GetProvisioning)
+		api.GET("/projects/:name/services/:serviceName/claims", requireProject, claimHandler.GetInstanceClaims)
 
 		// Spark config (from the platform values) + CRD schema
 		api.GET("/spark-config", sparkHandler.GetSparkConfig)

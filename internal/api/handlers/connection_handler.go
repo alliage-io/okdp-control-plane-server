@@ -41,7 +41,7 @@ func (h *ConnectionHandler) GetContracts(c *gin.Context) {
 
 // ListConnections godoc
 // @Summary      List the external connections of a project
-// @Description  Connections declared in the project (projects/<p>/connections/<name>.yaml in the deployments repository). Connections published by deployed instances are returned by the internal endpoint.
+// @Description  Connections declared in the project (connections.<name> of projects/<p>/project.yaml in the deployments repository). Connections published by deployed instances are returned by the internal endpoint; the platform's connections (platform.yaml) are offered by the selectable endpoint.
 // @Tags         connections
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
@@ -64,6 +64,7 @@ func (h *ConnectionHandler) list(c *gin.Context, namespace string) {
 
 // ListSelectable godoc
 // @Summary      Connections offered for a package input of a given contract
+// @Description  The project's connections (scope project), the platform's (scope platform: connections.<name> of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed)
 // @Tags         connections
 // @Produce      json
 // @Param        name path string true "Project name"
@@ -125,7 +126,7 @@ func (h *ConnectionHandler) ListInternalConnections(c *gin.Context) {
 
 // CreateConnection godoc
 // @Summary      Create an external connection in a project
-// @Description  Stores the credential fields in a Kubernetes Secret of the project namespace and commits the connection file referencing it (secretRef) to the deployments repository
+// @Description  Stores the credential fields in a Kubernetes Secret of the project namespace and commits the connection, an entry of the project's project.yaml referencing it (secretRef), to the deployments repository, checked by a compile of the tree. A name of a platform connection is refused.
 // @Tags         connections
 // @Accept       json
 // @Produce      json
@@ -163,7 +164,7 @@ func (h *ConnectionHandler) create(c *gin.Context, namespace string) {
 
 // UpdateConnection godoc
 // @Summary      Update an external connection of a project
-// @Description  Commits the connection file, once the instances that layer it in compile with it (a check: okdp-gitops compiles them again in CI, on the commit). 400 with code does-not-compile when one of them no longer compiles with it.
+// @Description  Commits the connection, the entry of the project's project.yaml, once the instances that compiled still compile with it (a check: okdp-gitops compiles the whole tree, and again in CI, on the commit). 400 with code does-not-compile when one of them no longer compiles with it.
 // @Tags         connections
 // @Accept       json
 // @Produce      json
@@ -196,7 +197,7 @@ func (h *ConnectionHandler) update(c *gin.Context, namespace string) {
 
 // DeleteConnection godoc
 // @Summary      Delete an external connection of a project
-// @Description  Removes the connection file from the deployments repository and the Secret the console wrote for it. 400 while an instance still layers the connection in.
+// @Description  Removes the connection from the project's project.yaml and the Secret the console wrote for it. 400 while an instance still references the connection.
 // @Tags         connections
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"

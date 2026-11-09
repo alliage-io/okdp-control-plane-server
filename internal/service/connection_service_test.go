@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	gitcatalog "github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -118,8 +119,8 @@ type testEnv struct {
 
 func newServiceUnderTest(t *testing.T) (*DefaultConnectionService, *testEnv, *gitops.MemoryStore) {
 	t.Helper()
-	env := &testEnv{store: gitops.NewMemoryStore(nil), secrets: newFakeSecrets(), descriptors: &fakeDescriptors{}}
-	env.deployments = gitops.NewDeployments(env.store, nil)
+	env := &testEnv{store: gitops.NewMemoryStore(map[string]string{"projects/demo/project.yaml": "{}\n"}), secrets: newFakeSecrets(), descriptors: &fakeDescriptors{}}
+	env.deployments = gitops.NewDeployments(env.store)
 	catalog, err := testContractCatalog()
 	require.NoError(t, err)
 	lister := func(context.Context, string) ([]models.ServiceInstance, error) { return env.instances, nil }
@@ -152,13 +153,12 @@ func TestCreateStoresCredentialsInASecretAndNotInGit(t *testing.T) {
 	response, err := svc.Create(context.Background(), "demo", postgresRequest())
 	require.NoError(t, err)
 
-	file := store.Files()["projects/demo/connections/warehouse.yaml"]
-	assert.Contains(t, file, "contract: database-server")
+	file := store.Files()["projects/demo/project.yaml"]
+	assert.Contains(t, file, "connections:\n  warehouse:\n    contract: database-server\n    description: Corporate warehouse\n")
 	assert.Contains(t, file, "host: db.example.com")
-	assert.Contains(t, file, "secretRef:\n      name: warehouse-credentials")
+	assert.Contains(t, file, "    secretRef:\n      name: warehouse-credentials")
 	assert.NotContains(t, file, "s3cret", "a password must never be committed")
 	assert.NotContains(t, file, "reader", "secret fields stay in the Secret")
-	assert.Contains(t, store.Files(), "projects/demo/project.yaml", "okdp-gitops compile refuses a project directory without it")
 	assertNoOutput(t, store.Files())
 
 	secret := env.secrets.secrets["demo/warehouse-credentials"]
@@ -202,7 +202,19 @@ func TestCreateRejectsInvalidInput(t *testing.T) {
 			assert.True(t, IsValidationError(err), "got %v", err)
 		})
 	}
-	assert.Empty(t, store.Files())
+	assert.Equal(t, map[string]string{"projects/demo/project.yaml": "{}\n"}, store.Files())
+}
+
+// A connection of the platform's name is refused: a project adds
+// connections to the platform's, it changes none.
+func TestCreateRefusesTheNameOfAPlatformConnection(t *testing.T) {
+	svc, _, store := newServiceUnderTest(t)
+	_, err := store.Update(context.Background(), gitops.Commit{Subject: "the platform"}, func(tx gitops.Tx) error {
+		return tx.WriteFile("platform.yaml", []byte("connections:\n  warehouse: {contract: hive, thriftUri: thrift://hms:9083}\n"))
+	})
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), "demo", postgresRequest())
+	assert.True(t, IsValidationError(err), "got %v", err)
 }
 
 func TestUpdateOnlyWritesTheResubmittedCredentials(t *testing.T) {
@@ -220,7 +232,7 @@ func TestUpdateOnlyWritesTheResubmittedCredentials(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "warehouse-credentials", response.Values["secretRef"], "the reference survives an edit without credentials")
-	assert.Contains(t, store.Files()["projects/demo/connections/warehouse.yaml"], "port: 6432")
+	assert.Contains(t, store.Files()["projects/demo/project.yaml"], "port: 6432")
 	assert.Equal(t, "s3cret", string(env.secrets.secrets["demo/warehouse-credentials"]["password"]))
 
 	edit.Values["password"] = "rotated"
@@ -248,7 +260,7 @@ func TestCreateCanPointAtAnExistingSecret(t *testing.T) {
 	response, err := svc.Create(context.Background(), "demo", req)
 	require.NoError(t, err)
 
-	assert.Contains(t, store.Files()["projects/demo/connections/warehouse.yaml"], "name: vault-db")
+	assert.Contains(t, store.Files()["projects/demo/project.yaml"], "name: vault-db")
 	assert.False(t, response.CredentialsSecret.Owned)
 	_, wrote := env.secrets.secrets["demo/warehouse-credentials"]
 	assert.False(t, wrote, "nothing is written when the credentials live elsewhere")
@@ -293,7 +305,7 @@ func TestDeleteRemovesTheSecretItWrote(t *testing.T) {
 
 	require.NoError(t, svc.Delete(context.Background(), "demo", "warehouse"))
 
-	assert.NotContains(t, store.Files(), "projects/demo/connections/warehouse.yaml")
+	assert.NotContains(t, store.Files()["projects/demo/project.yaml"], "warehouse")
 	_, stillThere := env.secrets.secrets["demo/warehouse-credentials"]
 	assert.False(t, stillThere)
 }
@@ -313,21 +325,28 @@ func TestDeleteLeavesASecretItDoesNotOwn(t *testing.T) {
 	assert.True(t, stillThere, "a Secret without the managed-by label is left alone")
 }
 
-// Both engines fail to render an instance whose connection file is gone.
-func TestDeleteRefusesAConnectionAnInstanceLayersIn(t *testing.T) {
-	svc, env, _ := newServiceUnderTest(t)
-	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+// An instance that references a connection does not compile without it:
+// the compile of the tree refuses its removal.
+func TestDeleteRefusesAConnectionAnInstanceReferences(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	_, err := store.Update(context.Background(), gitops.Commit{Subject: "a catalog"}, func(tx gitops.Tx) error {
+		return tx.WriteFile(gitops.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n"))
+	})
 	require.NoError(t, err)
-	_, err = env.deployments.CreateInstance(context.Background(), auth.Actor{Username: "alice"}, gitops.InstanceState{
-		Instance: gitops.Instance{Name: "hive", Project: "demo", Service: "hive-metastore", Chart: "oci://r/hive-metastore", Version: "1.0.0", Connections: []string{"warehouse"}},
+	env.deployments.Compiler = gitops.NewCompiler(&gitcatalog.Loader{Dirs: map[string]string{"test": "testdata/catalog"}})
+	_, err = svc.Create(context.Background(), "demo", models.ConnectionRequest{
+		Name: "shared-hms", Type: "hive", Values: map[string]any{"thriftUri": "thrift://hms:9083"},
+	})
+	require.NoError(t, err)
+	_, err = env.deployments.CreateInstance(context.Background(), auth.Actor{Username: "alice"}, gitops.Instance{
+		Name: "client", Project: "demo", Service: "hms-client", Version: "1.0.0", Values: map[string]any{"metastore": "shared-hms"},
 	})
 	require.NoError(t, err)
 
-	err = svc.Delete(context.Background(), "demo", "warehouse")
+	err = svc.Delete(context.Background(), "demo", "shared-hms")
 	assert.True(t, IsValidationError(err), "got %v", err)
-	assert.Contains(t, err.Error(), "hive")
-	_, stillThere := env.secrets.secrets["demo/warehouse-credentials"]
-	assert.True(t, stillThere)
+	assert.Contains(t, err.Error(), "still referenced by client")
+	assert.Contains(t, store.Files()["projects/demo/project.yaml"], "shared-hms")
 }
 
 func TestDeleteOfAnUnknownConnectionIsNotFound(t *testing.T) {
@@ -375,8 +394,12 @@ func TestListInternalReadsTheDescriptorOutputs(t *testing.T) {
 }
 
 func TestListSelectableOffersBothKindsOfTheContract(t *testing.T) {
-	svc, env, _ := newServiceUnderTest(t)
-	_, err := svc.Create(context.Background(), "demo", models.ConnectionRequest{
+	svc, env, store := newServiceUnderTest(t)
+	_, err := store.Update(context.Background(), gitops.Commit{Subject: "the platform"}, func(tx gitops.Tx) error {
+		return tx.WriteFile("platform.yaml", []byte("connections:\n  platform-hms: {contract: hive, description: The platform's, thriftUri: thrift://hms.okdp:9083}\n"))
+	})
+	require.NoError(t, err)
+	_, err = svc.Create(context.Background(), "demo", models.ConnectionRequest{
 		Name: "shared-hms", Type: "hive", Values: map[string]any{"thriftUri": "thrift://hms:9083"},
 	})
 	require.NoError(t, err)
@@ -384,19 +407,24 @@ func TestListSelectableOffersBothKindsOfTheContract(t *testing.T) {
 	require.NoError(t, err)
 	env.descriptors.list = []repository.Descriptor{
 		descriptorWith("demo-hive", repository.DescriptorOutput{Name: "demo-hive", Contract: "hive"}),
-		// database-server has no naming convention: an output of it is
-		// referenced by its name all the same.
-		descriptorWith("demo-pg", repository.DescriptorOutput{Name: "demo-pg-app", Contract: "database-server"}),
+		// An output of any contract is referenced by its name; the
+		// connection a provider publishes for a claim (named after the
+		// claim's ID) is its claimer's, not offered.
+		descriptorWith("demo-pg", repository.DescriptorOutput{Name: "demo-pg-app", Contract: "database-server"},
+			repository.DescriptorOutput{Name: "demo.hive.db", Contract: "database-server"}),
 	}
 
 	selectable, err := svc.ListSelectable(context.Background(), "demo", "hive")
 	require.NoError(t, err)
-	require.Len(t, selectable, 2)
+	require.Len(t, selectable, 3)
 	assert.Equal(t, "demo-hive", selectable[0].Name)
 	assert.True(t, selectable[0].Managed)
 	assert.Equal(t, "demo-hive", selectable[0].ProvidedBy)
-	assert.Equal(t, "shared-hms", selectable[1].Name)
-	assert.False(t, selectable[1].Managed)
+	assert.Equal(t, models.SelectableConnection{Name: "platform-hms", Scope: models.ConnectionScopePlatform, Type: "hive", Status: "Ready", Description: "The platform's"}, selectable[1],
+		"a connection of the platform, which every instance may reference")
+	assert.Equal(t, "shared-hms", selectable[2].Name)
+	assert.Equal(t, models.ConnectionScopeProject, selectable[2].Scope)
+	assert.False(t, selectable[2].Managed)
 
 	databases, err := svc.ListSelectable(context.Background(), "demo", "database-server")
 	require.NoError(t, err)
@@ -423,7 +451,7 @@ func TestAContractWithoutSecretsHasNoSecretRef(t *testing.T) {
 		Name: "shared-hms", Type: "hive", ExistingSecret: "whatever", Values: map[string]any{"thriftUri": "thrift://hms:9083"},
 	})
 	require.NoError(t, err)
-	assert.NotContains(t, store.Files()["projects/demo/connections/shared-hms.yaml"], "secretRef")
+	assert.NotContains(t, store.Files()["projects/demo/project.yaml"], "secretRef")
 	assert.Nil(t, response.CredentialsSecret)
 }
 

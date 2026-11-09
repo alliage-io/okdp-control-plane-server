@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-gitops/gitops"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestMissingKeysNameThePlatformValues(t *testing.T) {
@@ -39,13 +39,12 @@ func TestMissingKeysNameThePlatformValues(t *testing.T) {
 	}
 }
 
-// Argo CD creates no values ConfigMap: the platform values are then read from
-// Git, where both engines take them from.
-func TestPlatformValuesFallBackToGit(t *testing.T) {
+// The platform values are platform.yaml, in Git.
+func TestPlatformValuesAreThePlatformFile(t *testing.T) {
 	store := gitops.NewMemoryStore(map[string]string{
-		gitops.PlatformValuesPath: "global:\n  okdp:\n    ingress:\n      suffix: okdp.sandbox\n",
+		compiler.PlatformFile: "global:\n  okdp:\n    ingress:\n      suffix: okdp.sandbox\n",
 	})
-	repo := NewPlatformRepository(fake.NewSimpleClientset(), gitops.ReleasesNamespace, gitops.NewDeployments(store, nil))
+	repo := NewPlatformRepository(gitops.NewDeployments(store))
 	suffix, err := repo.GetIngressSuffix(context.Background())
 	if err != nil || suffix != "okdp.sandbox" {
 		t.Fatalf("suffix = %q, err = %v", suffix, err)
@@ -53,8 +52,8 @@ func TestPlatformValuesFallBackToGit(t *testing.T) {
 }
 
 func TestNoPlatformValuesAtAllIsAnError(t *testing.T) {
-	repo := NewPlatformRepository(fake.NewSimpleClientset(), gitops.ReleasesNamespace, gitops.NewDeployments(gitops.NewMemoryStore(nil), nil))
-	if _, err := repo.GetIngressSuffix(context.Background()); err == nil || !strings.Contains(err.Error(), gitops.PlatformValuesConfigMap) {
-		t.Fatalf("err = %v, want one naming the ConfigMap", err)
+	repo := NewPlatformRepository(gitops.NewDeployments(gitops.NewMemoryStore(nil)))
+	if _, err := repo.GetIngressSuffix(context.Background()); err == nil || !strings.Contains(err.Error(), compiler.PlatformFile) {
+		t.Fatalf("err = %v, want one naming %s", err, compiler.PlatformFile)
 	}
 }

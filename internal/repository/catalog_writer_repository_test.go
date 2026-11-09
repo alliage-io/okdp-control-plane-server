@@ -69,8 +69,8 @@ func newWriterWith(t *testing.T, categories []interface{}) (CatalogWriterReposit
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := gitops.NewMemoryStore(map[string]string{gitops.CatalogPath: string(raw)})
-	d := gitops.NewDeployments(store, nil)
+	store := gitops.NewMemoryStore(map[string]string{gitops.CatalogsFile: string(raw)})
+	d := gitops.NewDeployments(store)
 	w := NewCatalogWriterRepository(d)
 	read := func() []interface{} {
 		doc, err := d.ReadCatalog(context.Background())

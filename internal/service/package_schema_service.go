@@ -21,7 +21,7 @@ type ServiceVersionsResponse struct {
 }
 
 // CatalogSource opens the catalogs of the platform: the repositories
-// platform/catalog.yaml names.
+// catalogs.yaml names.
 type CatalogSource func(ctx context.Context) (*catalog.Catalogs, error)
 
 // ParameterSchemaFile is the schema of a package's parameters.
@@ -61,7 +61,7 @@ func (s *DefaultPackageSchemaService) open(ctx context.Context) (*catalog.Catalo
 	return s.catalogs(ctx)
 }
 
-// menuEntry returns the console menu entry of a service (platform/catalog.yaml).
+// menuEntry returns the console menu entry of a service (catalogs.yaml).
 func (s *DefaultPackageSchemaService) menuEntry(ctx context.Context, serviceName string) (*models.PlatformService, error) {
 	services, err := s.contextRepo.GetPlatformServices(ctx)
 	if err != nil {
@@ -233,9 +233,9 @@ func packageSchema(pkg fs.FS) (map[string]any, error) {
 func IsCatalogNotFound(err error) bool { return errors.Is(err, catalog.ErrNotFound) }
 
 // PlatformKeys are the root properties of a package's parameters that the
-// platform fills, never the user: the platform values (global) and the
-// connections, given by the context of the compile.
-var PlatformKeys = []string{"global", "connections"}
+// platform fills, never the user: the platform values (global), the
+// connections and the named claims, given by the context of the compile.
+var PlatformKeys = []string{"global", "connections", "claims"}
 
 // parameterSchema turns a package's config.schema.json into the schema of the
 // user parameters: the same document without the reserved root properties
@@ -288,6 +288,7 @@ func inputsFromMarkers(parameters map[string]any) []models.PackageInput {
 	var inputs []models.PackageInput
 	walkConnectionRefs(parameters, "", func(p string, property map[string]any, contract string, required bool) {
 		description, _ := property["description"].(string)
+		marker, _ := property[ConnectionRefKeyword].(map[string]any)
 		// A default lets the form say the binding is inherited instead of
 		// showing None, which reads as "nothing", the opposite of the truth.
 		defaultValue, _ := property["default"].(string)
@@ -298,6 +299,16 @@ func inputsFromMarkers(parameters map[string]any) []models.PackageInput {
 			Optional:    !required,
 			Default:     defaultValue,
 			Description: description,
+		}
+		input.Provision, _ = marker["provision"].(bool)
+		input.Request, _ = marker["request"].(map[string]any)
+		input.Require, _ = marker["require"].(map[string]any)
+		if claim, ok := property["default"].(map[string]any); ok && input.Provision {
+			template := &models.ClaimTemplate{}
+			template.Class, _ = claim["class"].(string)
+			template.Provider, _ = claim["provider"].(string)
+			template.Request, _ = claim["request"].(map[string]any)
+			input.DefaultClaim = template
 		}
 		if !strings.ContainsAny(p, ".[") {
 			input.Parameter = p

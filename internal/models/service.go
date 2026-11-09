@@ -96,8 +96,8 @@ type ServiceInstance struct {
 
 // Kinds of ServiceConnection.
 const (
-	// ConnectionKindExternal is a connection declared in the project
-	// (projects/<p>/connections/<name>.yaml).
+	// ConnectionKindExternal is a connection declared in the tree: the
+	// project's (its project.yaml) or the platform's (platform.yaml).
 	ConnectionKindExternal = "Connection"
 	// ConnectionKindInternal is a connection provided by another instance of
 	// the project (the connections its okdp.info.yaml provides).

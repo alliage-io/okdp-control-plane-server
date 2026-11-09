@@ -118,3 +118,33 @@ func TestInputsFromMarkersWalksNestedRefs(t *testing.T) {
 		}
 	}
 }
+
+func TestInputsFromMarkersReadsAClaimTemplate(t *testing.T) {
+	var schema map[string]any
+	raw := `{
+  "properties": {
+    "db": {"type": ["string", "object"], "default": {},
+           "x-okdp-connection-ref": {"contract": "database-server", "provision": true,
+             "request": {"extensions": ["vector"]}, "require": {"required": ["secretRef"]}}},
+    "store": {"type": ["string", "object"], "default": {"class": "fast"},
+              "x-okdp-connection-ref": {"contract": "s3", "provision": true}}
+  }
+}`
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatal(err)
+	}
+	inputs := inputsFromMarkers(schema)
+	if len(inputs) != 2 {
+		t.Fatalf("got %d inputs, want 2: %+v", len(inputs), inputs)
+	}
+	db := inputs[0]
+	if !db.Provision || db.DefaultClaim == nil || db.Default != "" {
+		t.Errorf("db = %+v, want a claim template by default", db)
+	}
+	if db.Request["extensions"] == nil || db.Require["required"] == nil {
+		t.Errorf("db = %+v, want the package's request and requirement", db)
+	}
+	if inputs[1].DefaultClaim == nil || inputs[1].DefaultClaim.Class != "fast" {
+		t.Errorf("store = %+v, want the class of its claim template", inputs[1])
+	}
+}

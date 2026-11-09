@@ -17,23 +17,24 @@ import (
 )
 
 // handWritten is a project a GitOps user declared in Git: the console never
-// saw it, and its namespace (created by the engine) has no okdp.io/project label.
-const handWritten = "# declared by hand\nname: demo\ndescription: Demo project\n"
+// saw it, and its namespace (created by the engine) has no okdp.io/project
+// label. Its description is the key description of project.yaml.
+const handWritten = "# declared by hand\ndescription: Demo project\nglobal: {}\n"
 
 func newProjectServiceUnderTest(files map[string]string) (*DefaultProjectService, *mocks.ProjectNamespaceRepository, *gitops.MemoryStore) {
 	namespaces := new(mocks.ProjectNamespaceRepository)
 	store := gitops.NewMemoryStore(files)
-	return NewDefaultProjectService(namespaces, gitops.NewDeployments(store, nil)), namespaces, store
+	return NewDefaultProjectService(namespaces, gitops.NewDeployments(store)), namespaces, store
 }
 
 // Requirement 3: a project written by hand in Git is a project for the console.
 func TestProjectsWrittenInGitAreListedAndResolved(t *testing.T) {
 	svc, _, _ := newProjectServiceUnderTest(map[string]string{
-		"projects/demo/project.yaml":         handWritten,
-		"projects/dcr/project.yaml":          "name: dcr\n",
-		"projects/dcr/services/trino/x.yaml": "x: 1\n",
-		"projects/no-file/services/a/x.yaml": "x: 1\n",
-		"platform/components/00-crds/x.yaml": "x: 1\n",
+		"projects/demo/project.yaml":                 handWritten,
+		"projects/dcr/project.yaml":                  "{}\n",
+		"projects/dcr/instances/trino/instance.yaml": "service: trino\nversion: 1.0.0\n",
+		"projects/no-file/instances/a/instance.yaml": "service: trino\nversion: 1.0.0\n",
+		"platform.yaml":                              "{}\n",
 	})
 	ctx := context.Background()
 
@@ -66,7 +67,7 @@ func TestCreateProjectCommitsProjectYamlAndCreatesTheNamespace(t *testing.T) {
 
 	namespaces.On("CreateNamespace", ctx, project).Return(true, nil)
 	require.NoError(t, svc.CreateProject(ctx, project))
-	assert.Equal(t, "name: demo\ndescription: Demo project\n", store.Files()["projects/demo/project.yaml"])
+	assert.Equal(t, "description: Demo project\n", store.Files()["projects/demo/project.yaml"])
 	assertNoOutput(t, store.Files())
 	assert.Equal(t, "okdp: create project demo by alice"+coAuthor, store.Messages[len(store.Messages)-1])
 	namespaces.AssertExpectations(t)
@@ -129,7 +130,7 @@ func TestUpdateProjectWritesTheDescriptionOfAHandWrittenProject(t *testing.T) {
 	updated, err := svc.UpdateProject(ctx, &models.Project{Name: "demo", Description: "Edited"})
 	require.NoError(t, err)
 	assert.Equal(t, &models.Project{Name: "demo", Description: "Edited"}, updated)
-	assert.Equal(t, "# declared by hand\nname: demo\ndescription: Edited\n", store.Files()["projects/demo/project.yaml"])
+	assert.Equal(t, "# declared by hand\ndescription: Edited\nglobal: {}\n", store.Files()["projects/demo/project.yaml"])
 
 	_, err = svc.UpdateProject(ctx, &models.Project{Name: "missing", Description: "x"})
 	assert.True(t, apierrors.IsNotFound(err), "got %v", err)
@@ -139,8 +140,8 @@ func TestUpdateProjectWritesTheDescriptionOfAHandWrittenProject(t *testing.T) {
 // release, then the namespace if the console created it.
 func TestDeleteProjectRemovesItFromGitThenTheNamespace(t *testing.T) {
 	svc, namespaces, store := newProjectServiceUnderTest(map[string]string{
-		"projects/demo/project.yaml":                handWritten,
-		"projects/demo/services/hive/instance.yaml": "name: hive\n",
+		"projects/demo/project.yaml":                 handWritten,
+		"projects/demo/instances/hive/instance.yaml": "service: hive-metastore\nversion: 1.0.0\n",
 	})
 	ctx := context.Background()
 

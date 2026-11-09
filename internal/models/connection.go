@@ -1,9 +1,13 @@
 package models
 
-// ConnectionScopeProject is the only scope a connection has: it lives in the
-// namespace of the project that declares it. The cluster-wide scope was removed
-// on 2026-08-10, nothing consumed it and no ClusterConnection existed.
-const ConnectionScopeProject = "project"
+// The scopes of a connection: a project's (connections.<name> of its
+// project.yaml), in the namespace of the project that declares it, or the
+// platform's (connections.<name> of platform.yaml), which every instance may
+// reference and only the platform's administrators write, in Git.
+const (
+	ConnectionScopeProject  = "project"
+	ConnectionScopePlatform = "platform"
+)
 
 // Reasons returned by a connectivity test, so the console can tell a network
 // problem from a credential problem instead of showing a raw driver error.
@@ -31,7 +35,7 @@ type ConnectionField struct {
 	Type     string `json:"type"`
 	Required bool   `json:"required"`
 	// Secret says where the value is stored: in the credentials Secret rather
-	// than in the connection file. It says nothing about how it is typed in.
+	// than in the connection's entry. It says nothing about how it is typed in.
 	Secret bool `json:"secret,omitempty"`
 	// Masked hides the value as it is typed. A database user name lives in the
 	// Secret because the contract puts it there, but hiding it behind dots only
@@ -94,12 +98,14 @@ type ContractDescriptor struct {
 	// internal view, where the connections come from the deployed services,
 	// but offers no creation form.
 	External bool `json:"external"`
-	// Internal reports that the contract has a naming convention
-	// (x-okdp-internal in the contract schema: hive, iceberg-catalog, trino):
-	// an instance's output of it is named after the instance's release. An
-	// output of any contract is selectable, by its name.
-	Internal bool              `json:"internal"`
-	Fields   []ConnectionField `json:"fields"`
+	// Fields are the connection's fields, what a provider publishes (the
+	// contract's properties). An instance's output of any contract is
+	// selectable, by its name: no connection is computed from a name.
+	Fields []ConnectionField `json:"fields"`
+	// ClaimSchema is what a claim of the contract may request of the
+	// instance that provisions it (x-okdp-claim, a JSON Schema: a database's
+	// extensions, a bucket's paths), nil when the contract takes no request.
+	ClaimSchema map[string]any `json:"claimSchema,omitempty"`
 	// EndpointFrom names the value fields carrying the address a consumer would
 	// reach, most specific first. A contract publishing a plain host and port
 	// needs none: that convention is the fallback.
@@ -262,6 +268,20 @@ type PackageInput struct {
 	// nothing (the property's schema default). The console must leave the
 	// parameter out rather than send an empty string, which would win over it.
 	Default string `json:"default,omitempty"`
+	// DefaultClaim is set when the default is a claim, the package's claim
+	// template ({} for a connection of its own of the default class): the
+	// parameter left out claims it.
+	DefaultClaim *ClaimTemplate `json:"defaultClaim,omitempty"`
+	// Provision reports that the reference takes a claim (a map in place of
+	// a name: {}, {class}, {provider}, with a request) or a named claim of
+	// the project (x-okdp-connection-ref's provision).
+	Provision bool `json:"provision,omitempty"`
+	// Request is what the package fixes of the request of every claim of
+	// the reference, the instance's merged over it.
+	Request map[string]any `json:"request,omitempty"`
+	// Require is what the package requires of the connection beyond its
+	// contract, a JSON Schema (x-okdp-connection-ref's require).
+	Require map[string]any `json:"require,omitempty"`
 	// Description is shown next to the field.
 	Description string `json:"description,omitempty"`
 }

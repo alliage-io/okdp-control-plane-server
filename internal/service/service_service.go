@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
@@ -45,14 +46,14 @@ var servicesResource = schema.GroupResource{Group: "okdp.io", Resource: "service
 
 // ServiceService manages platform services (deploy, monitor, delete) and exposes the catalog.
 //
-// Desired state is written to the deployments Git repositories, the sources
+// Desired state is written to the deployments Git repositories, the tree
 // only; what each compiled instance publishes is read from their output
 // (okdp.info.yaml), as okdp-gitops compile wrote it in CI (it may lag
 // behind the sources), observed state from the cluster (workloads, and the
 // objects of the GitOps engine).
 type ServiceService interface {
 	GetPlatformServices(ctx context.Context) ([]models.PlatformService, error)
-	// AddPlatformService exposes a new service in the catalog (platform/catalog.yaml).
+	// AddPlatformService exposes a new service in the catalog (catalogs.yaml).
 	AddPlatformService(ctx context.Context, svc models.PlatformService) (*models.PlatformService, error)
 	// UpdatePlatformService updates an existing catalog service (name from the path).
 	UpdatePlatformService(ctx context.Context, name string, svc models.PlatformService) (*models.PlatformService, error)
@@ -103,6 +104,9 @@ type ServiceDeps struct {
 	// Changes is shared with the other writers of the deployments repository,
 	// so a live stream hears about their commits too. Created when nil.
 	Changes *ChangeNotifier
+	// Claims checks the claims the parameters write or name, before the
+	// compile does (nil: the compile only).
+	Claims ClaimService
 }
 
 type DefaultServiceService struct {
@@ -117,6 +121,7 @@ type DefaultServiceService struct {
 	typedClient     kubernetes.Interface
 	sidecarPrefixes []string
 	changes         *ChangeNotifier
+	claims          ClaimService
 }
 
 func NewDefaultServiceService(d ServiceDeps) *DefaultServiceService {
@@ -135,6 +140,7 @@ func NewDefaultServiceService(d ServiceDeps) *DefaultServiceService {
 		typedClient:     d.TypedClient,
 		sidecarPrefixes: d.SidecarPrefixes,
 		changes:         d.Changes,
+		claims:          d.Claims,
 	}
 }
 
@@ -314,8 +320,8 @@ func normalizeAndValidateCatalogService(svc *models.PlatformService) error {
 // --- Instances: desired state in Git ---
 
 // ReleaseNameTakenError is a new instance whose release name <p>-<i> another
-// project's instance (or a platform component) already uses. The handler
-// answers 409 with its own code, distinct from a duplicate instance.
+// project's instance already uses. The handler answers 409 with its own
+// code, distinct from a duplicate instance.
 type ReleaseNameTakenError struct{ *gitops.ErrReleaseTaken }
 
 // IsReleaseNameTaken reports whether err is a release-name collision.
@@ -377,12 +383,7 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 		return nil, invalid("%v", err)
 	}
 
-	if err := s.validateParameters(ctx, req.Service, deployTag, req.Parameters); err != nil {
-		return nil, err
-	}
-
-	connections, err := s.deployments.ListConnections(ctx, project)
-	if err != nil {
+	if err := s.validateParameters(ctx, project, req.Service, deployTag, req.Parameters); err != nil {
 		return nil, err
 	}
 
@@ -390,17 +391,14 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 	if values == nil {
 		values = map[string]any{}
 	}
-	state := gitops.InstanceState{
-		Instance: gitops.Instance{
-			Name:        instanceName,
-			Project:     project,
-			Service:     req.Service,
-			Version:     deployTag,
-			Connections: referencedConnections(values, connectionNames(connections)),
-		},
-		Values: values,
+	state := gitops.Instance{
+		Name:    instanceName,
+		Project: project,
+		Service: req.Service,
+		Version: deployTag,
+		Values:  values,
 	}
-	if err := state.Instance.Validate(); err != nil {
+	if err := state.Validate(); err != nil {
 		return nil, invalid("%v", err)
 	}
 
@@ -433,42 +431,29 @@ const maxValidationReplays = 3
 // latest declaration and only proceeds when that declaration is the one that
 // was validated, otherwise the whole validation runs again.
 func (s *DefaultServiceService) UpdateServiceParameters(ctx context.Context, project, name string, req models.ServiceUpdateRequest) (*models.ServiceInstance, error) {
-	connections, err := s.deployments.ListConnections(ctx, project)
-	if err != nil {
-		return nil, err
-	}
-	known := connectionNames(connections)
-
 	for attempt := 0; ; attempt++ {
 		current, err := s.deployments.GetInstance(ctx, project, name)
 		if err != nil {
 			return nil, gitError(err, name)
 		}
-		version := current.Instance.Version
+		version := current.Version
 		if req.Tag != "" {
 			version = req.Tag
 		}
 		// JSON Merge Patch (RFC 7386): a submitted key replaces the stored
 		// one, null deletes it, objects merge recursively, arrays replace.
 		values := MergePatch(current.Values, req.Parameters)
-		if current.Instance.IsPackage() {
-			if err := s.validateParameters(ctx, current.Instance.Service, version, values); err != nil {
-				return nil, err
-			}
-		} else if err := validateReserved(values); err != nil {
-			// A plain chart: Helm checks its values against the chart's
-			// schema when it renders.
+		if err := s.validateParameters(ctx, project, current.Service, version, values); err != nil {
 			return nil, err
 		}
 
-		state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *gitops.InstanceState) error {
-			if st.Instance.Service != current.Instance.Service || st.Instance.Version != current.Instance.Version ||
+		state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *gitops.Instance) error {
+			if st.Service != current.Service || st.Version != current.Version ||
 				!reflect.DeepEqual(st.Values, current.Values) {
 				return errStaleValidation
 			}
-			st.Instance.Version = version
+			st.Version = version
 			st.Values = MergePatch(st.Values, req.Parameters)
-			st.Instance.Connections = referencedConnections(st.Values, known)
 			return nil
 		})
 		if errors.Is(err, errStaleValidation) {
@@ -498,7 +483,7 @@ func (s *DefaultServiceService) DeleteService(ctx context.Context, project, name
 	}
 	s.changes.Notify(project, name, "DELETED")
 
-	releaseName := gitops.ReleaseName(project, name)
+	releaseName := compiler.ReleaseName(project, name)
 	s.cleanupOidcClient(ctx, releaseName)
 	s.cleanupUserResources(ctx, project, releaseName)
 	return nil
@@ -544,35 +529,21 @@ func MergePatch(target, patch map[string]any) map[string]any {
 	return out
 }
 
-// connectionNames lists the external connections of a project.
-func connectionNames(connections []gitops.Connection) map[string]bool {
-	names := make(map[string]bool, len(connections))
-	for _, c := range connections {
-		names[c.Name] = true
-	}
-	return names
-}
-
-// referencedConnections lists, sorted, the external connections the values
-// name: the connection files to layer in so the chart finds
-// connections.<name>. A connection reference is a plain string parameter
-// (x-okdp-connection-ref), possibly nested (a catalog of a Trino), so every
-// string of the values is a candidate; only declared connections match.
-// Layering one in that no parameter actually uses is harmless: the chart
-// ignores connections it is not asked for.
-func referencedConnections(values map[string]any, known map[string]bool) []string {
-	found := map[string]bool{}
-	walkStrings(values, func(v string) {
-		if known[v] {
-			found[v] = true
+// declaredConnections lists the connections an instance of a project may
+// reference by name: the project's (its project.yaml) and the platform's
+// (platform.yaml).
+func (s *DefaultServiceService) declaredConnections(ctx context.Context, project string) (map[string]bool, error) {
+	names := map[string]bool{}
+	for _, p := range []string{"", project} {
+		connections, err := s.deployments.ListConnections(ctx, p)
+		if err != nil {
+			return nil, err
 		}
-	})
-	out := make([]string, 0, len(found))
-	for name := range found {
-		out = append(out, name)
+		for _, c := range connections {
+			names[c.Name] = true
+		}
 	}
-	sort.Strings(out)
-	return out
+	return names, nil
 }
 
 // walkStrings calls fn on every string of a JSON-like value.
@@ -638,19 +609,18 @@ func (s *DefaultServiceService) observe(ctx context.Context, project string) pro
 
 // assemble builds the console view of an instance from its declaration and
 // what the cluster reports.
-func (s *DefaultServiceService) assemble(st gitops.InstanceState, engine repository.EngineStatus, descriptor *repository.Descriptor, externals map[string]bool, obs *projectObservation) models.ServiceInstance {
-	inst := st.Instance
-	release := inst.ReleaseName()
+func (s *DefaultServiceService) assemble(st gitops.Instance, engine repository.EngineStatus, descriptor *repository.Descriptor, externals map[string]bool, obs *projectObservation) models.ServiceInstance {
+	release := st.Release()
 	instance := models.ServiceInstance{
-		Name:            inst.Name,
+		Name:            st.Name,
 		ReleaseName:     release,
-		Service:         inst.ChartName(),
-		ServiceTag:      inst.Version,
-		TargetNamespace: inst.Project,
+		Service:         st.Service,
+		ServiceTag:      st.Version,
+		TargetNamespace: st.Project,
 		Parameters:      st.Values,
 	}
 
-	instance.Status, instance.StatusMessage = instanceStatus(inst, engine, s.engineName())
+	instance.Status, instance.StatusMessage = instanceStatus(st, engine, s.engineName())
 	if !engine.CreatedAt.IsZero() {
 		instance.CreatedAt = engine.CreatedAt.UTC().Format(time.RFC3339)
 	}
@@ -691,27 +661,29 @@ func instanceStatus(inst gitops.Instance, engine repository.EngineStatus, engine
 	return engine.Phase, truncateMessage(message)
 }
 
-// boundConnections describes what an instance is wired to: the external
-// connections its declaration layers in, and the connections of other
-// instances its values name. Resolved says whether the connection exists: a
-// file in Git for an external one, a deployed provider for an internal one.
-func boundConnections(st gitops.InstanceState, externals map[string]bool, obs *projectObservation) []models.ServiceConnection {
-	project := st.Instance.Project
+// boundConnections describes what an instance is wired to: the declared
+// connections its values name (externals: the project's and the
+// platform's), and the connections of other instances its values name. A
+// connection reference is a string parameter (x-okdp-connection-ref),
+// possibly nested (a catalog of a Trino), so every string of the values is
+// a candidate; only known connections match. Resolved says whether the
+// connection exists: declared in Git for an external one, a deployed
+// provider for an internal one.
+func boundConnections(st gitops.Instance, externals map[string]bool, obs *projectObservation) []models.ServiceConnection {
+	project := st.Project
 	byName := map[string]models.ServiceConnection{}
-	for _, name := range st.Instance.Connections {
-		byName[name] = models.ServiceConnection{Name: name, Namespace: project, Kind: models.ConnectionKindExternal, Resolved: externals == nil || externals[name]}
-	}
-	if obs != nil {
-		self := st.Instance.ReleaseName()
-		walkStrings(st.Values, func(v string) {
-			if _, seen := byName[v]; seen || v == self {
-				return
-			}
-			if obs.outputs[v] {
-				byName[v] = models.ServiceConnection{Name: v, Namespace: project, Kind: models.ConnectionKindInternal, Resolved: true}
-			}
-		})
-	}
+	self := st.Release()
+	walkStrings(st.Values, func(v string) {
+		if _, seen := byName[v]; seen || v == self {
+			return
+		}
+		switch {
+		case externals[v]:
+			byName[v] = models.ServiceConnection{Name: v, Namespace: project, Kind: models.ConnectionKindExternal, Resolved: true}
+		case obs != nil && obs.outputs[v]:
+			byName[v] = models.ServiceConnection{Name: v, Namespace: project, Kind: models.ConnectionKindInternal, Resolved: true}
+		}
+	})
 	if len(byName) == 0 {
 		return nil
 	}
@@ -728,16 +700,15 @@ func (s *DefaultServiceService) ListServices(ctx context.Context, project string
 	if err != nil {
 		return nil, err
 	}
-	connections, err := s.deployments.ListConnections(ctx, project)
+	externals, err := s.declaredConnections(ctx, project)
 	if err != nil {
 		return nil, err
 	}
-	externals := connectionNames(connections)
 	obs := s.observe(ctx, project)
 
 	result := make([]models.ServiceInstance, 0, len(states))
 	for _, st := range states {
-		release := st.Instance.ReleaseName()
+		release := st.Release()
 		result = append(result, s.assemble(st, obs.engine[release], obs.descriptors[release], externals, &obs))
 	}
 	return result, nil
@@ -748,13 +719,13 @@ func (s *DefaultServiceService) GetService(ctx context.Context, project, name st
 	if err != nil {
 		return nil, gitError(err, name)
 	}
-	connections, err := s.deployments.ListConnections(ctx, project)
+	externals, err := s.declaredConnections(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 	obs := s.observe(ctx, project)
-	release := st.Instance.ReleaseName()
-	instance := s.assemble(*st, obs.engine[release], obs.descriptors[release], connectionNames(connections), &obs)
+	release := st.Release()
+	instance := s.assemble(*st, obs.engine[release], obs.descriptors[release], externals, &obs)
 	// Only look for an explanation when the instance is not Ready and the
 	// engine gave none: scanning events has a non-trivial API cost per request.
 	if instance.Status != repository.PhaseReady && instance.Status != repository.PhasePending && instance.StatusMessage == "" {
@@ -883,7 +854,7 @@ func (s *DefaultServiceService) eventFor(ctx context.Context, project, name, eve
 	instance, err := s.GetService(ctx, project, name)
 	if apierrors.IsNotFound(err) {
 		return ServiceEvent{Type: "DELETED", Object: models.ServiceInstance{
-			Name: name, ReleaseName: gitops.ReleaseName(project, name), TargetNamespace: project,
+			Name: name, ReleaseName: compiler.ReleaseName(project, name), TargetNamespace: project,
 		}}, true
 	}
 	if err != nil {
@@ -915,7 +886,7 @@ func (s *DefaultServiceService) GetProfileImages(ctx context.Context) (map[strin
 // instanceSelector selects the workloads of an instance: every one carries
 // app.kubernetes.io/instance: <project>-<instance> (chart rules).
 func instanceSelector(project, name string) string {
-	return fmt.Sprintf("%s=%s", repository.LabelAppInstance, gitops.ReleaseName(project, name))
+	return fmt.Sprintf("%s=%s", repository.LabelAppInstance, compiler.ReleaseName(project, name))
 }
 
 func (s *DefaultServiceService) ListPods(ctx context.Context, project, serviceName string) ([]models.Pod, error) {
@@ -1012,7 +983,7 @@ func (s *DefaultServiceService) cleanupUserResources(ctx context.Context, namesp
 	}
 	others := make([]string, 0, len(survivors))
 	for i := range survivors {
-		if name := survivors[i].Instance.ReleaseName(); name != releaseName {
+		if name := survivors[i].Release(); name != releaseName {
 			others = append(others, name)
 		}
 	}
@@ -1089,7 +1060,7 @@ func (s *DefaultServiceService) resolvePlatformService(ctx context.Context, name
 	return nil, invalid("service %q is not available in the platform", name)
 }
 
-// validateReserved refuses the keys the platform fills, never values.yaml.
+// validateReserved refuses the keys the platform fills, never config.yaml.
 func validateReserved(params map[string]any) error {
 	for _, key := range PlatformKeys {
 		if _, set := params[key]; set {
@@ -1099,7 +1070,11 @@ func validateReserved(params map[string]any) error {
 	return nil
 }
 
-func (s *DefaultServiceService) validateParameters(ctx context.Context, serviceName, tag string, params map[string]any) error {
+// validateParameters checks an instance's parameters against its package's
+// parameter schema, then the claims they write or name (a class of the
+// project, a request the contract's claim schema allows), before the
+// compile of the write checks the rest.
+func (s *DefaultServiceService) validateParameters(ctx context.Context, project, serviceName, tag string, params map[string]any) error {
 	if err := validateReserved(params); err != nil {
 		return err
 	}
@@ -1159,6 +1134,12 @@ func (s *DefaultServiceService) validateParameters(ctx context.Context, serviceN
 	if err := sch.Validate(paramsAny); err != nil {
 		return invalid("parameter validation failed: invalid parameters: %v", err)
 	}
+	if s.claims != nil {
+		values, _ := paramsAny.(map[string]any)
+		if err := s.claims.ValidateClaims(ctx, project, schemaMap, values); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1184,7 +1165,7 @@ func (s *DefaultServiceService) GetPodLogs(ctx context.Context, project, service
 		}
 		return nil, fmt.Errorf("failed to get pod: %w", err)
 	}
-	if pod.Labels[repository.LabelAppInstance] != gitops.ReleaseName(project, serviceName) {
+	if pod.Labels[repository.LabelAppInstance] != compiler.ReleaseName(project, serviceName) {
 		return nil, apierrors.NewNotFound(corev1.Resource("pods"), podName)
 	}
 

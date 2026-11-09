@@ -90,7 +90,7 @@ func TestATopologyFileReplacesTheRepository(t *testing.T) {
 	topology, err = cfg.GitOps.Topology()
 	require.NoError(t, err)
 	assert.True(t, topology.Mono())
-	assert.Equal(t, "gitops/platform", topology.Platform.Path)
+	assert.Equal(t, "gitops", topology.Platform.Path)
 	assert.Equal(t, "gitops/projects/demo", topology.Project("demo", nil).Path)
 	assert.Equal(t, "gitops", topology.Output.Path)
 }

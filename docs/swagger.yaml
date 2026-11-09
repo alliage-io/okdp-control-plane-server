@@ -1,11 +1,83 @@
 basePath: /
 definitions:
+  models.BoundClaim:
+    properties:
+      binding:
+        $ref: '#/definitions/models.ClaimBinding'
+      contract:
+        type: string
+      field:
+        description: |-
+          Field is the parameter path of the reference (database,
+          catalogs[1].storage).
+        type: string
+      granted:
+        allOf:
+        - $ref: '#/definitions/models.GrantedConnection'
+        description: |-
+          Granted is the connection the provider publishes for the claim, when
+          it compiles.
+      id:
+        description: |-
+          ID is the claim's ID, the name of the connection its provider
+          publishes for it.
+        type: string
+      name:
+        description: |-
+          Name is the named claim the reference names; empty for a claim
+          written in the parameters (a claim template).
+        type: string
+    type: object
   models.Capabilities:
     properties:
       identity:
         $ref: '#/definitions/models.IdentityCapability'
       oidcProvisioning:
         $ref: '#/definitions/models.OidcProvisioningCapability'
+    type: object
+  models.ClaimBinding:
+    properties:
+      class:
+        description: |-
+          Class is the class whose provider it is; empty when the claim names
+          its provider.
+        type: string
+      default:
+        description: |-
+          Default reports that the class is the default one of the contract
+          (the claim names neither a class nor a provider).
+        type: boolean
+      instance:
+        description: |-
+          Instance is the provider's instance name, in the project Namespace
+          (projects/<namespace>/instances/<instance>).
+        type: string
+      namespace:
+        description: Namespace and Release are the provider's instance.
+        type: string
+      release:
+        type: string
+    type: object
+  models.ClaimTemplate:
+    properties:
+      class:
+        type: string
+      provider:
+        type: string
+      request:
+        additionalProperties: {}
+        type: object
+    type: object
+  models.ClaimUser:
+    properties:
+      field:
+        type: string
+      instance:
+        type: string
+      namespace:
+        type: string
+      release:
+        type: string
     type: object
   models.ConnectionCatalogResponse:
     properties:
@@ -74,7 +146,7 @@ definitions:
       secret:
         description: |-
           Secret says where the value is stored: in the credentials Secret rather
-          than in the connection file. It says nothing about how it is typed in.
+          than in the connection's entry. It says nothing about how it is typed in.
         type: boolean
       showWhen:
         allOf:
@@ -197,10 +269,40 @@ definitions:
       ready:
         type: boolean
     type: object
+  models.ContractClasses:
+    properties:
+      claimSchema:
+        additionalProperties: {}
+        description: |-
+          ClaimSchema is what a claim may request (the contract's x-okdp-claim,
+          a JSON Schema); nil when the contract takes no request.
+        type: object
+      classes:
+        items:
+          $ref: '#/definitions/models.ProvisioningClass'
+        type: array
+      contract:
+        type: string
+      default:
+        description: |-
+          Default is the default class, of the claims that name neither a class
+          nor a provider; empty when there is none (such a claim is refused).
+        type: string
+      defaultLevel:
+        description: DefaultLevel is where the default is set.
+        type: string
+    type: object
   models.ContractDescriptor:
     properties:
       category:
         type: string
+      claimSchema:
+        additionalProperties: {}
+        description: |-
+          ClaimSchema is what a claim of the contract may request of the
+          instance that provisions it (x-okdp-claim, a JSON Schema: a database's
+          extensions, a bucket's paths), nil when the contract takes no request.
+        type: object
       description:
         type: string
       displayName:
@@ -221,18 +323,15 @@ definitions:
           but offers no creation form.
         type: boolean
       fields:
+        description: |-
+          Fields are the connection's fields, what a provider publishes (the
+          contract's properties). An instance's output of any contract is
+          selectable, by its name: no connection is computed from a name.
         items:
           $ref: '#/definitions/models.ConnectionField'
         type: array
       icon:
         type: string
-      internal:
-        description: |-
-          Internal reports that the contract has a naming convention
-          (x-okdp-internal in the contract schema: hive, iceberg-catalog, trino):
-          an instance's output of it is named after the instance's release. An
-          output of any contract is selectable, by its name.
-        type: boolean
       name:
         description: |-
           Name IS the contract this descriptor produces (x-okdp-connection-ref).
@@ -374,6 +473,14 @@ definitions:
           type: string
         type: object
     type: object
+  models.GrantedConnection:
+    properties:
+      secretRef:
+        type: string
+      values:
+        additionalProperties: {}
+        type: object
+    type: object
   models.Group:
     properties:
       comment:
@@ -417,6 +524,31 @@ definitions:
       scope:
         description: Scope overrides the UI default scopes when set.
         type: string
+    type: object
+  models.InstanceClaims:
+    properties:
+      bound:
+        description: Bound are the claims of the instance's references.
+        items:
+          $ref: '#/definitions/models.BoundClaim'
+        type: array
+      error:
+        description: |-
+          Error is why the instance does not compile, the compiler's message:
+          its claims are then unknown.
+        type: string
+      provided:
+        description: Provided are the claims bound to the instance, as a provider.
+        items:
+          $ref: '#/definitions/models.ProvidedClaim'
+        type: array
+      provisions:
+        description: |-
+          Provisions are the contracts the instance's package provisions
+          (okdp.yaml provisions).
+        items:
+          type: string
+        type: array
     type: object
   models.InternalConnection:
     properties:
@@ -485,6 +617,69 @@ definitions:
       usedRaw:
         type: number
     type: object
+  models.NamedClaimRequest:
+    properties:
+      class:
+        type: string
+      contract:
+        type: string
+      name:
+        description: Name is the claim's name, on creation (the path gives it on update).
+        type: string
+      provider:
+        type: string
+      request:
+        additionalProperties: {}
+        type: object
+    required:
+    - contract
+    type: object
+  models.NamedClaimView:
+    properties:
+      binding:
+        allOf:
+        - $ref: '#/definitions/models.ClaimBinding'
+        description: |-
+          Binding is where the compile of the project's sources binds it; nil
+          when it does not bind (Error says why) or no instance compiles.
+      class:
+        description: |-
+          Class names a class of the contract (the project's or the
+          platform's); empty with Provider, or for the default class.
+        type: string
+      contract:
+        description: Contract is the contract of its connection (database-server,
+          s3).
+        type: string
+      error:
+        description: Error is why the claim does not bind, the compiler's message.
+        type: string
+      id:
+        description: |-
+          ID is the claim's ID, <project>.<name>: the name of the connection
+          its provider publishes for it.
+        type: string
+      name:
+        description: Name is the claim's name, a DNS-1123 label, no connection's name.
+        type: string
+      provider:
+        description: |-
+          Provider names the provider's instance, by its name or its release, of
+          the project or <namespace>/<instance>; never with Class.
+        type: string
+      request:
+        additionalProperties: {}
+        description: |-
+          Request is what it requests of its provider, as the contract's claim
+          schema allows (x-okdp-claim).
+        type: object
+      users:
+        description: Users are the instances of the project whose parameters name
+          it.
+        items:
+          type: string
+        type: array
+    type: object
   models.OidcProvisioningCapability:
     properties:
       provider:
@@ -511,6 +706,13 @@ definitions:
           nothing (the property's schema default). The console must leave the
           parameter out rather than send an empty string, which would win over it.
         type: string
+      defaultClaim:
+        allOf:
+        - $ref: '#/definitions/models.ClaimTemplate'
+        description: |-
+          DefaultClaim is set when the default is a claim, the package's claim
+          template ({} for a connection of its own of the default class): the
+          parameter left out claims it.
       description:
         description: Description is shown next to the field.
         type: string
@@ -529,6 +731,24 @@ definitions:
           Path is the JSON path of the marked property: "metadataDb" at the root,
           "hiveCatalogs[].metastore" inside the items of a list.
         type: string
+      provision:
+        description: |-
+          Provision reports that the reference takes a claim (a map in place of
+          a name: {}, {class}, {provider}, with a request) or a named claim of
+          the project (x-okdp-connection-ref's provision).
+        type: boolean
+      request:
+        additionalProperties: {}
+        description: |-
+          Request is what the package fixes of the request of every claim of
+          the reference, the instance's merged over it.
+        type: object
+      require:
+        additionalProperties: {}
+        description: |-
+          Require is what the package requires of the connection beyond its
+          contract, a JSON Schema (x-okdp-connection-ref's require).
+        type: object
     type: object
   models.PlatformService:
     properties:
@@ -595,6 +815,67 @@ definitions:
         type: string
       name:
         type: string
+    type: object
+  models.ProvidedClaim:
+    properties:
+      claimers:
+        description: |-
+          Claimers are the instances whose references claim it: one for a claim
+          template, every instance that names a named claim.
+        items:
+          $ref: '#/definitions/models.ClaimUser'
+        type: array
+      class:
+        description: |-
+          Class is the class the claim binds through, empty when it names its
+          provider; Default reports the default class.
+        type: string
+      contract:
+        type: string
+      default:
+        type: boolean
+      granted:
+        allOf:
+        - $ref: '#/definitions/models.GrantedConnection'
+        description: |-
+          Granted is the connection the provider publishes for the claim (its
+          okdp.info.yaml), nil when it publishes none.
+      id:
+        type: string
+      name:
+        description: Name is a named claim's name, empty for a claim template.
+        type: string
+      namespace:
+        description: Namespace is the claimers' namespace.
+        type: string
+    type: object
+  models.ProvisioningClass:
+    properties:
+      level:
+        description: |-
+          Level is where the class is defined: platform (platform.yaml)
+          or project (the project's project.yaml).
+        type: string
+      name:
+        type: string
+      provider:
+        description: |-
+          Provider is the provider's instance, <release> of the claimer's
+          project or <namespace>/<release>.
+        type: string
+      request:
+        additionalProperties: {}
+        description: |-
+          Request is what the class fixes of the request of its claims: a claim
+          that sets one of its keys is refused.
+        type: object
+    type: object
+  models.ProvisioningResponse:
+    properties:
+      contracts:
+        items:
+          $ref: '#/definitions/models.ContractClasses'
+        type: array
     type: object
   models.RenderedValues:
     properties:
@@ -1228,7 +1509,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Expose a service of the catalogs in the console menu (commits platform/catalog.yaml
+      description: Expose a service of the catalogs in the console menu (commits catalogs.yaml
         to the platform repository); its package must be in a catalog repository,
         its versions are the catalogs' (those given are checked, not stored)
       parameters:
@@ -1268,7 +1549,7 @@ paths:
       - platform-services
   /api/platform-services/{serviceName}:
     delete:
-      description: Remove an exposed service from the catalog (commits platform/catalog.yaml
+      description: Remove an exposed service from the catalog (commits catalogs.yaml
         to the deployments repository)
       parameters:
       - description: Service name
@@ -1407,7 +1688,7 @@ paths:
   /api/platform-services/{serviceName}/versions:
     get:
       description: 'Returns the versions of the service''s package in the catalogs
-        (the directories catalog/<service>/<version>/ of the repository of platform/catalog.yaml
+        (the directories catalog/<service>/<version>/ of the repository of catalogs.yaml
         holding it), highest first, and the default: the menu entry''s, else the highest'
       parameters:
       - description: Service name
@@ -1632,11 +1913,195 @@ paths:
       summary: Update a project
       tags:
       - projects
+  /api/projects/{name}/claims:
+    get:
+      description: 'The named claims of the project (claims.<name> of projects/<p>/project.yaml):
+        each a connection of its contract, declared once, that every instance of the
+        project naming it shares; with the provider the compile of the tree binds
+        it to (its class, or the provider it names), the instances that name it, and
+        why it does not bind'
+      parameters:
+      - description: Project name (= Kubernetes namespace)
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.NamedClaimView'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List the named claims of a project
+      tags:
+      - claims
+    post:
+      consumes:
+      - application/json
+      description: 'Commits claims.<name> to the project''s project.yaml (its comments
+        and other keys kept): a contract, a class of the project or the platform or
+        a provider (<instance>, <release>, <namespace>/<instance> or <namespace>/<release>),
+        and a request the contract''s claim schema allows (x-okdp-claim). Checked
+        first (the class, the request), then by the compile of the tree: refused (400,
+        code does-not-compile) when an instance that compiled no longer does'
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: The claim, its name included
+        in: body
+        name: claim
+        required: true
+        schema:
+          $ref: '#/definitions/models.NamedClaimRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.NamedClaimView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Project not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: A named claim of that name exists
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Declare a named claim
+      tags:
+      - claims
+  /api/projects/{name}/claims/{claimName}:
+    delete:
+      description: Removes claims.<claimName> from the project's project.yaml; refused
+        (400) while an instance of the project names it. Its provider keeps what the
+        claim's connection holds (a database, a bucket)
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Claim name
+        in: path
+        name: claimName
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Remove a named claim
+      tags:
+      - claims
+    put:
+      consumes:
+      - application/json
+      description: 'Replaces the declaration of claims.<claimName> in the project''s
+        project.yaml, checked as a creation is. A changed class or provider moves
+        the claim to a new, empty connection: its former provider keeps what it held'
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Claim name
+        in: path
+        name: claimName
+        required: true
+        type: string
+      - description: The claim
+        in: body
+        name: claim
+        required: true
+        schema:
+          $ref: '#/definitions/models.NamedClaimRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.NamedClaimView'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Change a named claim
+      tags:
+      - claims
   /api/projects/{name}/connections:
     get:
-      description: Connections declared in the project (projects/<p>/connections/<name>.yaml
+      description: Connections declared in the project (connections.<name> of projects/<p>/project.yaml
         in the deployments repository). Connections published by deployed instances
-        are returned by the internal endpoint.
+        are returned by the internal endpoint; the platform's connections (platform.yaml)
+        are offered by the selectable endpoint.
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1665,8 +2130,9 @@ paths:
       consumes:
       - application/json
       description: Stores the credential fields in a Kubernetes Secret of the project
-        namespace and commits the connection file referencing it (secretRef) to the
-        deployments repository
+        namespace and commits the connection, an entry of the project's project.yaml
+        referencing it (secretRef), to the deployments repository, checked by a compile
+        of the tree. A name of a platform connection is refused.
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1709,9 +2175,9 @@ paths:
       - connections
   /api/projects/{name}/connections/{connName}:
     delete:
-      description: Removes the connection file from the deployments repository and
-        the Secret the console wrote for it. 400 while an instance still layers the
-        connection in.
+      description: Removes the connection from the project's project.yaml and the
+        Secret the console wrote for it. 400 while an instance still references the
+        connection.
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1746,10 +2212,10 @@ paths:
     put:
       consumes:
       - application/json
-      description: 'Commits the connection file, once the instances that layer it
-        in compile with it (a check: okdp-gitops compiles them again in CI, on the
-        commit). 400 with code does-not-compile when one of them no longer compiles
-        with it.'
+      description: 'Commits the connection, the entry of the project''s project.yaml,
+        once the instances that compiled still compile with it (a check: okdp-gitops
+        compiles the whole tree, and again in CI, on the commit). 400 with code does-not-compile
+        when one of them no longer compiles with it.'
       parameters:
       - description: Project name (= Kubernetes namespace)
         in: path
@@ -1907,6 +2373,9 @@ paths:
       - connections
   /api/projects/{name}/connections/selectable:
     get:
+      description: 'The project''s connections (scope project), the platform''s (scope
+        platform: connections.<name> of platform.yaml, which every instance may reference),
+        and the outputs the project''s instances publish (managed)'
       parameters:
       - description: Project name
         in: path
@@ -1992,6 +2461,41 @@ paths:
       summary: Get live resource usage for every instance of a project
       tags:
       - services
+  /api/projects/{name}/provisioning:
+    get:
+      description: 'The classes a claim of the project may be of, by contract: the
+        platform''s (global.okdp.provisioning of platform.yaml) and the project''s
+        (of its project.yaml), each a provider and what it fixes of the request, the
+        default class, and the contract''s claim schema (x-okdp-claim): what a claim
+        may request'
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.ProvisioningResponse'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List the classes of the claims
+      tags:
+      - claims
   /api/projects/{name}/services:
     get:
       description: Get all deployed service instances for a project
@@ -2150,6 +2654,47 @@ paths:
       summary: Get a deployed service
       tags:
       - services
+  /api/projects/{name}/services/{serviceName}/claims:
+    get:
+      description: 'The claims of the instance''s connection references, each bound
+        to its provider (the provider of its class, or the one it names) and what
+        the provider granted; and, when its package provisions contracts (okdp.yaml
+        provisions), the claims bound to it, their claimers, and what it granted each
+        (the connection it publishes for the claim, its okdp.info.yaml). From the
+        compile of the tree: what the next deployment binds'
+      parameters:
+      - description: Project name
+        in: path
+        name: name
+        required: true
+        type: string
+      - description: Instance name
+        in: path
+        name: serviceName
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.InstanceClaims'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: List the claims of an instance
+      tags:
+      - claims
   /api/projects/{name}/services/{serviceName}/metrics:
     get:
       description: Aggregate CPU/memory usage (from metrics-server) and limits for
@@ -2187,10 +2732,10 @@ paths:
       - application/json
       description: JSON Merge Patch (RFC 7386) of the parameters (null deletes a key,
         objects merge, arrays replace) and optionally update the package version of
-        a deployed service, compiled as a check and committed to values.yaml/instance.yaml;
+        a deployed service, checked by a compile of the tree and committed to config.yaml/instance.yaml;
         okdp-gitops compile, in CI, writes the compiled tree in the output of the
         deployments Git repositories. 400 on invalid parameters, or with code does-not-compile
-        when the instance does not compile.
+        when the instance, or one that compiled before, does not compile.
       parameters:
       - description: Project name
         in: path

@@ -25,7 +25,7 @@ const credentialsSecretSuffix = "-credentials"
 
 // valueSecretRef is the key under which a connection publishes the NAME of
 // the Secret holding its credentials (never a value): secretRef.name in the
-// connection file, the field the contract schemas declare.
+// connection's entry, the field the contract schemas declare.
 const valueSecretRef = "secretRef"
 
 // connectionsResource names the resource in not-found and conflict errors.
@@ -33,11 +33,13 @@ var connectionsResource = schema.GroupResource{Group: "okdp.io", Resource: "conn
 
 // ConnectionService manages the connections of a project.
 //
-// External connections are files of the deployments Git repository
-// (projects/<p>/connections/<name>.yaml) plus a credentials Secret in the
-// project namespace. Internal connections are the outputs the instances of
-// the project publish (the provides of their compiled okdp.info.yaml),
-// whatever their contract: a parameter references one by its name.
+// External connections are entries of the project's project.yaml in the
+// deployments Git repository (connections.<name>) plus a credentials Secret
+// in the project namespace; the platform's, entries of platform.yaml, are
+// written in Git by its administrators and offered to every project.
+// Internal connections are the outputs the instances of the project publish
+// (the provides of their compiled okdp.info.yaml), whatever their contract:
+// a parameter references one by its name.
 type ConnectionService interface {
 	// Catalog returns the known contracts and whether connections can currently
 	// be persisted.
@@ -57,12 +59,12 @@ type ConnectionService interface {
 	ListInternal(ctx context.Context, project string) ([]models.InternalConnection, error)
 
 	// ListSelectable returns the connections a deployment form can offer for an
-	// input of the given contract: the project's external ones and the ones
-	// its deployed instances provide.
+	// input of the given contract: the project's external ones, the
+	// platform's, and the ones its deployed instances provide.
 	ListSelectable(ctx context.Context, project, contract string) ([]models.SelectableConnection, error)
 
 	// ListConsumers returns the services of a project bound to a connection:
-	// the instances whose declaration layers it in or whose parameters name it.
+	// the instances whose parameters name it.
 	ListConsumers(ctx context.Context, project, name string) ([]models.ConnectionConsumer, error)
 }
 
@@ -169,7 +171,7 @@ func connectionGitError(err error, name string) error {
 	case errors.Is(err, gitops.ErrExists):
 		return apierrors.NewAlreadyExists(connectionsResource, name)
 	case errors.As(err, &inUse):
-		return invalid("connection %q is still layered into %s; change them first", name, strings.Join(inUse.Users, ", "))
+		return invalid("connection %q is still referenced by %s; change them first", name, strings.Join(inUse.Users, ", "))
 	default:
 		return err
 	}
@@ -226,6 +228,13 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	// delete it, taking the running consumers' credentials with it.
 	if _, err := s.deployments.GetConnection(ctx, namespace, req.Name); err == nil {
 		return nil, apierrors.NewAlreadyExists(connectionsResource, req.Name)
+	} else if !errors.Is(err, gitops.ErrNotFound) {
+		return nil, err
+	}
+	// A level of the context adds connections, it changes none of the
+	// platform's: the compile refuses a project connection of that name.
+	if _, err := s.deployments.GetConnection(ctx, "", req.Name); err == nil {
+		return nil, invalid("connection %q: a connection of the platform has that name", req.Name)
 	} else if !errors.Is(err, gitops.ErrNotFound) {
 		return nil, err
 	}
@@ -450,8 +459,9 @@ func (s *DefaultConnectionService) outputsOf(ctx context.Context, project string
 
 // ListInternal returns the connections the project's own instances publish,
 // their outputs: another instance references one by its name, whatever its
-// contract (an output of a contract with a naming convention is named after
-// its instance's release).
+// contract (an instance's own output is named after its release by default).
+// The connections a provider publishes for the claims bound to it, named
+// after the claims' IDs, are the claimers': they are not listed.
 func (s *DefaultConnectionService) ListInternal(ctx context.Context, project string) ([]models.InternalConnection, error) {
 	descriptors, err := s.outputsOf(ctx, project)
 	if err != nil {
@@ -460,6 +470,9 @@ func (s *DefaultConnectionService) ListInternal(ctx context.Context, project str
 	result := make([]models.InternalConnection, 0)
 	for _, d := range descriptors {
 		for _, output := range d.Outputs {
+			if IsClaimID(output.Name) {
+				continue
+			}
 			result = append(result, s.outputToInternal(d, output, project))
 		}
 	}
@@ -505,6 +518,14 @@ func (s *DefaultConnectionService) outputToInternal(d repository.Descriptor, out
 }
 
 // --- helpers ---
+
+// IsClaimID reports whether an output's name is a claim's ID, the
+// connection a provider publishes for a claim bound to it: DNS-1123 labels
+// joined by dots (<project>.<release>.<parameter>, <project>.<name>), where
+// an output named by its package is a label, the release name by default.
+// Such a connection is its claimer's, reached through the claim: the
+// selectable outputs leave it out.
+func IsClaimID(name string) bool { return strings.Contains(name, ".") }
 
 // validateRequest checks a submitted connection and returns the values as they
 // should be stored: derived fields filled, fields put out of play by the
@@ -648,21 +669,25 @@ func (s *DefaultConnectionService) toResponse(connection *gitops.Connection) mod
 func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, contract string) ([]models.SelectableConnection, error) {
 	result := []models.SelectableConnection{}
 	if s.available() {
-		connections, err := s.deployments.ListConnections(ctx, project)
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range connections {
-			if contract != "" && c.Contract != contract {
-				continue
+		// The project's, then the platform's (platform.yaml), which every
+		// instance may reference.
+		for _, scope := range []struct{ project, name string }{{project, models.ConnectionScopeProject}, {"", models.ConnectionScopePlatform}} {
+			connections, err := s.deployments.ListConnections(ctx, scope.project)
+			if err != nil {
+				return nil, err
 			}
-			result = append(result, models.SelectableConnection{
-				Name:        c.Name,
-				Scope:       models.ConnectionScopeProject,
-				Type:        c.Contract,
-				Status:      "Ready",
-				Description: c.Description,
-			})
+			for _, c := range connections {
+				if contract != "" && c.Contract != contract {
+					continue
+				}
+				result = append(result, models.SelectableConnection{
+					Name:        c.Name,
+					Scope:       scope.name,
+					Type:        c.Contract,
+					Status:      "Ready",
+					Description: c.Description,
+				})
+			}
 		}
 	}
 
@@ -672,7 +697,7 @@ func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, 
 	}
 	for _, d := range descriptors {
 		for _, output := range d.Outputs {
-			if contract != "" && output.Contract != contract {
+			if (contract != "" && output.Contract != contract) || IsClaimID(output.Name) {
 				continue
 			}
 			result = append(result, models.SelectableConnection{
@@ -719,8 +744,8 @@ func endpointFrom(values map[string]any, catalog ContractCatalog, contractName s
 }
 
 // ListConsumers returns the services bound to a connection: the instances
-// whose declaration layers it in (external) or whose parameters name it
-// (internal).
+// whose parameters name it, a declared connection or an output of an
+// instance.
 func (s *DefaultConnectionService) ListConsumers(ctx context.Context, project, name string) ([]models.ConnectionConsumer, error) {
 	consumers := make([]models.ConnectionConsumer, 0)
 	if s.instances == nil {

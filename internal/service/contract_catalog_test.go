@@ -351,3 +351,33 @@ func TestTheContractsOfTheCatalogsAreReadAgainAndKeptWhenUnreadable(t *testing.T
 		t.Fatalf("no contract read yet: %v", list)
 	}
 }
+
+func TestTheClaimSchemaIsWhatAClaimMayRequest(t *testing.T) {
+	catalog := newTestCatalog(t)
+
+	db, ok := catalog.Get("database-server")
+	require.True(t, ok)
+	require.NotNil(t, db.ClaimSchema, "database-server takes requests (x-okdp-claim)")
+	assert.Contains(t, db.ClaimSchema["properties"], "extensions")
+
+	assert.NoError(t, catalog.ValidateClaimRequest("database-server", map[string]any{"extensions": []any{"vector"}, "size": "5Gi"}))
+	assert.NoError(t, catalog.ValidateClaimRequest("database-server", nil))
+	err := catalog.ValidateClaimRequest("database-server", map[string]any{"extensions": []any{"postgis"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "claim schema (x-okdp-claim)")
+	assert.Error(t, catalog.ValidateClaimRequest("database-server", map[string]any{"replicas": 2}))
+
+	// hive has no provisioner: a claim of it requests nothing.
+	hive, _ := catalog.Get("hive")
+	assert.Nil(t, hive.ClaimSchema)
+	assert.NoError(t, catalog.ValidateClaimRequest("hive", nil))
+	assert.Error(t, catalog.ValidateClaimRequest("hive", map[string]any{"size": "1Gi"}))
+	assert.Error(t, catalog.ValidateClaimRequest("nope", nil))
+}
+
+func TestAClaimIDIsNoOutputName(t *testing.T) {
+	assert.True(t, IsClaimID("demo.hive.db"))
+	assert.True(t, IsClaimID("demo.analytics"))
+	assert.False(t, IsClaimID("demo-hive"))
+	assert.False(t, IsClaimID("demo-pg-hive"))
+}

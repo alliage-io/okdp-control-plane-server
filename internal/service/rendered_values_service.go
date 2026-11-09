@@ -51,33 +51,22 @@ func (d umbrellaDependency) key() string {
 }
 
 // GetRenderedValues lists the charts of an instance with the values each is
-// rendered with: for a package instance, each dependency of its compiled
-// umbrella (the key named like the service first, then by key), its
-// compiled values under that key; for a plain chart, the chart itself. An
-// instance that was not compiled has none. A chart whose defaults cannot be
+// rendered with: each dependency of its compiled umbrella (the key named
+// like the service first, then by key), its compiled values under that
+// key. An instance that was not compiled has none. A chart whose defaults cannot be
 // fetched keeps its compiled values only (DefaultsError), it does not fail
 // the request.
 func (s *DefaultRenderedValuesService) GetRenderedValues(ctx context.Context, project, name string) ([]models.RenderedValues, error) {
-	st, err := s.deployments.GetInstance(ctx, project, name)
+	inst, err := s.deployments.GetInstance(ctx, project, name)
 	if err != nil {
 		return nil, gitError(err, name)
 	}
-	inst := st.Instance
 	compiled, err := s.deployments.ReadCompiled(ctx, project, name)
 	if errors.Is(err, gitops.ErrNotFound) {
 		return []models.RenderedValues{}, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-
-	if compiled.Chart == nil {
-		ref := compiler.ChartRef{Repository: inst.ChartRepository(), Chart: inst.ChartName(), Version: inst.Version}
-		rendered := models.RenderedValues{Name: ref.Chart, Chart: ref.Chart, ChartVersion: ref.Chart + "-" + ref.Version, ServiceVersion: inst.Version}
-		if err := s.fill(ctx, &rendered, ref, compiled.Values); err != nil {
-			return nil, err
-		}
-		return []models.RenderedValues{rendered}, nil
 	}
 
 	var umbrella struct {

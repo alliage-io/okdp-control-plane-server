@@ -74,14 +74,16 @@ func run(t *testing.T, fn func()) {
 
 func seedTrino(t *testing.T, store gitops.Store) *gitops.Deployments {
 	t.Helper()
-	d := gitops.NewDeployments(store, nil)
+	d := gitops.NewDeployments(store)
 	_, err := d.Store.Update(context.Background(), gitops.Commit{Subject: "seed"}, func(tx gitops.Tx) error {
-		return tx.WriteFile(gitops.CatalogPath, []byte("categories: []\n"))
+		if err := tx.WriteFile(gitops.CatalogsFile, []byte("categories: []\n")); err != nil {
+			return err
+		}
+		return tx.WriteFile("projects/demo/project.yaml", []byte("{}\n"))
 	})
 	require.NoError(t, err)
-	_, err = d.CreateInstance(context.Background(), auth.ActorFrom(aliceContext()), gitops.InstanceState{
-		Instance: gitops.Instance{Name: "trino", Project: "demo", Service: "trino", Version: "480.0.0-p21", Connections: []string{}},
-		Values:   map[string]any{"workers": 2},
+	_, err = d.CreateInstance(context.Background(), auth.ActorFrom(aliceContext()), gitops.Instance{
+		Name: "trino", Project: "demo", Service: "trino", Version: "480.0.0-p21", Values: map[string]any{"workers": 2},
 	})
 	require.NoError(t, err)
 	return d
@@ -118,7 +120,7 @@ func TestUpdateParametersDoesNotDeadlockTheGitStore(t *testing.T) {
 func TestUpdateParametersRevalidatesWhenTheInstanceChanged(t *testing.T) {
 	store, other := newGitStore(t)
 	d := seedTrino(t, store)
-	otherDeployments := gitops.NewDeployments(other, nil)
+	otherDeployments := gitops.NewDeployments(other)
 
 	reads := 0
 	schema := catalogSchema{deployments: d, onRead: func() {
@@ -126,7 +128,7 @@ func TestUpdateParametersRevalidatesWhenTheInstanceChanged(t *testing.T) {
 		if reads != 1 {
 			return
 		}
-		_, _, err := otherDeployments.UpdateInstance(context.Background(), auth.ActorFrom(aliceContext()), "demo", "trino", func(st *gitops.InstanceState) error {
+		_, _, err := otherDeployments.UpdateInstance(context.Background(), auth.ActorFrom(aliceContext()), "demo", "trino", func(st *gitops.Instance) error {
 			st.Values["catalogs"] = []any{map[string]any{"name": "lake"}}
 			return nil
 		})

@@ -1,0 +1,7 @@
+# A client of a Hive metastore: one chart, under the key client.
+
+apiVersion: v2
+name: hms-client
+version: 1.0.0
+dependencies:
+  - {name: client, repository: https://charts.example.org, version: 1.0.0}

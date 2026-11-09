@@ -32,12 +32,6 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "delete"]
-  # Observed state, read-only. ConfigMaps: the instance descriptors
-  # (<release>-okdp, label okdp.io/instance) in the project namespaces, and
-  # the platform values (okdp-platform-values) in the releases namespace.
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
   # The SparkApplication form reads the operator's CRD schema.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]

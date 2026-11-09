@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://okdp.io/schemas/contracts/database-server.schema.json",
   "title": "SQL database",
-  "description": "SQL database server. The engine tells consuming charts how to address it.",
+  "description": "SQL database server. The engine tells consuming charts how to address it. Both sides of a claim: properties, what a provider publishes (the connection, with the size and the extensions it granted a claim); x-okdp-secret, what its credentials Secret holds; x-okdp-claim, what a claim may request of a provider that provisions databases.",
   "type": "object",
   "x-okdp-contract": "database-server",
   "x-okdp-icon": "pi pi-database",
@@ -75,8 +75,45 @@
       "enum": ["false", "preferred", "true", "skip-verify"],
       "description": "MySQL accepts a different set of values from PostgreSQL. 'preferred' tries TLS and falls back to clear text.",
       "x-ui-condition": { "field": "engine", "value": "mysql" }
+    },
+    "size": {
+      "type": "string",
+      "title": "Size",
+      "pattern": "^[0-9]+(Mi|Gi|Ti)$",
+      "description": "The size a provider granted the database of a claim, as requested or more. Unset when it grants none of its own: its databases share a server's storage."
+    },
+    "extensions": {
+      "type": "array",
+      "title": "Extensions",
+      "items": { "type": "string" },
+      "description": "The PostgreSQL extensions a provider installed in the database of a claim, as requested."
     }
   },
   "required": ["engine", "driver", "host", "port", "dbName"],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "x-okdp-claim": {
+    "title": "Database claim",
+    "description": "What a claim may request of a provider that provisions databases (provisions: database-server): a database of its own, its owner's credentials in a Secret, the extensions installed in it and, when the provider grants one, its size. Defaults apply when a claim asks nothing.",
+    "type": "object",
+    "properties": {
+      "size": {
+        "type": "string",
+        "title": "Size",
+        "pattern": "^[0-9]+(Mi|Gi|Ti)$",
+        "description": "The size the database needs. A provider whose databases share a server's storage grants no size of its own, and publishes none: a consumer that needs one requires it of the connection (require)."
+      },
+      "extensions": {
+        "type": "array",
+        "title": "Extensions",
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "enum": ["btree_gin", "btree_gist", "citext", "fuzzystrmatch", "hstore", "ltree", "pg_trgm", "pgcrypto", "unaccent", "uuid-ossp", "vector"]
+        },
+        "default": [],
+        "description": "PostgreSQL extensions to install in the database, by their CREATE EXTENSION name (vector is pgvector): the ones of PostgreSQL's contrib and pgvector that need no preloaded library."
+      }
+    },
+    "additionalProperties": false
+  }
 }

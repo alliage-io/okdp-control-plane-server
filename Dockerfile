@@ -23,7 +23,6 @@ COPY --from=okdp-compiler internal/ ../okdp-compiler/internal/
 COPY --from=okdp-gitops go.mod go.sum ../okdp-gitops/
 COPY --from=okdp-gitops catalog/ ../okdp-gitops/catalog/
 COPY --from=okdp-gitops charts/ ../okdp-gitops/charts/
-COPY --from=okdp-gitops compile/ ../okdp-gitops/compile/
 COPY --from=okdp-gitops gitops/ ../okdp-gitops/gitops/
 COPY --from=okdp-gitops internal/ ../okdp-gitops/internal/
 COPY go.* ./
