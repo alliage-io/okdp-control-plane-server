@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
@@ -93,15 +94,15 @@ func provisioningOf(doc map[string]any) map[string]any {
 }
 
 // readDocument reads a values file of the repository, nil when absent.
-func readDocument(r gitops.Reader, p string) (map[string]any, error) {
+func readDocument(r treeedit.Reader, p string) (map[string]any, error) {
 	raw, err := r.ReadFile(p)
-	if errors.Is(err, gitops.ErrNotFound) {
+	if errors.Is(err, treeedit.ErrNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	doc, err := gitops.DecodeValues(raw)
+	doc, err := treeedit.DecodeValues(raw)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p, err)
 	}
@@ -110,12 +111,12 @@ func readDocument(r gitops.Reader, p string) (map[string]any, error) {
 
 // classes returns the classes of each contract's claims in a project: the
 // platform's, then the project's.
-func (s *DefaultClaimService) classes(r gitops.Reader, project string) (map[string]*models.ContractClasses, error) {
+func (s *DefaultClaimService) classes(r treeedit.Reader, project string) (map[string]*models.ContractClasses, error) {
 	platform, err := readDocument(r, compiler.PlatformFile)
 	if err != nil {
 		return nil, err
 	}
-	proj, err := readDocument(r, gitops.ProjectFilePath(project))
+	proj, err := readDocument(r, treeedit.ProjectFilePath(project))
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +168,11 @@ func (s *DefaultClaimService) classes(r gitops.Reader, project string) (map[stri
 // Provisioning returns the classes of each contract a claim of the project
 // may be of.
 func (s *DefaultClaimService) Provisioning(ctx context.Context, project string) (*models.ProvisioningResponse, error) {
-	if err := gitops.ValidateName("project", project); err != nil {
+	if err := treeedit.ValidateName("project", project); err != nil {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	}
 	var byContract map[string]*models.ContractClasses
-	err := s.deployments.Store.View(ctx, func(r gitops.Reader) error {
+	err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
 		var err error
 		byContract, err = s.classes(r, project)
 		return err
@@ -188,16 +189,16 @@ func (s *DefaultClaimService) Provisioning(ctx context.Context, project string) 
 }
 
 // tree compiles the tree as it is; one that does not load binds no claim.
-func (s *DefaultClaimService) tree(ctx context.Context) (*gitops.Tree, error) {
+func (s *DefaultClaimService) tree(ctx context.Context) (*compiler.Tree, error) {
 	t, err := s.deployments.Tree(ctx)
-	if _, ok := errors.AsType[*gitops.LayoutError](err); ok {
-		return &gitops.Tree{}, nil
+	if _, ok := errors.AsType[*compiler.LoadError](err); ok {
+		return &compiler.Tree{}, nil
 	}
 	return t, err
 }
 
 // binding converts a compiler binding.
-func binding(t *gitops.Tree, namespace, release, class string, named bool) models.ClaimBinding {
+func binding(t *compiler.Tree, namespace, release, class string, named bool) models.ClaimBinding {
 	b := models.ClaimBinding{Namespace: namespace, Release: release, Class: class, Default: !named}
 	if ti := t.Release(namespace, release); ti != nil {
 		b.Instance = ti.Name
@@ -207,10 +208,10 @@ func binding(t *gitops.Tree, namespace, release, class string, named bool) model
 
 // ListNamedClaims returns the named claims of a project, bound.
 func (s *DefaultClaimService) ListNamedClaims(ctx context.Context, project string) ([]models.NamedClaimView, error) {
-	if err := gitops.ValidateName("project", project); err != nil {
+	if err := treeedit.ValidateName("project", project); err != nil {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	}
-	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, gitops.ErrNotFound) {
+	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, treeedit.ErrNotFound) {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	} else if err != nil {
 		return nil, err
@@ -229,12 +230,12 @@ func (s *DefaultClaimService) ListNamedClaims(ctx context.Context, project strin
 // views binds the named claims of a project in t: the provider of each, the
 // instances that name it, why it does not bind. A named claim no instance
 // names is bound all the same: its provider publishes its connection.
-func (s *DefaultClaimService) views(t *gitops.Tree, project string, claims []models.NamedClaim) []models.NamedClaimView {
+func (s *DefaultClaimService) views(t *compiler.Tree, project string, claims []models.NamedClaim) []models.NamedClaimView {
 	out := make([]models.NamedClaimView, 0, len(claims))
 	for _, c := range claims {
 		v := models.NamedClaimView{NamedClaim: c, ID: project + "." + c.Name, Users: []string{}}
 		for _, ti := range t.Instances {
-			if ti.Project == project && ti.Outcome.Err != nil && v.Error == "" &&
+			if ti.Namespace() == project && ti.Outcome.Err != nil && v.Error == "" &&
 				strings.Contains(ti.Outcome.Err.Error(), "claims."+c.Name+":") {
 				v.Error = claimError(ti.Outcome.Err.Error(), "claims."+c.Name+":")
 			}
@@ -246,7 +247,7 @@ func (s *DefaultClaimService) views(t *gitops.Tree, project string, claims []mod
 					b := binding(t, pc.Namespace, pc.Release, pc.Class, pc.Named)
 					v.Binding = &b
 				}
-				if pc.Claimer.Project == project && !contains(v.Users, pc.Claimer.Name) {
+				if pc.Claimer.Namespace() == project && !contains(v.Users, pc.Claimer.Name) {
 					v.Users = append(v.Users, pc.Claimer.Name)
 				}
 			}
@@ -254,7 +255,7 @@ func (s *DefaultClaimService) views(t *gitops.Tree, project string, claims []mod
 		if v.Binding == nil {
 			for _, ti := range t.Instances {
 				if o := ti.Granted(v.ID); o != nil && o.Contract == c.Contract {
-					b := binding(t, ti.Project, ti.Release, c.Class, c.Class != "" || c.Provider != "")
+					b := binding(t, ti.Namespace(), ti.Release(), c.Class, c.Class != "" || c.Provider != "")
 					v.Binding = &b
 				}
 			}
@@ -270,9 +271,9 @@ func (s *DefaultClaimService) views(t *gitops.Tree, project string, claims []mod
 
 // defaultClass returns the default class of a contract's claims in a
 // project, as an instance of the project's compile reads it.
-func (s *DefaultClaimService) defaultClass(t *gitops.Tree, project, contract string) string {
+func (s *DefaultClaimService) defaultClass(t *compiler.Tree, project, contract string) string {
 	for _, ti := range t.Instances {
-		if ti.Project != project {
+		if ti.Namespace() != project {
 			continue
 		}
 		for _, b := range ti.Outcome.Claims {
@@ -312,11 +313,11 @@ func (s *DefaultClaimService) validateNamedClaim(ctx context.Context, project st
 	}
 	if _, err := s.deployments.GetConnection(ctx, project, c.Name); err == nil {
 		return invalid("claim %q: a connection of the project has that name", c.Name)
-	} else if !errors.Is(err, gitops.ErrNotFound) {
+	} else if !errors.Is(err, treeedit.ErrNotFound) {
 		return err
 	}
 	var classes map[string]*models.ContractClasses
-	if err := s.deployments.Store.View(ctx, func(r gitops.Reader) error {
+	if err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
 		var err error
 		classes, err = s.classes(r, project)
 		return err
@@ -415,11 +416,11 @@ func (s *DefaultClaimService) UpdateNamedClaim(ctx context.Context, project, nam
 }
 
 func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name string, req models.NamedClaimRequest, create bool) (*models.NamedClaimView, error) {
-	if err := gitops.ValidateName("project", project); err != nil {
+	if err := treeedit.ValidateName("project", project); err != nil {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	}
 	claim := models.NamedClaim{Name: name, Contract: req.Contract, Class: req.Class, Provider: req.Provider, Request: req.Request}
-	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, gitops.ErrNotFound) {
+	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, treeedit.ErrNotFound) {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	} else if err != nil {
 		return nil, err
@@ -429,7 +430,7 @@ func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name s
 	}
 	// Written in project.yaml (okdp-gitops), refused when an instance that
 	// compiled before does not after.
-	decl := gitops.Claim{Name: name, Contract: claim.Contract, Class: claim.Class, Provider: claim.Provider, Request: claim.Request}
+	decl := compiler.ClaimSpec{Name: name, Contract: claim.Contract, Class: claim.Class, Provider: claim.Provider, Request: claim.Request}
 	if _, err := s.deployments.PutClaim(ctx, auth.ActorFrom(ctx), project, decl, create); err != nil {
 		return nil, claimGitError(err, name)
 	}
@@ -448,7 +449,7 @@ func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name s
 // DeleteNamedClaim removes a named claim, refused while an instance names
 // it. Its provider keeps what the claim's connection holds.
 func (s *DefaultClaimService) DeleteNamedClaim(ctx context.Context, project, name string) error {
-	if err := gitops.ValidateName("project", project); err != nil {
+	if err := treeedit.ValidateName("project", project); err != nil {
 		return apierrors.NewNotFound(projectsResource, project)
 	}
 	_, err := s.deployments.DeleteClaim(ctx, auth.ActorFrom(ctx), project, name)
@@ -457,8 +458,8 @@ func (s *DefaultClaimService) DeleteNamedClaim(ctx context.Context, project, nam
 
 // claimGitError maps the deployments repository errors to the API ones.
 func claimGitError(err error, name string) error {
-	var inUse *gitops.ErrInUse
-	var compileErr *gitops.CompileError
+	var inUse *treeedit.ErrInUse
+	var compileErr *treeedit.CompileError
 	switch {
 	case err == nil:
 		return nil
@@ -466,9 +467,9 @@ func claimGitError(err error, name string) error {
 		return DoesNotCompile(compileErr)
 	case errors.As(err, &inUse):
 		return invalid("claim %q is still named by %s; change them first", name, strings.Join(inUse.Users, ", "))
-	case errors.Is(err, gitops.ErrExists):
+	case errors.Is(err, treeedit.ErrExists):
 		return apierrors.NewAlreadyExists(claimsResource, name)
-	case errors.Is(err, gitops.ErrNotFound):
+	case errors.Is(err, treeedit.ErrNotFound):
 		return apierrors.NewNotFound(claimsResource, name)
 	default:
 		return err
@@ -478,11 +479,11 @@ func claimGitError(err error, name string) error {
 // InstanceClaims returns the claims of an instance, bound by the compile of
 // the project's sources.
 func (s *DefaultClaimService) InstanceClaims(ctx context.Context, project, instance string) (*models.InstanceClaims, error) {
-	if gitops.ValidateName("project", project) != nil || gitops.ValidateName("instance", instance) != nil {
+	if treeedit.ValidateName("project", project) != nil || treeedit.ValidateName("instance", instance) != nil {
 		return nil, apierrors.NewNotFound(servicesResource, instance)
 	}
 	out := &models.InstanceClaims{Provisions: []string{}, Provided: []models.ProvidedClaim{}, Bound: []models.BoundClaim{}}
-	if _, err := s.deployments.GetInstance(ctx, project, instance); errors.Is(err, gitops.ErrNotFound) {
+	if _, err := s.deployments.GetInstance(ctx, project, instance); errors.Is(err, treeedit.ErrNotFound) {
 		return nil, apierrors.NewNotFound(servicesResource, instance)
 	} else if err != nil {
 		return nil, err
@@ -496,7 +497,7 @@ func (s *DefaultClaimService) InstanceClaims(ctx context.Context, project, insta
 		named[project+"."+c.Name] = c.Name
 	}
 	t, err := s.deployments.Tree(ctx)
-	if layout, ok := errors.AsType[*gitops.LayoutError](err); ok {
+	if layout, ok := errors.AsType[*compiler.LoadError](err); ok {
 		out.Error = layout.Error()
 		return out, nil
 	}
@@ -532,7 +533,7 @@ func (s *DefaultClaimService) InstanceClaims(ctx context.Context, project, insta
 
 // provided groups the claims bound to a provider by ID: a named claim's
 // every claimer, and what the provider granted each claim.
-func provided(e *gitops.TreeInstance) []models.ProvidedClaim {
+func provided(e *compiler.TreeInstance) []models.ProvidedClaim {
 	out := []models.ProvidedClaim{}
 	index := map[string]int{}
 	for _, pc := range e.Provided {
@@ -541,7 +542,7 @@ func provided(e *gitops.TreeInstance) []models.ProvidedClaim {
 			c := models.ProvidedClaim{
 				ID:        pc.ID,
 				Contract:  pc.Contract,
-				Namespace: pc.Claimer.Project,
+				Namespace: pc.Claimer.Namespace(),
 				Class:     pc.Class,
 				Default:   !pc.Named,
 				Claimers:  []models.ClaimUser{},
@@ -555,9 +556,9 @@ func provided(e *gitops.TreeInstance) []models.ProvidedClaim {
 			index[pc.ID] = i
 		}
 		out[i].Claimers = append(out[i].Claimers, models.ClaimUser{
-			Namespace: pc.Claimer.Project,
+			Namespace: pc.Claimer.Namespace(),
 			Instance:  pc.Claimer.Name,
-			Release:   pc.Claimer.Release,
+			Release:   pc.Claimer.Release(),
 			Field:     pc.Field,
 		})
 	}
@@ -585,7 +586,7 @@ func provided(e *gitops.TreeInstance) []models.ProvidedClaim {
 
 // granted returns what a provider granted a claim, nil when it publishes
 // nothing for it.
-func granted(e *gitops.TreeInstance, id string) *models.GrantedConnection {
+func granted(e *compiler.TreeInstance, id string) *models.GrantedConnection {
 	o := e.Granted(id)
 	if o == nil {
 		return nil
@@ -615,7 +616,7 @@ func (s *DefaultClaimService) ValidateClaims(ctx context.Context, project string
 		return nil
 	}
 	var classes map[string]*models.ContractClasses
-	err := s.deployments.Store.View(ctx, func(r gitops.Reader) error {
+	err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
 		var err error
 		classes, err = s.classes(r, project)
 		return err

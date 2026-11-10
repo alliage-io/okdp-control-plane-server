@@ -70,7 +70,7 @@ func (h *ProjectHandler) GetProject(c *gin.Context) {
 
 // CreateProject godoc
 // @Summary      Create a project
-// @Description  Create a project: commits projects/<name>/project.yaml (in a split topology, to a new repository of its own, with the okdp-gitops workflow .forgejo/workflows/okdp-gitops.yaml) and creates the project Namespace. 409 when the project is already declared, or when a Namespace of that name exists and is not a project's
+// @Description  Create a project: commits projects/<name>/project.yaml (in a split topology, to a new repository of its own, created through the Forgejo API with project.yaml only: no workflow, no secret, the CI of the output repository compiles it) and creates the project Namespace. 409 when the project is already declared, or when a Namespace of that name exists and is not a project's
 // @Tags         projects
 // @Accept       json
 // @Produce      json

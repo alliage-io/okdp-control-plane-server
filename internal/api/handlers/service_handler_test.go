@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-compiler/treeedit"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -44,7 +44,7 @@ func deploy(t *testing.T, err error) (int, map[string]string) {
 // Both are 409, but they are not the same mistake: the console must tell a
 // duplicate instance from a release name another project already uses.
 func TestDeployConflictsCarryDistinctCodes(t *testing.T) {
-	code, body := deploy(t, &service.ReleaseNameTakenError{ErrReleaseTaken: &gitops.ErrReleaseTaken{Release: "a-b-c", Project: "a-b", Instance: "c"}})
+	code, body := deploy(t, &service.ReleaseNameTakenError{ErrReleaseTaken: &treeedit.ErrReleaseTaken{Release: "a-b-c", Project: "a-b", Instance: "c"}})
 	if code != http.StatusConflict || body["code"] != ErrorCodeReleaseNameTaken ||
 		body["error"] != "release name 'a-b-c' is already used by instance 'c' of project 'a-b'" {
 		t.Fatalf("release collision: %d %v", code, body)
@@ -96,7 +96,7 @@ func TestGetRenderedValues(t *testing.T) {
 // A compile refusal is a 400 the console can tell from the others: it shows
 // the compiler's message, one problem per line.
 func TestDeployThatDoesNotCompileCarriesItsCode(t *testing.T) {
-	err := &gitops.CompileError{Project: "a", Instance: "b-c", Err: errors.New("values don't meet the schema:\n- replicas: must be >= 1")}
+	err := &treeedit.CompileError{Project: "a", Instance: "b-c", Err: errors.New("values don't meet the schema:\n- replicas: must be >= 1")}
 	code, body := deploy(t, service.DoesNotCompile(err))
 	if code != http.StatusBadRequest || body["code"] != ErrorCodeDoesNotCompile ||
 		body["error"] != "instance a/b-c does not compile: values don't meet the schema:\n- replicas: must be >= 1" {

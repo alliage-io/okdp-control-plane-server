@@ -12,19 +12,15 @@ ARG VERSION=dev
 
 WORKDIR /workspace/okdp-server
 
-# go.mod replaces github.com/okdp/okdp-compiler with ../okdp-compiler until it
-# is published: build with --build-context okdp-compiler=../okdp-compiler. The
-# module root is the package (compiler.go), its implementation internal/.
-COPY --from=okdp-compiler go.mod go.sum *.go ../okdp-compiler/
-COPY --from=okdp-compiler internal/ ../okdp-compiler/internal/
-# The same for github.com/okdp/okdp-gitops: --build-context
-# okdp-gitops=../okdp-gitops. Its packages, without its command; its own
-# go.mod replaces okdp-compiler with ../okdp-compiler, the directory above.
-COPY --from=okdp-gitops go.mod go.sum ../okdp-gitops/
-COPY --from=okdp-gitops catalog/ ../okdp-gitops/catalog/
-COPY --from=okdp-gitops charts/ ../okdp-gitops/charts/
-COPY --from=okdp-gitops gitops/ ../okdp-gitops/gitops/
-COPY --from=okdp-gitops internal/ ../okdp-gitops/internal/
+# go.mod replaces github.com/okdp/okdp-compiler and github.com/okdp/okdp-gitops
+# with ../okdp-compiler and ../okdp-gitops until they are published: build with
+# --build-context okdp-compiler=../okdp-compiler --build-context
+# okdp-gitops=../okdp-gitops. Each module is copied whole (okdp-gitops' own
+# go.mod replaces okdp-compiler with ../okdp-compiler, the directory above), so
+# a refactor of a sibling does not break this list; only what the build never
+# reads is left out: their Git metadata, binaries and test data.
+COPY --from=okdp-compiler --exclude=.git --exclude=bin --exclude=**/testdata . ../okdp-compiler/
+COPY --from=okdp-gitops --exclude=.git --exclude=bin --exclude=**/testdata . ../okdp-gitops/
 COPY go.* ./
 RUN go mod download
 

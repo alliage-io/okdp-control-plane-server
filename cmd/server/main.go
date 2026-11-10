@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-compiler/chartcache"
 	"github.com/okdp/okdp-gitops/catalog"
-	"github.com/okdp/okdp-gitops/charts"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/sirupsen/logrus"
 
@@ -83,9 +83,9 @@ func main() {
 	// The deployments Git repositories, the only desired-state store: the
 	// platform, the projects and the output, where the topology says. The
 	// console commits the tree (platform.yaml, catalogs.yaml, projects/)
-	// only; a CI running okdp-gitops compile on each of their commits writes
-	// the output. The commits a user authors name the server in their
-	// co-author trailer.
+	// only; the CI of the output repository, running okdp-gitops compile on
+	// a schedule, writes the output, in a repository of its own. The
+	// commits a user authors name the server in their co-author trailer.
 	gitops.Program = buildinfo.Program
 	if err := cfg.GitOps.Validate(); err != nil {
 		logrus.Fatalf("Invalid GitOps configuration: %v", err)
@@ -105,7 +105,7 @@ func main() {
 	// its provider, of any namespace), against the upstream charts (the
 	// chart cache); the read paths get the same compile (deployments.Tree).
 	catalogs := &catalog.Loader{Auth: gitops.CatalogAuth(topology.Platform.URL, cfg.GitOps.CredentialsDir, cfg.GitOps.InsecureIgnoreHostKey)}
-	chartCache := charts.NewCache(cfg.GitOps.ChartCacheDir, charts.NewRepositoryPuller(cfg.InsecureOCIRegistries))
+	chartCache := chartcache.NewCache(cfg.GitOps.ChartCacheDir, chartcache.NewRepositoryPuller(cfg.InsecureOCIRegistries))
 	deployments.Compiler = gitops.NewCompiler(catalogs)
 	deployments.Compiler.Charts = chartCache
 	catalogSource := deployments.Catalogs
@@ -172,7 +172,11 @@ func main() {
 		if err != nil {
 			return nil, err
 		}
-		return cats.Contracts()
+		index, err := cats.Index()
+		if err != nil {
+			return nil, err
+		}
+		return index.Contracts(), nil
 	})
 	// Claims: the named claims of the projects, the classes a claim may be
 	// of, the claims of an instance, bound by the compile of the tree.

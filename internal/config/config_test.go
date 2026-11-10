@@ -47,29 +47,40 @@ func TestTheChartCacheIsUnderTheCloneDirectory(t *testing.T) {
 }
 
 func TestGitOpsDefaultsAndValidation(t *testing.T) {
+	t.Setenv("GITOPS_CONFIG", "")
 	t.Setenv("GITOPS_REPO_URL", "")
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Equal(t, "main", cfg.GitOps.Branch)
 	assert.Equal(t, EngineFlux, cfg.GitOps.Engine)
 	assert.Equal(t, "okdp-releases", cfg.GitOps.ReleasesNamespace)
-	assert.Error(t, cfg.GitOps.Validate(), "no repository, no desired state")
+	assert.ErrorContains(t, cfg.GitOps.Validate(), "GITOPS_CONFIG is required", "no topology, no desired state")
 
-	t.Setenv("GITOPS_REPO_URL", "https://git.example.com/okdp/deployments.git")
+	t.Setenv("GITOPS_CONFIG", "/etc/okdp/gitops/topology.yaml")
 	t.Setenv("GITOPS_ENGINE", "ArgoCD")
-	t.Setenv("GITOPS_PATH", "/gitops/")
 	cfg, err = Load()
 	require.NoError(t, err)
 	assert.NoError(t, cfg.GitOps.Validate())
 	assert.Equal(t, EngineArgoCD, cfg.GitOps.Engine)
-	assert.Equal(t, "gitops", cfg.GitOps.Path)
 
 	t.Setenv("GITOPS_ENGINE", "kubocd")
 	cfg, _ = Load()
 	assert.Error(t, cfg.GitOps.Validate())
 }
 
-func TestATopologyFileReplacesTheRepository(t *testing.T) {
+func TestTheSingleRepositoryModeIsRefused(t *testing.T) {
+	t.Setenv("GITOPS_REPO_URL", "https://git.example.com/okdp/deployments.git")
+	t.Setenv("GITOPS_CONFIG", "")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.ErrorContains(t, cfg.GitOps.Validate(), "GITOPS_REPO_URL is no longer read")
+
+	t.Setenv("GITOPS_CONFIG", "/etc/okdp/gitops/topology.yaml")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.ErrorContains(t, cfg.GitOps.Validate(), "GITOPS_REPO_URL is no longer read", "not ignored beside a topology")
+}
+
+func TestTheTopologyFileNamesTheRepositories(t *testing.T) {
 	t.Setenv("GITOPS_REPO_URL", "")
 	file := t.TempDir() + "/topology.yaml"
 	require.NoError(t, os.WriteFile(file, []byte("platform: {url: https://git/okdp-platform.git, path: \"\"}\nprojects: {url: \"https://git/okdp-project-{project}.git\", path: \"\"}\noutput: {url: https://git/okdp-output.git}\n"), 0o644))
@@ -82,15 +93,9 @@ func TestATopologyFileReplacesTheRepository(t *testing.T) {
 	assert.True(t, topology.Split())
 	assert.Equal(t, "https://git/okdp-project-demo.git", topology.Project("demo", nil).URL)
 
-	t.Setenv("GITOPS_CONFIG", "")
-	t.Setenv("GITOPS_REPO_URL", "https://git/deployments.git")
-	t.Setenv("GITOPS_PATH", "gitops")
-	cfg, err = Load()
-	require.NoError(t, err)
-	topology, err = cfg.GitOps.Topology()
-	require.NoError(t, err)
-	assert.True(t, topology.Mono())
-	assert.Equal(t, "gitops", topology.Platform.Path)
-	assert.Equal(t, "gitops/projects/demo", topology.Project("demo", nil).Path)
-	assert.Equal(t, "gitops", topology.Output.Path)
+	// The output in a repository of the sources: no topology of one
+	// repository.
+	require.NoError(t, os.WriteFile(file, []byte("platform: {url: https://git/deployments.git}\nprojects: {url: https://git/deployments.git, path: \"projects/{project}\"}\noutput: {url: https://git/deployments.git}\n"), 0o644))
+	_, err = cfg.GitOps.Topology()
+	assert.ErrorContains(t, err, "repository of its own")
 }

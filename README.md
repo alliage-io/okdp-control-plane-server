@@ -27,8 +27,8 @@ catalog), each instance checked by a compile with
 git catalogs, and reads back what the cluster reports, streaming status, pods and
 metrics, and shows the values each chart of an instance is rendered with, compared with
 its defaults. The output the engines deploy is not the console's to write:
-[okdp-gitops](https://github.com/OKDP/okdp-gitops) writes it, in a CI on each commit of
-the sources.
+[okdp-gitops](https://github.com/OKDP/okdp-gitops) writes it, in the CI of the output
+repository, which compiles the latest commits of the sources on a schedule.
 
 It is a first-party OKDP component, developed alongside the web console. Cluster credentials
 and business logic stay on the server side, keeping the console a stateless browser client.
@@ -55,12 +55,15 @@ Project layout:
 - `internal/config`: configuration loaded from environment variables.
 - `chart/`: Helm chart.
 
-The deployments repositories (topology, go-git writer, the transactions on the tree, each
-checked by a compile of the whole tree), the compile of the tree with okdp-compiler (each
-instance's outcome, the claims bound to each provider), the catalogs of packages and the
-chart cache are the packages `gitops`, `catalog` and `charts` of
-[okdp-gitops](https://github.com/OKDP/okdp-gitops), a module of its own (`go.mod` replaces
-it with `../okdp-gitops`, a checkout next to this one, until it is published).
+The reads and the edits of the tree, with their checks by the compile of the tree, are
+okdp-compiler's package `treeedit` (its types and errors: `treeedit.Instance`,
+`treeedit.Project`, `treeedit.CompileError`, `treeedit.ErrInUse`, `treeedit.ErrNotFound`...).
+The deployments repositories (topology, go-git writer, the Git transactions that commit
+each edit, `gitops.Deployments`), the compile of the tree with okdp-compiler (each
+instance's outcome, the claims bound to each provider) and the catalogs of packages are
+the packages `gitops` and `catalog` of [okdp-gitops](https://github.com/OKDP/okdp-gitops),
+a module of its own (`go.mod` replaces it with `../okdp-gitops`, a checkout next to this
+one, until it is published); the chart cache is okdp-compiler's `chartcache`.
 
 ---
 
@@ -72,8 +75,9 @@ it with `../okdp-gitops`, a checkout next to this one, until it is published).
 
 > **OKDP deployment context:** the server runs **in-cluster**. **Git is the only
 > desired-state store**: the server never creates HelmReleases, Applications or workloads;
-> it commits the tree to the deployments repositories, a CI running `okdp-gitops
-> compile` on each of their commits writes the output, and a GitOps engine (FluxCD or
+> it commits the tree to the deployments repositories of the sources, the CI of the output
+> repository, running `okdp-gitops compile` on a schedule, writes the output in a
+> repository of its own, and a GitOps engine (FluxCD or
 > Argo CD) deploys each instance from its compiled directory in the output repository, the
 > same under both engines. What an instance publishes (its URL, its usage, the connections
 > it provides) is read from its compiled `okdp.info.yaml`; observed state from the
@@ -87,8 +91,8 @@ its parts each in the repository the topology says (below):
 
 ```
 platform.yaml                                           # the platform: global.okdp, the classes of the claims, the platform's connections
-catalogs.yaml                                           # okdp-gitops': the catalogs (repositories) and the console menu
-projects.yaml                                           # okdp-gitops', split topology: the projects
+catalogs.yaml                                           # the catalogs (repositories) and the console menu (treeedit.CatalogsFile)
+projects.yaml                                           # split topology: the projects (treeedit.ProjectsFile)
 projects/<project>/project.yaml                         # declares the project: its globals, classes, connections, named claims
 projects/<project>/instances/<instance>/instance.yaml   # {service, version}: the package
 projects/<project>/instances/<instance>/config.yaml     # the submitted parameters only (none without parameters)
@@ -96,20 +100,22 @@ compiled/projects/<project>/instances/<project>-<instance>/
                                                         # okdp-compiler's umbrella chart (Chart.yaml, instance.values.yaml,
                                                         # okdp.objects.yaml, okdp.info.yaml), helmrelease.yaml,
                                                         # kustomization.yaml (Flux), application.yaml (Argo CD)
+sources.yaml                                            # the output: the revisions of the sources and catalogs it is the compile of
 ```
 
 `platform.yaml`, `catalogs.yaml` and `projects/` hold what people and the console write
 (the tree); `compiled/` (the output) is generated from them by okdp-gitops, the files of
-okdp-compiler's Flux and Argo CD targets, in a CI on each commit of the tree, and is the
-only thing the engines read. The console never writes it: what it reads there (what an
-instance publishes, its compiled values) is what the last run wrote, and lags behind the
-tree for the time of a run. The platform's own services (the database servers, the
+okdp-compiler's Flux and Argo CD targets, by the CI of the output repository (every few
+minutes, when the tree moved), with `sources.yaml`, the revisions of the sources and
+catalogs it is the compile of, and is the only thing the engines read. The console never
+writes it: what it reads there (what an instance publishes, its compiled values) is what
+the last run wrote, and lags behind the tree for the time of a run. The platform's own services (the database servers, the
 ingress, the control plane) are instances of projects too: there are no platform
 components, and the deployment graph (connection references, claims) is the only order.
 
 ### Topology: where the parts live
 
-`GITOPS_CONFIG` names a topology file (the chart's `gitops.topology`):
+`GITOPS_CONFIG`, required, names a topology file (the chart's `gitops.topology`):
 
 ```yaml
 platform: {url: <git url>, branch: main, path: ""}   # the directory of platform.yaml, catalogs.yaml
@@ -121,24 +127,30 @@ forgejo:                                             # optional: creates the rep
   tokenFile: /etc/okdp/forgejo/token
 ```
 
-Without it, `GITOPS_REPO_URL`/`GITOPS_BRANCH`/`GITOPS_PATH` hold the whole tree (mono:
-platform `<path>`, projects `<path>/projects/{project}`, output `<path>`). The tree and the
-output may live apart (`io`: one repository of the tree, one of output), and each project
-in a repository of its own (`split`: `projects.url` names `{project}`; the projects are
-listed in `projects.yaml`, beside `platform.yaml`, `projects: [{name: demo}]`, each entry
-optionally overriding `url`, `branch` or `path`). Without `{project}` in its url,
-`projects.path` ends with `/{project}`: the projects are the directories of its parent.
+The output is always in a repository of its own, which the CI alone writes: never the
+platform's nor a project's, on no branch (the server refuses such a topology at startup).
+The sources are in one input repository (`io`: the platform and the projects,
+`projects.path` `projects/{project}`; the platform best in a repository of its own, for
+the platform admins), or each project in a repository of its own (`split`:
+`projects.url` names `{project}`; the projects are listed in `projects.yaml`, beside
+`platform.yaml`, `projects: [{name: demo}]`, each entry optionally overriding `url`,
+`branch` or `path`). Without `{project}` in its url, `projects.path` ends with
+`/{project}`: the projects are the directories of its parent. There is no
+single-repository mode: `GITOPS_REPO_URL`, `GITOPS_BRANCH` and `GITOPS_PATH` are gone, and
+a server still given `GITOPS_REPO_URL` refuses to start; their repository is the
+topology's `platform` and `projects` (`path: <GITOPS_PATH>/projects/{project}`), its output
+moved to a repository of its own.
 
 A console change in one repository is one commit. Across repositories it is one commit per
 repository, with the same message: the projects' repositories, then the platform's (a
 repository that moved meanwhile gets the same change on its new revision). The console
-writes nothing to the output repository: the CI of the sources compiles each of their
-commits into it. In a split topology, creating a project creates
-`<owner>/okdp-project-<project>` through the Forgejo API (the token of `tokenFile`), pushes
-its `project.yaml` with the workflow `.forgejo/workflows/okdp-gitops.yaml` (its commits
-start the compile), then adds it to `projects.yaml`; without a `forgejo` section that
-creation fails with a message saying so. Deleting it removes its entry (the next compile,
-its compiled tree); its repository is kept.
+writes nothing to the output repository: its CI compiles the sources at its next run. In
+a split topology, creating a project creates its repository in the `forgejo` owner, named
+after the topology's projects url (`okdp-project-{project}.git`: `okdp-project-<project>`),
+through the Forgejo API (the token of `tokenFile`), pushes its `project.yaml` only (no workflow, no
+secret: the output's CI reads it with its own token), then adds it to `projects.yaml`;
+without a `forgejo` section that creation fails with a message saying so. Deleting it
+removes its entry (the next compile, its compiled tree); its repository is kept.
 
 Projects are the `projects/<project>/project.yaml` files (the namespace is the project
 name), whoever wrote them: a project declared by hand in Git is listed, served and edited
@@ -146,9 +158,16 @@ by the console like one the console created (in a split topology, the projects o
 `projects.yaml`), and `/api/projects/stream` reports the files as they change (read every
 few seconds). A project's description is the key `description` of its `project.yaml`,
 the project's own (okdp-compiler leaves it out of the context of the project's instances);
-an update rewrites that key and keeps the rest of the file. Creating a project from the console also creates its Namespace (label
-`okdp.io/project`) so it can hold Secrets before any deployment, and refuses a name that
-is already a Namespace without that label (`kube-system`, …). Deleting a project removes
+an update rewrites that key and keeps the rest of the file. Creating a project from the
+console refuses first, 400 with the compiler's message and nothing created, a name the
+compile would refuse every instance of the project with (okdp-compiler's
+`compiler.CheckProjectName`, through `treeedit.CheckProjectName` and okdp-gitops'
+`Deployments.CheckProjectName`):
+`platform`, `kube-*`, the deployer engines' namespaces (`argocd`, `flux-system`,
+`okdp-releases`) and those of `platform.yaml`'s `global.okdp.policy.reserved`. It also
+creates its Namespace (label `okdp.io/project`) so it can hold Secrets before any
+deployment, and refuses a name that is already a Namespace without that label. Deleting
+a project removes
 `projects/<project>/` (the compile of that commit removes its compiled tree, and the
 engine uninstalls its releases), refused while an instance of another project uses one of
 its instances, then the Namespace only if it carries the label; a namespace the engine
@@ -171,7 +190,7 @@ The trailer names the program (the last element of the Go module path) and its v
 (the server sets okdp-gitops' `gitops.Program` to its own), set at build time
 (`-ldflags "-X github.com/okdp/okdp-control-plane-server/internal/buildinfo.Version=<v>"`:
 the image build passes the release version as the `VERSION` build argument, `make build`
-passes `/usr/bin/git describe`; `dev` otherwise), with the committer email. The author comes from
+passes `git describe`; `dev` otherwise), with the committer email. The author comes from
 the access token: the `email` claim (Keycloak: the `email` client scope on the console
 client) and the `name` claim (the `profile` scope; the user name when absent). Without an
 email (the claim is missing or not an address, or authentication is disabled) the GitOps
@@ -183,8 +202,8 @@ replayed on top of the new revision when someone else pushed in between.
 ### Checking a write
 
 Every write is checked, inside the write, by a compile of the whole tree it leaves
-(okdp-gitops: `compiler.LoadRepository` of the tree and the catalogs, `CompileAll`,
-`NewGraph`), compared with the compile of the tree before it: deploying or updating an
+(okdp-gitops: `compiler.Build` of the tree and the catalogs), compared with the compile
+of the tree before it, the verdict okdp-compiler's (`treeedit.Check.Verify`): deploying or updating an
 instance, changing a connection, a named claim or a project. It is refused, nothing
 committed, when the instance it writes does not compile, when an instance that compiled
 before does not any more (a class, a named claim or a connection of a project reaches
@@ -192,8 +211,8 @@ every instance of it, a claim binds across projects), or when the tree no longer
 the API answers `400` with the compiler's message (code `does-not-compile`). Removing an
 instance, a connection, a named claim or a project is refused (`400`, naming them) while
 instances use it: they would not compile without it. The compiled files are not committed:
-the CI of the sources compiles the commit again, the whole tree, and writes them (below,
-[the output](#the-output-okdp-gitops)), so a commit made by hand and a console one are
+the CI of the output compiles the commit again at its next run, the whole tree, and
+writes them (below, [the output](#the-output-okdp-gitops)), so a commit made by hand and a console one are
 compiled the same way.
 
 An instance names a package: `service` and `version` in `instance.yaml`, the directory
@@ -316,11 +335,13 @@ contracts of the connection forms are the catalogs'.
 
 ### The output: `okdp-gitops`
 
-[okdp-gitops](https://github.com/OKDP/okdp-gitops) writes the output: a CI runs
-`okdp-gitops compile` on each commit of the tree, the console's and those made by hand
-alike, and commits what changed to the output repository (`okdp: compile`), which the
-engines reconcile. `compiled/` holds the files of okdp-compiler's targets as they write
-them ([targets](https://github.com/OKDP/okdp-compiler/blob/main/docs/specs/01_inputs_outputs.md#targets)):
+[okdp-gitops](https://github.com/OKDP/okdp-gitops) writes the output: the CI of the
+output repository runs `okdp-gitops compile` every few minutes, compiles the latest
+commits of the tree, the console's and those made by hand alike, and commits what changed
+to the output repository (`okdp: compile`), which the engines reconcile; `sources.yaml`,
+at the root of the output, records the revisions of the sources and catalogs it is the
+compile of (a run whose sources did not move stops early). `compiled/` holds the files of
+okdp-compiler's targets as they write them ([targets](https://github.com/OKDP/okdp-compiler/blob/main/docs/specs/01_inputs_outputs.md#targets)):
 per instance, `compiled/projects/<project>/instances/<project>-<instance>/`, its umbrella
 chart, its Flux HelmRelease (`okdp-releases/<project>-<instance>`, built from the output's
 `GitRepository` `flux-system/okdp-gitops`, `dependsOn` the releases it waits for) and the
@@ -335,28 +356,31 @@ of okdp-gitops (next to one of okdp-compiler):
 
 ```sh
 make build
-bin/okdp-gitops compile --root <deployments repository>/gitops          # write what changed
-bin/okdp-gitops compile --root <deployments repository>/gitops --check  # fail when stale
+bin/okdp-gitops compile --tree <sources> --output <output>          # write what changed
+bin/okdp-gitops compile --tree <sources> --output <output> --check  # fail when stale
 bin/okdp-gitops compile --config topology.yaml --catalog platform-charts=../platform-charts
-bin/okdp-gitops workflow --branch main                                  # the CI workflow of a repository of the sources
+bin/okdp-gitops workflow --for output --config topology.yaml        # the CI workflow of the output repository
 ```
 
-`--root DIR` is a tree whose parts are all in one local directory; `--config FILE` a
-topology file, whose urls are git repositories (cloned; the changes committed and pushed
-as `okdp: compile`, with the credentials of `$GITOPS_CREDENTIALS_DIR`) or local
-directories (an absolute path, or one relative to the file: read and written in place).
-`--catalog NAME=DIR` reads the catalog `NAME` of `catalogs.yaml` from a local checkout
+`--tree DIR --output DIR` is the io topology of two local directories, the platform and
+the projects in the first, the output in the other; `--config FILE` a topology file, whose
+urls are git repositories (cloned; the changes committed and pushed as `okdp: compile`,
+with the credentials of `$GITOPS_CREDENTIALS_DIR`, else the token `$GITOPS_TOKEN`) or
+local directories (an absolute path, or one relative to the file: read and written in
+place). `--catalog NAME=DIR` reads the catalog `NAME` of `catalogs.yaml` from a local checkout
 instead of its url; `--charts DIR` checks the values against the upstream charts, pulled
 into that chart cache, as the server checks them. Every problem of the tree is reported at
 once, and nothing is written: the engines keep deploying the last output. `--path-prefix`
 is the path of the output in its Git repository, for the paths the engines read (default:
-the topology's output path; with `--root`, from `git`, `""` at the repository root).
+the topology's output path).
 
-Each repository of the sources holds the workflow `.forgejo/workflows/okdp-gitops.yaml`
-(Forgejo Actions, `okdp-gitops workflow`), run on a runner dedicated to okdp-gitops: the
-server writes it in the repository it creates for a project of a split topology, the
-others get it by hand. The runner it needs is described in
-[okdp-gitops' README](https://github.com/OKDP/okdp-gitops#the-ci-of-the-sources).
+The output repository alone holds a workflow, `.forgejo/workflows/okdp-gitops.yaml`
+(Forgejo Actions, `okdp-gitops workflow --for output`), run on a schedule on a runner
+dedicated to okdp-gitops, with the only token of the CI (the output repository's secret
+`OKDP_GITOPS_TOKEN`, its user the only writer of the output, a reader of the sources).
+The repositories of the sources hold no workflow and no token: the server creates the
+repository of a new project without either. The runner it needs is described in
+[okdp-gitops' README](https://github.com/OKDP/okdp-gitops#the-ci-of-the-output).
 
 ---
 
@@ -365,8 +389,9 @@ others get it by hand. The runner it needs is described in
 - Kubernetes cluster reconciled by [FluxCD](https://fluxcd.io) (helm-controller,
   source-controller, kustomize-controller) or [Argo CD](https://argo-cd.readthedocs.io),
   from the output repository of the deployments above
-- A CI running [okdp-gitops](https://github.com/OKDP/okdp-gitops) on each commit of the
-  tree (Forgejo Actions, `.forgejo/workflows/okdp-gitops.yaml`): it writes the output
+- The CI of the output repository running [okdp-gitops](https://github.com/OKDP/okdp-gitops)
+  on a schedule (Forgejo Actions, `.forgejo/workflows/okdp-gitops.yaml`): it writes the
+  output
 - The catalogs of packages (git repositories) the server can fetch, and the upstream
   charts' repositories (for the checks and the chart defaults)
 - Write access to the deployments repositories of the sources, read access to the
@@ -392,8 +417,9 @@ with Go `1.27`, on a Kind cluster. This is the version set validated by the main
 
 ## Installation
 
-The server runs in-cluster, next to a GitOps engine reconciling the deployments
-repository. Give it write access through a Secret using the Flux `GitRepository` keys:
+The server runs in-cluster, next to a GitOps engine reconciling the output repository.
+Give it write access to the repositories of the sources (read access to the output's)
+through a Secret using the Flux `GitRepository` keys:
 
 ```sh
 kubectl create secret generic okdp-gitops-credentials -n okdp-system \
@@ -404,22 +430,34 @@ kubectl create secret generic okdp-gitops-credentials -n okdp-system \
 The platform values (`global.okdp`) are read from `platform.yaml` in Git, the context
 every instance is compiled with (the server's check, the CI's).
 
-Install the chart from the OKDP registry:
+Install the chart from the OKDP registry, with the topology of the repositories
+(`gitops.topology`, required, written to a ConfigMap mounted at
+`/etc/okdp/gitops/topology.yaml`, the server's `GITOPS_CONFIG`):
+
+```yaml
+# values.yaml: an io topology, the sources in one repository, the output in another
+gitops:
+  topology:
+    platform: {url: https://git.example.com/okdp/okdp-sources.git}
+    projects: {url: https://git.example.com/okdp/okdp-sources.git, path: "projects/{project}"}
+    output:   {url: https://git.example.com/okdp/okdp-output.git}
+  credentialsSecret: okdp-gitops-credentials
+  engine: flux
+```
 
 <!-- x-release-please-start-version -->
 ```sh
 helm install okdp-control-plane-server oci://quay.io/okdp/charts/okdp-control-plane-server --version 0.10.0 \
-  -n okdp-system --create-namespace \
-  --set gitops.repoURL=https://git.example.com/okdp/deployments.git \
-  --set gitops.credentialsSecret=okdp-gitops-credentials \
-  --set gitops.engine=flux
+  -n okdp-system --create-namespace -f values.yaml
 ```
 <!-- x-release-please-end -->
 
-With the parts of the tree in several repositories, set `gitops.topology` instead of
-`gitops.repoURL` (written to a ConfigMap mounted at `/etc/okdp/gitops/topology.yaml`), and
-`gitops.forgejoTokenSecret` (a Secret with the key `token`) for the server to create the
-repository of a new project.
+For a split topology (a repository per project), add `gitops.topology.forgejo` (`url`,
+`owner`) and `gitops.forgejoTokenSecret` (a Secret with the key `token`) for the server to
+create the repository of a new project. The chart's former `gitops.repoURL`,
+`gitops.branch` and `gitops.path` are gone: their repository, branch and path are the
+topology's `platform` (`path: <path>`) and `projects` (`path: <path>/projects/{project}`),
+the output moved to a repository of its own.
 
 > This chart name is published on Quay once the rename lands upstream. Until
 > then, install from `chart/` in this checkout.
@@ -452,15 +490,23 @@ kubectl delete namespace okdp-system
 ### Run the server locally
 
 Both options require a `KUBECONFIG` pointing at a Kubernetes cluster (the server
-connects to the Kubernetes API at startup) and a deployments repository: any Git URL
-works, a local bare repository included (`git init --bare /tmp/deployments.git`).
+connects to the Kubernetes API at startup) and a topology file naming the deployments
+repositories: any Git URL works, local bare repositories included (`git init --bare
+/tmp/okdp-sources.git /tmp/okdp-output.git`):
+
+```yaml
+# /tmp/topology.yaml
+platform: {url: file:///tmp/okdp-sources.git}
+projects: {url: file:///tmp/okdp-sources.git, path: "projects/{project}"}
+output:   {url: file:///tmp/okdp-output.git}
+```
 
 **On your machine.** Install Go and the development tools (`kubectl`, `air`,
 `swag`, `golangci-lint`, `delve`), then:
 
 ```sh
 export KUBECONFIG=<path-to-your-kubeconfig>
-export GITOPS_REPO_URL=file:///tmp/deployments.git
+export GITOPS_CONFIG=/tmp/topology.yaml
 make dev                 # hot-reload on :8093
 # or, without hot-reload:
 go run ./cmd/server
@@ -475,7 +521,9 @@ startup. Then run `make dev`.
 
 No cluster is required, but okdp-compiler and okdp-gitops checked out next to this
 repository (`go.mod` replaces them with `../okdp-compiler` and `../okdp-gitops` until
-they are published):
+they are published; CI and the image build fetch them there at the commits
+`OKDP_COMPILER_REF` and `OKDP_GITOPS_REF` of their workflows, and the image copies
+both modules whole from the build contexts):
 
 ```sh
 make build     # compile the binary to bin/server
@@ -502,10 +550,7 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `ALLOWED_ORIGINS` | Single CORS origin, set verbatim in `Access-Control-Allow-Origin` (the console URL) | `http://localhost:4200` | No |
 | `LOG_LEVEL` | Log verbosity (`debug`, `info`, `warn`, `error`) | `info` | No |
 | `GIN_MODE` | HTTP framework mode (`debug` prints every route) | `release` | No |
-| `GITOPS_CONFIG` | Topology file: the repositories of the platform, the projects and the output, and Forgejo ([topology](#topology-where-the-parts-live)) | | One of the two |
-| `GITOPS_REPO_URL` | Deployments repository holding the whole tree (`https://…`, `ssh://…`, `git@host:path`, `file://…`) | | One of the two |
-| `GITOPS_BRANCH` | Branch holding the desired state | `main` | No |
-| `GITOPS_PATH` | Directory of the repository holding the tree | repository root | No |
+| `GITOPS_CONFIG` | Topology file: the repositories of the platform, the projects and the output (`https://…`, `ssh://…`, `git@host:path`, `file://…`), and Forgejo ([topology](#topology-where-the-parts-live)). `GITOPS_REPO_URL`, `GITOPS_BRANCH` and `GITOPS_PATH` (one repository holding the whole tree) are gone; a `GITOPS_REPO_URL` still set is refused at startup | | Yes |
 | `GITOPS_CREDENTIALS_DIR` | Mounted credentials Secret (`username`/`password`, `bearerToken`, or `identity`/`known_hosts`), for every deployments repository, and the catalogs on their host | `/etc/okdp/gitops-credentials` | No |
 | `GITOPS_SSH_INSECURE_IGNORE_HOST_KEY` | Accept any SSH host key (sandboxes only) | `false` | No |
 | `GITOPS_AUTHOR_NAME` / `GITOPS_AUTHOR_EMAIL` | Commit committer (and author when the user has no email; the logged-in user authors the commit otherwise) | `OKDP control plane` / `okdp-control-plane@okdp.io` | No |
@@ -607,15 +652,17 @@ catalog (`catalog <name> (<url>@<ref>)`) is the catalog's, not the write's.
 
 **Cause:** the instance is committed, but the GitOps engine has not produced its
 HelmRelease (`okdp-releases/<project>-<instance>`) or Application (`<project>-<instance>`)
-yet. Either the CI of the sources has not compiled the commit yet, or its run failed (a
-run that fails writes nothing), or the engine has not reconciled the new revision of the
-output, or it does not watch the output (`compiled/`). An instance, the console's or one
+yet. Either the CI of the output has not compiled the commit yet (it runs every few
+minutes), or its run failed (a run that fails keeps the output of the project as it
+was), or the engine has not reconciled the new revision of the output, or it does not
+watch the output (`compiled/`). An instance, the console's or one
 declared by hand, stays `Pending` until it is compiled. A HelmRelease whose `dependsOn`
 names an instance that is not ready waits for it.
 
-**Fix:** check the run of the okdp-gitops workflow on the commit (its log names what does
-not compile), the engine (`flux get kustomizations`, or the ApplicationSet in Argo CD),
-and that `GITOPS_ENGINE` names the engine actually in use.
+**Fix:** check the last run of the okdp-gitops workflow of the output repository (its log
+names what does not compile) and the output's `sources.yaml` (the revisions of the
+sources it is the compile of), the engine (`flux get kustomizations`, or the
+ApplicationSet in Argo CD), and that `GITOPS_ENGINE` names the engine actually in use.
 
 ---
 

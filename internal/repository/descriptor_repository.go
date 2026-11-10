@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
 )
 
@@ -71,7 +72,7 @@ func (r *publishedRepository) List(ctx context.Context, namespace string) ([]Des
 }
 
 // DescriptorFromPublished is the descriptor of what an instance publishes.
-func DescriptorFromPublished(namespace string, p gitops.Published) Descriptor {
+func DescriptorFromPublished(namespace string, p treeedit.Published) Descriptor {
 	d := Descriptor{
 		Release:   p.Release,
 		Namespace: namespace,

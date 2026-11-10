@@ -22,7 +22,7 @@ type Config struct {
 	InsecureOCIRegistries []string
 	// OIDC configures the verification of the console's bearer token.
 	OIDC OIDCConfig
-	// GitOps configures the deployments repository, the only desired-state
+	// GitOps configures the deployments repositories, the only desired-state
 	// store, and the engine reconciling it.
 	GitOps GitOpsConfig
 
@@ -54,15 +54,14 @@ const (
 )
 
 type GitOpsConfig struct {
-	// ConfigFile is the topology file (GITOPS_CONFIG): where the platform,
-	// the projects and the output live. Without it, RepoURL, Branch and Path
-	// hold the whole tree (mono).
+	// ConfigFile is the topology file (GITOPS_CONFIG), required: where the
+	// platform, the projects and the output live, the output in a
+	// repository of its own.
 	ConfigFile string
-	// RepoURL is the deployments repository (https://, ssh:// or git@host:path).
-	RepoURL string
-	Branch  string
-	// Path is the directory of the repository holding the tree, empty for the root.
-	Path string
+	// RemovedRepoURL is GITOPS_REPO_URL, the repository of the removed
+	// single-repository mode: refused when set, for a deployment that still
+	// names it not to start on another store than it thinks.
+	RemovedRepoURL string
 	// CredentialsDir holds the mounted credentials Secret (Flux GitRepository
 	// keys: username/password, bearerToken, or identity/known_hosts).
 	CredentialsDir string
@@ -89,8 +88,11 @@ type GitOpsConfig struct {
 
 // Validate refuses a configuration the server cannot run with.
 func (g GitOpsConfig) Validate() error {
-	if g.RepoURL == "" && g.ConfigFile == "" {
-		return errors.New("GITOPS_CONFIG or GITOPS_REPO_URL is required: the deployments repositories are the only desired-state store")
+	if g.RemovedRepoURL != "" {
+		return errors.New("GITOPS_REPO_URL is no longer read: the single-repository mode is gone, the output is in a repository of its own, never one of the sources; name the repositories of the platform, the projects and the output in the topology file GITOPS_CONFIG, and remove GITOPS_REPO_URL, GITOPS_BRANCH and GITOPS_PATH")
+	}
+	if g.ConfigFile == "" {
+		return errors.New("GITOPS_CONFIG is required: the topology file naming the repositories of the platform, the projects and the output, the only desired-state store")
 	}
 	if g.Engine != EngineFlux && g.Engine != EngineArgoCD {
 		return errors.New("GITOPS_ENGINE must be flux or argocd")
@@ -99,12 +101,9 @@ func (g GitOpsConfig) Validate() error {
 }
 
 // Topology returns where the parts of the tree live: the GITOPS_CONFIG
-// file, else the tree under GITOPS_PATH of GITOPS_REPO_URL (mono).
+// file.
 func (g GitOpsConfig) Topology() (*gitops.Topology, error) {
-	if g.ConfigFile != "" {
-		return gitops.LoadTopology(g.ConfigFile)
-	}
-	return gitops.MonoTopology(g.RepoURL, g.Branch, g.Path), nil
+	return gitops.LoadTopology(g.ConfigFile)
 }
 
 type OIDCConfig struct {
@@ -132,14 +131,12 @@ func Load() (*Config, error) {
 			Disabled: getEnv("AUTH_DISABLED", "") == "true",
 		},
 		GitOps: GitOpsConfig{
-			RepoURL:               strings.TrimSpace(getEnv("GITOPS_REPO_URL", "")),
-			Branch:                getEnv("GITOPS_BRANCH", "main"),
-			Path:                  strings.Trim(getEnv("GITOPS_PATH", ""), "/"),
 			CredentialsDir:        getEnv("GITOPS_CREDENTIALS_DIR", "/etc/okdp/gitops-credentials"),
 			InsecureIgnoreHostKey: getEnv("GITOPS_SSH_INSECURE_IGNORE_HOST_KEY", "") == "true",
 			AuthorName:            getEnv("GITOPS_AUTHOR_NAME", "OKDP control plane"),
 			AuthorEmail:           getEnv("GITOPS_AUTHOR_EMAIL", "okdp-control-plane@okdp.io"),
 			ConfigFile:            strings.TrimSpace(getEnv("GITOPS_CONFIG", "")),
+			RemovedRepoURL:        strings.TrimSpace(getEnv("GITOPS_REPO_URL", "")),
 			CloneDir:              getEnv("GITOPS_CLONE_DIR", ""),
 			ChartCacheDir:         getEnv("GITOPS_CHART_CACHE_DIR", ""),
 			Engine:                strings.ToLower(getEnv("GITOPS_ENGINE", EngineFlux)),

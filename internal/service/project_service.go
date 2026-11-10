@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
@@ -68,19 +69,23 @@ func NewDefaultProjectService(namespaces repository.ProjectNamespaceRepository, 
 // projectError maps the errors of the deployments repository to the API
 // errors the handlers and middleware.RequireProject understand.
 func projectError(err error, name string) error {
+	var compileErr *treeedit.CompileError
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, gitops.ErrNotFound):
+	case errors.As(err, &compileErr):
+		// A name the compile refuses: the compiler's message.
+		return apierrors.NewBadRequest(err.Error())
+	case errors.Is(err, treeedit.ErrNotFound):
 		return apierrors.NewNotFound(projectsResource, name)
-	case errors.Is(err, gitops.ErrExists):
+	case errors.Is(err, treeedit.ErrExists):
 		return apierrors.NewAlreadyExists(projectsResource, name)
 	default:
 		return err
 	}
 }
 
-func toModel(p gitops.Project) models.Project {
+func toModel(p treeedit.Project) models.Project {
 	return models.Project{Name: p.Name, Description: p.Description}
 }
 
@@ -108,13 +113,20 @@ func (s *DefaultProjectService) GetProject(ctx context.Context, name string) (*m
 }
 
 // CreateProject creates its Namespace, then commits projects/<p>/project.yaml.
-// The Namespace goes first because it refuses a name that is already a
-// Namespace other than a project's (kube-system, …): a project named after
-// it would hand that namespace to the console. It is removed again when the
-// commit fails.
+// A name the compile refuses every instance of the project with
+// (gitops.Deployments.CheckProjectName, okdp-compiler's rule: platform,
+// kube-*, the deployer engines' namespaces, the platform's
+// global.okdp.policy.reserved) is refused first, a BadRequest of the
+// compiler's message, no Namespace created. The Namespace goes first
+// because it refuses a name that is already a Namespace other than a
+// project's: a project named after it would hand that namespace to the
+// console. It is removed again when the commit fails.
 func (s *DefaultProjectService) CreateProject(ctx context.Context, project *models.Project) error {
-	if err := gitops.ValidateName("project", project.Name); err != nil {
+	if err := treeedit.ValidateName("project", project.Name); err != nil {
 		return apierrors.NewBadRequest(err.Error())
+	}
+	if err := s.deployments.CheckProjectName(ctx, project.Name); err != nil {
+		return projectError(err, project.Name)
 	}
 	created := false
 	if s.namespaces != nil {
@@ -123,7 +135,7 @@ func (s *DefaultProjectService) CreateProject(ctx context.Context, project *mode
 			return err
 		}
 	}
-	_, err := s.deployments.CreateProject(ctx, auth.ActorFrom(ctx), gitops.Project{Name: project.Name, Description: project.Description})
+	_, err := s.deployments.CreateProject(ctx, auth.ActorFrom(ctx), treeedit.Project{Name: project.Name, Description: project.Description})
 	if err != nil {
 		if created {
 			if _, rollbackErr := s.namespaces.DeleteNamespace(ctx, project.Name); rollbackErr != nil {
@@ -138,7 +150,7 @@ func (s *DefaultProjectService) CreateProject(ctx context.Context, project *mode
 
 // UpdateProject changes the description in project.yaml.
 func (s *DefaultProjectService) UpdateProject(ctx context.Context, project *models.Project) (*models.Project, error) {
-	if _, err := s.deployments.UpdateProject(ctx, auth.ActorFrom(ctx), gitops.Project{Name: project.Name, Description: project.Description}); err != nil {
+	if _, err := s.deployments.UpdateProject(ctx, auth.ActorFrom(ctx), treeedit.Project{Name: project.Name, Description: project.Description}); err != nil {
 		return nil, projectError(err, project.Name)
 	}
 	s.notify()

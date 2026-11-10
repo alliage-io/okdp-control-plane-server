@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
 )
@@ -65,11 +66,11 @@ func TestPlatformServiceToMap(t *testing.T) {
 // and a writer bound to it.
 func newWriterWith(t *testing.T, categories []interface{}) (CatalogWriterRepository, func() []interface{}) {
 	t.Helper()
-	raw, err := gitops.MarshalYAML(map[string]interface{}{"defaultRepository": "quay.io/okdp/platform-charts", "categories": categories})
+	raw, err := treeedit.MarshalYAML(map[string]interface{}{"defaultRepository": "quay.io/okdp/platform-charts", "categories": categories})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := gitops.NewMemoryStore(map[string]string{gitops.CatalogsFile: string(raw)})
+	store := gitops.NewMemoryStore(map[string]string{treeedit.CatalogsFile: string(raw)})
 	d := gitops.NewDeployments(store)
 	w := NewCatalogWriterRepository(d)
 	read := func() []interface{} {

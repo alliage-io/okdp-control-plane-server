@@ -12,6 +12,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
@@ -121,7 +123,7 @@ func invalid(format string, args ...any) error {
 const ErrorCodeDoesNotCompile = "does-not-compile"
 
 // DoesNotCompile is the refusal of a compile.
-func DoesNotCompile(err *gitops.CompileError) error {
+func DoesNotCompile(err *treeedit.CompileError) error {
 	return &ValidationError{message: err.Error(), Code: ErrorCodeDoesNotCompile}
 }
 
@@ -158,17 +160,17 @@ func IsNotFound(err error) bool {
 
 // connectionGitError maps the deployments repository errors to the API ones.
 func connectionGitError(err error, name string) error {
-	var inUse *gitops.ErrInUse
-	var compileErr *gitops.CompileError
+	var inUse *treeedit.ErrInUse
+	var compileErr *treeedit.CompileError
 	switch {
 	case err == nil:
 		return nil
 	case errors.As(err, &compileErr):
 		// An instance that layers the connection in no longer compiles with it.
 		return DoesNotCompile(compileErr)
-	case errors.Is(err, gitops.ErrNotFound):
+	case errors.Is(err, treeedit.ErrNotFound):
 		return apierrors.NewNotFound(connectionsResource, name)
-	case errors.Is(err, gitops.ErrExists):
+	case errors.Is(err, treeedit.ErrExists):
 		return apierrors.NewAlreadyExists(connectionsResource, name)
 	case errors.As(err, &inUse):
 		return invalid("connection %q is still referenced by %s; change them first", name, strings.Join(inUse.Users, ", "))
@@ -200,7 +202,7 @@ func (s *DefaultConnectionService) List(ctx context.Context, namespace string) (
 	}
 	result := make([]models.ConnectionResponse, 0, len(connections))
 	for i := range connections {
-		result = append(result, s.toResponse(&connections[i]))
+		result = append(result, s.toResponse(&connections[i], namespace))
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
@@ -228,14 +230,14 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	// delete it, taking the running consumers' credentials with it.
 	if _, err := s.deployments.GetConnection(ctx, namespace, req.Name); err == nil {
 		return nil, apierrors.NewAlreadyExists(connectionsResource, req.Name)
-	} else if !errors.Is(err, gitops.ErrNotFound) {
+	} else if !errors.Is(err, treeedit.ErrNotFound) {
 		return nil, err
 	}
 	// A level of the context adds connections, it changes none of the
 	// platform's: the compile refuses a project connection of that name.
 	if _, err := s.deployments.GetConnection(ctx, "", req.Name); err == nil {
 		return nil, invalid("connection %q: a connection of the platform has that name", req.Name)
-	} else if !errors.Is(err, gitops.ErrNotFound) {
+	} else if !errors.Is(err, treeedit.ErrNotFound) {
 		return nil, err
 	}
 
@@ -257,20 +259,19 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 		}
 	}
 
-	connection := gitops.Connection{
+	connection := compiler.Connection{
 		Name:        req.Name,
-		Project:     namespace,
 		Contract:    descriptor.Name,
 		Description: req.Description,
 		Values:      public,
 		SecretRef:   secretName,
 	}
-	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), connection, true); err != nil {
+	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), namespace, connection, true); err != nil {
 		// Leave no orphan Secret behind when the connection itself is refused. A
 		// Secret we do not own is never touched, and neither is the one a
 		// concurrent create under the same name has just bound to its own
 		// connection.
-		if ownSecret && len(secrets) > 0 && !errors.Is(err, gitops.ErrExists) {
+		if ownSecret && len(secrets) > 0 && !errors.Is(err, treeedit.ErrExists) {
 			if cleanupErr := s.secrets.DeleteSecret(ctx, namespace, secretName); cleanupErr != nil {
 				logrus.WithError(cleanupErr).Warn("Failed to clean up the credentials secret of a rejected connection")
 			}
@@ -278,7 +279,7 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 		return nil, connectionGitError(err, req.Name)
 	}
 
-	response := s.toResponse(&connection)
+	response := s.toResponse(&connection, namespace)
 	return &response, nil
 }
 
@@ -329,15 +330,14 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 		secretName = ownedName
 	}
 
-	updated := gitops.Connection{
+	updated := compiler.Connection{
 		Name:        name,
-		Project:     namespace,
 		Contract:    descriptor.Name,
 		Description: req.Description,
 		Values:      public,
 		SecretRef:   secretName,
 	}
-	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), updated, false); err != nil {
+	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), namespace, updated, false); err != nil {
 		return nil, connectionGitError(err, name)
 	}
 
@@ -345,7 +345,7 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 		s.deleteOwnedSecret(ctx, namespace, orphanedSecret)
 	}
 
-	response := s.toResponse(&updated)
+	response := s.toResponse(&updated, namespace)
 	return &response, nil
 }
 
@@ -633,7 +633,7 @@ func splitValues(descriptor *models.ContractDescriptor, values map[string]any) (
 	return public, secrets
 }
 
-func (s *DefaultConnectionService) toResponse(connection *gitops.Connection) models.ConnectionResponse {
+func (s *DefaultConnectionService) toResponse(connection *compiler.Connection, namespace string) models.ConnectionResponse {
 	values := map[string]any{}
 	for k, v := range connection.Values {
 		values[k] = v
@@ -646,7 +646,7 @@ func (s *DefaultConnectionService) toResponse(connection *gitops.Connection) mod
 		Name:        connection.Name,
 		Type:        connection.Contract,
 		Scope:       models.ConnectionScopeProject,
-		Namespace:   connection.Project,
+		Namespace:   namespace,
 		Description: connection.Description,
 		// Declared in Git: what it points at is only checked by a test.
 		Status: "Ready",
@@ -657,7 +657,7 @@ func (s *DefaultConnectionService) toResponse(connection *gitops.Connection) mod
 		if connection.SecretRef != "" && len(response.SecretFields) > 0 {
 			response.CredentialsSecret = &models.CredentialsSecretRef{
 				Name:      connection.SecretRef,
-				Namespace: connection.Project,
+				Namespace: namespace,
 				Keys:      response.SecretFields,
 				Owned:     connection.SecretRef == connection.Name+credentialsSecretSuffix,
 			}

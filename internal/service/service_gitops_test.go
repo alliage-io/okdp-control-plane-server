@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
@@ -156,13 +158,15 @@ func TestDeployCommitsTheInstanceFiles(t *testing.T) {
 	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
 }
 
-// assertNoOutput fails for each file of the output (compiled/, argocd/) in
-// files: the console commits the tree only, the CI writes the output.
+// assertNoOutput fails for each file of the output in files (under
+// compiled/ or argocd/, or sources.yaml itself: gitops.OutputDirs holds
+// directories and a file): the console commits the tree only, the CI
+// writes the output.
 func assertNoOutput(t *testing.T, files map[string]string) {
 	t.Helper()
 	for p := range files {
-		for _, dir := range gitops.OutputDirs {
-			assert.False(t, strings.HasPrefix(p, dir+"/"), "the console wrote the output file %s", p)
+		for _, entry := range gitops.OutputDirs {
+			assert.False(t, p == entry || strings.HasPrefix(p, entry+"/"), "the console wrote the output file %s", p)
 		}
 	}
 }
@@ -246,7 +250,7 @@ func TestListAssemblesGitAndClusterState(t *testing.T) {
 	}}}
 	svc, _ := newGitServiceUnderTest(t, engine, descriptors)
 	d := svc.deployments
-	for _, st := range []gitops.Instance{
+	for _, st := range []treeedit.Instance{
 		{Name: "hive", Project: "demo", Service: "hive-metastore", Version: "1.0.0"},
 		{Name: "sql", Project: "demo", Service: "trino", Version: "480.0.0-p21",
 			Values: map[string]any{"catalogs": []any{map[string]any{"hive": "demo-hive"}}}},
@@ -343,7 +347,7 @@ func next(t *testing.T, stream <-chan ServiceEvent) ServiceEvent {
 }
 
 func TestInstanceStatusVocabulary(t *testing.T) {
-	inst := gitops.Instance{Version: "2.0.0"}
+	inst := treeedit.Instance{Version: "2.0.0"}
 	status, msg := instanceStatus(inst, repository.EngineStatus{}, "argocd")
 	assert.Equal(t, "Pending", status)
 	assert.Contains(t, msg, "argocd")
@@ -434,7 +438,17 @@ func TestDeployWritesOnlyTheSubmittedParameters(t *testing.T) {
 
 func TestReleaseNameCollisionIsNotADuplicateInstance(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	// The compile of the tree finds the collision, as the Flux and Argo CD
+	// targets refuse it: a catalog with the package.
+	cat := t.TempDir()
+	pkg := filepath.Join(cat, "catalog", "trino", "480.0.0-p21")
+	require.NoError(t, os.MkdirAll(pkg, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(pkg, "Chart.yaml"), []byte("apiVersion: v2\nname: trino\nversion: 480.0.0-p21\n"), 0o644))
+	svc.deployments.Compiler = gitops.NewCompiler(&catalog.Loader{Dirs: map[string]string{"test": cat}})
 	_, err := store.Update(context.Background(), gitops.Commit{Subject: "a project"}, func(tx gitops.Tx) error {
+		if err := tx.WriteFile(treeedit.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n")); err != nil {
+			return err
+		}
 		return tx.WriteFile("projects/demo-sql/project.yaml", []byte("{}\n"))
 	})
 	require.NoError(t, err)

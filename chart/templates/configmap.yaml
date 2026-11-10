@@ -9,14 +9,8 @@ data:
   PLATFORM_NAMESPACE: {{ .Values.configuration.platformNamespace | quote }}
   ALLOWED_ORIGINS: {{ .Values.configuration.allowedOrigins | quote }}
   LOG_LEVEL: {{ .Values.configuration.logLevel | quote }}
-  {{- if .Values.gitops.topology }}
-  # Where the platform, the projects and the output live.
+  # Where the platform, the projects and the output live (gitops.topology).
   GITOPS_CONFIG: /etc/okdp/gitops/topology.yaml
-  {{- else }}
-  GITOPS_REPO_URL: {{ required "gitops.repoURL (or gitops.topology) is required: the deployments repositories are the only desired-state store" .Values.gitops.repoURL | quote }}
-  {{- end }}
-  GITOPS_BRANCH: {{ .Values.gitops.branch | quote }}
-  GITOPS_PATH: {{ .Values.gitops.path | quote }}
   GITOPS_ENGINE: {{ .Values.gitops.engine | quote }}
   GITOPS_RELEASES_NAMESPACE: {{ .Values.gitops.releasesNamespace | quote }}
   ARGOCD_NAMESPACE: {{ .Values.gitops.argocdNamespace | quote }}

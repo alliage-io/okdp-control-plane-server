@@ -9,6 +9,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,13 +77,13 @@ func seedTrino(t *testing.T, store gitops.Store) *gitops.Deployments {
 	t.Helper()
 	d := gitops.NewDeployments(store)
 	_, err := d.Store.Update(context.Background(), gitops.Commit{Subject: "seed"}, func(tx gitops.Tx) error {
-		if err := tx.WriteFile(gitops.CatalogsFile, []byte("categories: []\n")); err != nil {
+		if err := tx.WriteFile(treeedit.CatalogsFile, []byte("categories: []\n")); err != nil {
 			return err
 		}
 		return tx.WriteFile("projects/demo/project.yaml", []byte("{}\n"))
 	})
 	require.NoError(t, err)
-	_, err = d.CreateInstance(context.Background(), auth.ActorFrom(aliceContext()), gitops.Instance{
+	_, err = d.CreateInstance(context.Background(), auth.ActorFrom(aliceContext()), treeedit.Instance{
 		Name: "trino", Project: "demo", Service: "trino", Version: "480.0.0-p21", Values: map[string]any{"workers": 2},
 	})
 	require.NoError(t, err)
@@ -128,7 +129,7 @@ func TestUpdateParametersRevalidatesWhenTheInstanceChanged(t *testing.T) {
 		if reads != 1 {
 			return
 		}
-		_, _, err := otherDeployments.UpdateInstance(context.Background(), auth.ActorFrom(aliceContext()), "demo", "trino", func(st *gitops.Instance) error {
+		_, _, err := otherDeployments.UpdateInstance(context.Background(), auth.ActorFrom(aliceContext()), "demo", "trino", func(st *treeedit.Instance) error {
 			st.Values["catalogs"] = []any{map[string]any{"name": "lake"}}
 			return nil
 		})

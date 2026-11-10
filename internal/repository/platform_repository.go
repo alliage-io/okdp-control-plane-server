@@ -8,6 +8,7 @@ import (
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-gitops/gitops"
@@ -91,7 +92,7 @@ func NewPlatformRepository(deployments *gitops.Deployments) PlatformRepository {
 func catalogCategories(v map[string]interface{}) ([]map[string]interface{}, bool, error) {
 	raw, found, err := unstructured.NestedSlice(v, "categories")
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read categories from %s: %w", gitops.CatalogsFile, err)
+		return nil, false, fmt.Errorf("failed to read categories from %s: %w", treeedit.CatalogsFile, err)
 	}
 	if !found {
 		return nil, false, nil
@@ -143,7 +144,7 @@ func (r *platformRepository) GetPlatformServices(ctx context.Context) ([]models.
 		return nil, err
 	}
 	if !found {
-		logrus.Warn("No categories found in " + gitops.CatalogsFile)
+		logrus.Warn("No categories found in " + treeedit.CatalogsFile)
 		return []models.PlatformService{}, nil
 	}
 
@@ -441,7 +442,7 @@ func (r *platformRepository) values(ctx context.Context) (map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
-	doc, err := gitops.DecodeValues(raw)
+	doc, err := treeedit.DecodeValues(raw)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
@@ -473,7 +474,7 @@ func (r *platformRepository) catalog(ctx context.Context) (map[string]interface{
 	}
 	doc, err := r.deployments.ReadCatalog(ctx)
 	if err != nil {
-		if errors.Is(err, gitops.ErrNotFound) {
+		if errors.Is(err, treeedit.ErrNotFound) {
 			return map[string]interface{}{}, nil
 		}
 		return nil, err

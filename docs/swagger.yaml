@@ -1764,9 +1764,10 @@ paths:
       consumes:
       - application/json
       description: 'Create a project: commits projects/<name>/project.yaml (in a split
-        topology, to a new repository of its own, with the okdp-gitops workflow .forgejo/workflows/okdp-gitops.yaml)
-        and creates the project Namespace. 409 when the project is already declared,
-        or when a Namespace of that name exists and is not a project''s'
+        topology, to a new repository of its own, created through the Forgejo API
+        with project.yaml only: no workflow, no secret, the CI of the output repository
+        compiles it) and creates the project Namespace. 409 when the project is already
+        declared, or when a Namespace of that name exists and is not a project''s'
       parameters:
       - description: Project Object
         in: body
@@ -2531,11 +2532,12 @@ paths:
         and commits its sources to the deployments Git repositories (instance.yaml:
         service and version; values.yaml: the submitted parameters only). The output
         (the umbrella chart of okdp-compiler, its instance.values.yaml, the engine
-        files) is not the console''s: okdp-gitops compile writes it, in a CI on each
-        commit of the sources. The answer carries the commit (revision) and the status
-        Pending until the GitOps engine reconciles it. 400 on invalid parameters,
-        or with code does-not-compile when the instance does not compile (the compiler''s
-        message, one problem per line); 409 with code instance-exists or release-name-taken.'
+        files) is not the console''s: okdp-gitops compile writes it, in the CI of
+        the output repository, at its next run. The answer carries the commit (revision)
+        and the status Pending until the GitOps engine reconciles it. 400 on invalid
+        parameters, or with code does-not-compile when the instance does not compile
+        (the compiler''s message, one problem per line); 409 with code instance-exists
+        or release-name-taken.'
       parameters:
       - description: Project name
         in: path
@@ -2929,9 +2931,9 @@ paths:
         as published, from the chart cache; changedLines, the 1-based lines of values
         that differ from the defaults (set by OKDP or the instance). The key named
         like the service comes first. Empty when the instance has not been compiled
-        yet (the output is written by okdp-gitops, in CI on each commit of the sources).
-        A chart that cannot be fetched leaves values the compiled values only, and
-        defaultsError says why, instead of failing.'
+        yet (the output is written by okdp-gitops, in the CI of the output repository,
+        at its next run). A chart that cannot be fetched leaves values the compiled
+        values only, and defaultsError says why, instead of failing.'
       parameters:
       - description: Project name
         in: path

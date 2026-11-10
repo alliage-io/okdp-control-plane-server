@@ -113,6 +113,26 @@ func TestCreateProjectRefusesAnInvalidName(t *testing.T) {
 	namespaces.AssertNotCalled(t, "CreateNamespace")
 }
 
+// A name the compile refuses, kube-* or one of platform.yaml's
+// global.okdp.policy.reserved, is a BadRequest of the compiler's message,
+// before any Namespace or commit.
+func TestCreateProjectRefusesAReservedName(t *testing.T) {
+	svc, namespaces, store := newProjectServiceUnderTest(map[string]string{
+		"platform.yaml": "global:\n  okdp:\n    policy:\n      reserved: [openbao]\n",
+	})
+	for name, want := range map[string]string{
+		"kube-foo": `project "kube-foo": the namespace is reserved: kube-* is Kubernetes' own (kube-system, kube-public, kube-node-lease)`,
+		"argocd":   `project "argocd": the namespace is reserved: a deployer engine's, or the namespace its target writes in (argocd, flux-system, okdp-releases): a project's releases there would drive the engine`,
+		"openbao":  `project "openbao": the namespace is reserved by the platform (global.okdp.policy.reserved): no project has it`,
+	} {
+		err := svc.CreateProject(aliceContext(), &models.Project{Name: name})
+		assert.True(t, apierrors.IsBadRequest(err), "%s: got %v", name, err)
+		assert.EqualError(t, err, want)
+	}
+	assert.Empty(t, store.Messages)
+	namespaces.AssertNotCalled(t, "CreateNamespace")
+}
+
 func TestCreateProjectStopsOnANamespaceError(t *testing.T) {
 	svc, namespaces, store := newProjectServiceUnderTest(nil)
 	ctx := context.Background()

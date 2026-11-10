@@ -12,7 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/okdp/okdp-gitops/gitops"
+	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -52,7 +53,7 @@ type SqlService interface {
 // SqlConnectionSource reads what the SQL service needs of an external
 // connection: its declaration in Git and its credentials Secret.
 type SqlConnectionSource struct {
-	Get     func(ctx context.Context, project, name string) (*gitops.Connection, error)
+	Get     func(ctx context.Context, project, name string) (*compiler.Connection, error)
 	Secrets repository.ConnectionSecretRepository
 }
 
@@ -124,7 +125,7 @@ func (s *DefaultSqlService) ExecuteOnConnection(ctx context.Context, project, na
 	}
 	connection, err := s.connections.Get(ctx, project, name)
 	if err != nil {
-		if errors.Is(err, gitops.ErrNotFound) {
+		if errors.Is(err, treeedit.ErrNotFound) {
 			return nil, apierrors.NewNotFound(connectionsResource, name)
 		}
 		return nil, err

@@ -8,6 +8,7 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
 )
 
@@ -19,16 +20,16 @@ func newContextWith(t *testing.T, body map[string]interface{}) PlatformRepositor
 	files := map[string]string{}
 	for k, v := range body {
 		if k == "serviceCatalog" {
-			catalog, err := gitops.MarshalYAML(v)
+			catalog, err := treeedit.MarshalYAML(v)
 			if err != nil {
 				t.Fatal(err)
 			}
-			files[gitops.CatalogsFile] = string(catalog)
+			files[treeedit.CatalogsFile] = string(catalog)
 			continue
 		}
 		values[k] = v
 	}
-	raw, err := gitops.MarshalYAML(map[string]interface{}{"global": map[string]interface{}{"okdp": values}})
+	raw, err := treeedit.MarshalYAML(map[string]interface{}{"global": map[string]interface{}{"okdp": values}})
 	if err != nil {
 		t.Fatal(err)
 	}

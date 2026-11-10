@@ -14,6 +14,7 @@ import (
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
@@ -322,7 +323,7 @@ func normalizeAndValidateCatalogService(svc *models.PlatformService) error {
 // ReleaseNameTakenError is a new instance whose release name <p>-<i> another
 // project's instance already uses. The handler answers 409 with its own
 // code, distinct from a duplicate instance.
-type ReleaseNameTakenError struct{ *gitops.ErrReleaseTaken }
+type ReleaseNameTakenError struct{ *treeedit.ErrReleaseTaken }
 
 // IsReleaseNameTaken reports whether err is a release-name collision.
 func IsReleaseNameTaken(err error) bool {
@@ -334,9 +335,9 @@ func IsReleaseNameTaken(err error) bool {
 // API errors the handlers already turn into 404 and 409, and the refusals
 // of a compile or of a delete to validation errors (400).
 func gitError(err error, name string) error {
-	var taken *gitops.ErrReleaseTaken
-	var compileErr *gitops.CompileError
-	var inUse *gitops.ErrInUse
+	var taken *treeedit.ErrReleaseTaken
+	var compileErr *treeedit.CompileError
+	var inUse *treeedit.ErrInUse
 	switch {
 	case err == nil:
 		return nil
@@ -346,9 +347,9 @@ func gitError(err error, name string) error {
 		return DoesNotCompile(compileErr)
 	case errors.As(err, &inUse):
 		return invalid("instance %q is still referenced by %s; change them first", name, strings.Join(inUse.Users, ", "))
-	case errors.Is(err, gitops.ErrNotFound):
+	case errors.Is(err, treeedit.ErrNotFound):
 		return apierrors.NewNotFound(servicesResource, name)
-	case errors.Is(err, gitops.ErrExists):
+	case errors.Is(err, treeedit.ErrExists):
 		return apierrors.NewAlreadyExists(servicesResource, name)
 	default:
 		return err
@@ -379,7 +380,7 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 	if instanceName == "" {
 		instanceName = req.Service
 	}
-	if err := gitops.ValidateName("instance", instanceName); err != nil {
+	if err := treeedit.ValidateName("instance", instanceName); err != nil {
 		return nil, invalid("%v", err)
 	}
 
@@ -391,7 +392,7 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 	if values == nil {
 		values = map[string]any{}
 	}
-	state := gitops.Instance{
+	state := treeedit.Instance{
 		Name:    instanceName,
 		Project: project,
 		Service: req.Service,
@@ -447,7 +448,7 @@ func (s *DefaultServiceService) UpdateServiceParameters(ctx context.Context, pro
 			return nil, err
 		}
 
-		state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *gitops.Instance) error {
+		state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *treeedit.Instance) error {
 			if st.Service != current.Service || st.Version != current.Version ||
 				!reflect.DeepEqual(st.Values, current.Values) {
 				return errStaleValidation
@@ -609,7 +610,7 @@ func (s *DefaultServiceService) observe(ctx context.Context, project string) pro
 
 // assemble builds the console view of an instance from its declaration and
 // what the cluster reports.
-func (s *DefaultServiceService) assemble(st gitops.Instance, engine repository.EngineStatus, descriptor *repository.Descriptor, externals map[string]bool, obs *projectObservation) models.ServiceInstance {
+func (s *DefaultServiceService) assemble(st treeedit.Instance, engine repository.EngineStatus, descriptor *repository.Descriptor, externals map[string]bool, obs *projectObservation) models.ServiceInstance {
 	release := st.Release()
 	instance := models.ServiceInstance{
 		Name:            st.Name,
@@ -647,7 +648,7 @@ func (s *DefaultServiceService) engineName() string {
 
 // instanceStatus maps the engine's report to the console's status words.
 // Anything the engine has not picked up yet is Pending: committed, waiting.
-func instanceStatus(inst gitops.Instance, engine repository.EngineStatus, engineName string) (string, string) {
+func instanceStatus(inst treeedit.Instance, engine repository.EngineStatus, engineName string) (string, string) {
 	if !engine.Found {
 		return repository.PhasePending, fmt.Sprintf("Committed to Git, waiting for %s to reconcile it.", engineName)
 	}
@@ -669,7 +670,7 @@ func instanceStatus(inst gitops.Instance, engine repository.EngineStatus, engine
 // a candidate; only known connections match. Resolved says whether the
 // connection exists: declared in Git for an external one, a deployed
 // provider for an internal one.
-func boundConnections(st gitops.Instance, externals map[string]bool, obs *projectObservation) []models.ServiceConnection {
+func boundConnections(st treeedit.Instance, externals map[string]bool, obs *projectObservation) []models.ServiceConnection {
 	project := st.Project
 	byName := map[string]models.ServiceConnection{}
 	self := st.Release()

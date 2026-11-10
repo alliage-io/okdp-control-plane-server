@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/catalog"
@@ -54,11 +55,17 @@ func NewDefaultPackageSchemaService(contextRepo repository.PlatformRepository, c
 	return &DefaultPackageSchemaService{contextRepo: contextRepo, catalogs: catalogs}
 }
 
-func (s *DefaultPackageSchemaService) open(ctx context.Context) (*catalog.Catalogs, error) {
-	if s.catalogs == nil {
-		return catalog.New(), nil
+// open indexes the catalogs (okdp-compiler's index: services, versions,
+// packages).
+func (s *DefaultPackageSchemaService) open(ctx context.Context) (*compiler.Catalog, error) {
+	cats := catalog.New()
+	if s.catalogs != nil {
+		var err error
+		if cats, err = s.catalogs(ctx); err != nil {
+			return nil, err
+		}
 	}
-	return s.catalogs(ctx)
+	return cats.Index()
 }
 
 // menuEntry returns the console menu entry of a service (catalogs.yaml).
@@ -143,7 +150,7 @@ func (s *DefaultPackageSchemaService) CatalogOf(ctx context.Context) map[string]
 		return out
 	}
 	for _, svc := range all {
-		out[svc.Name] = svc.Catalog
+		out[svc.Name] = svc.Repository
 	}
 	return out
 }
@@ -230,7 +237,7 @@ func packageSchema(pkg fs.FS) (map[string]any, error) {
 }
 
 // IsCatalogNotFound reports a service or a version no catalog has.
-func IsCatalogNotFound(err error) bool { return errors.Is(err, catalog.ErrNotFound) }
+func IsCatalogNotFound(err error) bool { return errors.Is(err, compiler.ErrNotInCatalog) }
 
 // PlatformKeys are the root properties of a package's parameters that the
 // platform fills, never the user: the platform values (global), the

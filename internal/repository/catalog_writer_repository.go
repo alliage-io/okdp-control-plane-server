@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
@@ -50,7 +51,7 @@ func (r *gitCatalogWriterRepository) mutateCategories(ctx context.Context, targe
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to write %s: %w", gitops.CatalogsFile, err)
+		return fmt.Errorf("failed to write %s: %w", treeedit.CatalogsFile, err)
 	}
 	return nil
 }

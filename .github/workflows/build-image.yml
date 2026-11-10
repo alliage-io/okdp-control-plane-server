@@ -27,6 +27,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # go.mod replaces okdp-compiler and okdp-gitops with ../okdp-compiler and
+  # ../okdp-gitops until they are published: the commits of OKDP/okdp-compiler
+  # and OKDP/okdp-gitops the image builds with, full SHAs bumped by hand (the
+  # same as ci.yml's); their releases replace them, and the replaces of go.mod
+  # with them.
+  OKDP_COMPILER_REF: 94e7e2d6712854a09b95aec1caac22a4068714a3
+  OKDP_GITOPS_REF: b2bb34dfd3b68405ffa971f48b3263828c2bdfa8
+
 jobs:
   build-push:
     runs-on: ubuntu-latest
@@ -38,13 +47,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # go.mod replaces github.com/okdp/okdp-compiler with ../okdp-compiler until
-      # it is published.
-      - name: Clone okdp-compiler next to the repository
-        run: git clone --depth 1 https://github.com/OKDP/okdp-compiler.git ../okdp-compiler
-      # Likewise github.com/okdp/okdp-gitops with ../okdp-gitops.
-      - name: Clone okdp-gitops next to the repository
-        run: git clone --depth 1 https://github.com/OKDP/okdp-gitops.git ../okdp-gitops
+      - name: Fetch okdp-compiler next to the repository, at OKDP_COMPILER_REF
+        run: |
+          git init -q ../okdp-compiler
+          git -C ../okdp-compiler remote add origin https://github.com/OKDP/okdp-compiler.git
+          git -C ../okdp-compiler fetch -q --depth 1 origin "$OKDP_COMPILER_REF"
+          git -C ../okdp-compiler checkout -q FETCH_HEAD
+      - name: Fetch okdp-gitops next to the repository, at OKDP_GITOPS_REF
+        run: |
+          git init -q ../okdp-gitops
+          git -C ../okdp-gitops remote add origin https://github.com/OKDP/okdp-gitops.git
+          git -C ../okdp-gitops fetch -q --depth 1 origin "$OKDP_GITOPS_REF"
+          git -C ../okdp-gitops checkout -q FETCH_HEAD
       - id: vars
         env:
           INPUT_VERSION: ${{ inputs.version }}

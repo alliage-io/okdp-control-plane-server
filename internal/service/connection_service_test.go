@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/okdp/okdp-compiler/treeedit"
 	gitcatalog "github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
@@ -330,7 +331,7 @@ func TestDeleteLeavesASecretItDoesNotOwn(t *testing.T) {
 func TestDeleteRefusesAConnectionAnInstanceReferences(t *testing.T) {
 	svc, env, store := newServiceUnderTest(t)
 	_, err := store.Update(context.Background(), gitops.Commit{Subject: "a catalog"}, func(tx gitops.Tx) error {
-		return tx.WriteFile(gitops.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n"))
+		return tx.WriteFile(treeedit.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n"))
 	})
 	require.NoError(t, err)
 	env.deployments.Compiler = gitops.NewCompiler(&gitcatalog.Loader{Dirs: map[string]string{"test": "testdata/catalog"}})
@@ -338,7 +339,7 @@ func TestDeleteRefusesAConnectionAnInstanceReferences(t *testing.T) {
 		Name: "shared-hms", Type: "hive", Values: map[string]any{"thriftUri": "thrift://hms:9083"},
 	})
 	require.NoError(t, err)
-	_, err = env.deployments.CreateInstance(context.Background(), auth.Actor{Username: "alice"}, gitops.Instance{
+	_, err = env.deployments.CreateInstance(context.Background(), auth.Actor{Username: "alice"}, treeedit.Instance{
 		Name: "client", Project: "demo", Service: "hms-client", Version: "1.0.0", Values: map[string]any{"metastore": "shared-hms"},
 	})
 	require.NoError(t, err)

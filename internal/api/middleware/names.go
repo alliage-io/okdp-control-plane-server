@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -36,7 +36,7 @@ func ValidatePathNames() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		for _, p := range c.Params {
 			if kind, ok := gitNameParams[p.Key]; ok {
-				if err := gitops.ValidateName(kind, p.Value); err != nil {
+				if err := treeedit.ValidateName(kind, p.Value); err != nil {
 					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 					return
 				}

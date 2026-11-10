@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
@@ -22,12 +23,13 @@ const claimsCatalog = "testdata/catalog"
 
 // claimsLayout is a tree of that catalog: a database server, the instance
 // postgresql of the project data, the provider of the platform's default
-// class of database-server connections and of the project's class large;
+// class of database-server connections and of the project's class large,
+// which any project may claim of (claimers: ['*']);
 // the project demo, its named claim analytics, app claiming a database of
 // its own, reports naming analytics.
 func claimsLayout(extra map[string]string) *gitops.MemoryStore {
 	files := map[string]string{
-		gitops.CatalogsFile: "repositories:\n  - {name: test, url: https://git.example.org/test.git, ref: main}\n",
+		treeedit.CatalogsFile: "repositories:\n  - {name: test, url: https://git.example.org/test.git, ref: main}\n",
 		compiler.PlatformFile: `global:
   okdp:
     provisioning:
@@ -39,7 +41,7 @@ func claimsLayout(extra map[string]string) *gitops.MemoryStore {
       store: okdp-secrets
 `,
 		"projects/data/project.yaml":                       "{}\n",
-		"projects/data/instances/postgresql/instance.yaml": "service: postgresql\nversion: 1.0.0\n",
+		"projects/data/instances/postgresql/instance.yaml": "service: postgresql\nversion: 1.0.0\nclaimers: ['*']\n",
 		"projects/demo/project.yaml": `# The demo project.
 global:
   okdp:
@@ -239,8 +241,8 @@ func TestValidateClaimsChecksTheClaimsOfTheParameters(t *testing.T) {
 func TestTheWriteCheckBindsTheClaimsOfAnInstance(t *testing.T) {
 	store := claimsLayout(nil)
 	d := claimsDeployments(store)
-	newInstance := func(name string, values map[string]any) gitops.Instance {
-		return gitops.Instance{Name: name, Project: "demo", Service: "app", Version: "1.0.0", Values: values}
+	newInstance := func(name string, values map[string]any) treeedit.Instance {
+		return treeedit.Instance{Name: name, Project: "demo", Service: "app", Version: "1.0.0", Values: values}
 	}
 	_, err := d.CreateInstance(context.Background(), gitops.Actor{}, newInstance("metrics", map[string]any{
 		"database": map[string]any{"class": "large", "request": map[string]any{"extensions": []any{"timescaledb"}}},
@@ -250,7 +252,7 @@ func TestTheWriteCheckBindsTheClaimsOfAnInstance(t *testing.T) {
 	_, err = d.CreateInstance(context.Background(), gitops.Actor{}, newInstance("broken", map[string]any{
 		"database": map[string]any{"class": "huge"},
 	}))
-	var refused *gitops.CompileError
+	var refused *treeedit.CompileError
 	require.ErrorAs(t, err, &refused)
 	assert.Contains(t, err.Error(), `class "huge" is not a class of database-server connections`)
 	assert.NotContains(t, store.Files(), "projects/demo/instances/broken/instance.yaml")

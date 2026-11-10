@@ -95,11 +95,9 @@ spec:
               mountPath: /etc/okdp/gitops-credentials
               readOnly: true
             {{- end }}
-            {{- if .Values.gitops.topology }}
             - name: gitops-topology
               mountPath: /etc/okdp/gitops
               readOnly: true
-            {{- end }}
             {{- if .Values.gitops.forgejoTokenSecret }}
             - name: forgejo-token
               mountPath: /etc/okdp/forgejo
@@ -120,11 +118,9 @@ spec:
             secretName: {{ .Values.gitops.credentialsSecret }}
             defaultMode: 0400
         {{- end }}
-        {{- if .Values.gitops.topology }}
         - name: gitops-topology
           configMap:
             name: {{ include "okdp-control-plane-server.fullname" . }}-topology
-        {{- end }}
         {{- if .Values.gitops.forgejoTokenSecret }}
         - name: forgejo-token
           secret:

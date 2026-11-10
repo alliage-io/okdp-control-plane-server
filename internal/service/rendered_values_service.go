@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
 	"gopkg.in/yaml.v3"
 
@@ -14,7 +15,7 @@ import (
 )
 
 // ChartFiles reads a file of an upstream chart (its values.yaml), from the
-// chart cache, pulled first when the cache lacks it (charts.Cache.File).
+// chart cache, pulled first when the cache lacks it (chartcache.Cache.File).
 type ChartFiles interface {
 	File(ctx context.Context, ref compiler.ChartRef, name string) ([]byte, error)
 }
@@ -62,7 +63,7 @@ func (s *DefaultRenderedValuesService) GetRenderedValues(ctx context.Context, pr
 		return nil, gitError(err, name)
 	}
 	compiled, err := s.deployments.ReadCompiled(ctx, project, name)
-	if errors.Is(err, gitops.ErrNotFound) {
+	if errors.Is(err, treeedit.ErrNotFound) {
 		return []models.RenderedValues{}, nil
 	}
 	if err != nil {
@@ -106,7 +107,7 @@ func (s *DefaultRenderedValuesService) GetRenderedValues(ctx context.Context, pr
 func (s *DefaultRenderedValuesService) fill(ctx context.Context, rendered *models.RenderedValues, ref compiler.ChartRef, values map[string]any) error {
 	rendered.ChangedLines = []int{}
 	compiledOnly := func(reason string) error {
-		encoded, err := gitops.EncodeValues(values)
+		encoded, err := treeedit.EncodeValues(values)
 		if err != nil {
 			return err
 		}
@@ -126,7 +127,7 @@ func (s *DefaultRenderedValuesService) fill(ctx context.Context, rendered *model
 	if err != nil {
 		return compiledOnly("the defaults do not parse: " + err.Error())
 	}
-	encoded, err := gitops.EncodeValues(Coalesce(values, parsed))
+	encoded, err := treeedit.EncodeValues(Coalesce(values, parsed))
 	if err != nil {
 		return err
 	}
