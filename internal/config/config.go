@@ -2,9 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/okdp/okdp-gitops/gitops"
 )
@@ -25,6 +28,8 @@ type Config struct {
 	// GitOps configures the deployments repositories, the only desired-state
 	// store, and the engine reconciling it.
 	GitOps GitOpsConfig
+	// SQL bounds the SQL editor and the network the connection tests reach.
+	SQL SQLConfig
 
 	// Keycloak Admin REST API, backing user and group management
 	// (/api/v1/identity). The client is a confidential service account of the
@@ -67,8 +72,14 @@ type GitOpsConfig struct {
 	CredentialsDir string
 	// InsecureIgnoreHostKey accepts any SSH host key. Sandboxes only.
 	InsecureIgnoreHostKey bool
-	AuthorName            string
-	AuthorEmail           string
+	// InsecureHTTPHosts are the hosts a credential (the repositories', the
+	// catalogs', the Forgejo token) is sent to over http://, in clear
+	// (GITOPS_INSECURE_HTTP_HOSTS, comma separated host names or globs of
+	// them, path.Match): none by default, a credential for an http:// URL
+	// is refused. Name the exact hosts (a sandbox's in-cluster Forgejo).
+	InsecureHTTPHosts []string
+	AuthorName        string
+	AuthorEmail       string
 	// CloneDir holds the local clones, a cache (an emptyDir), one directory
 	// per repository under repos/; empty keeps them in memory.
 	CloneDir string
@@ -112,8 +123,43 @@ type OIDCConfig struct {
 	Issuer string
 	// ClientID overrides the client id the platform values declare.
 	ClientID string
+	// GroupsClaim is the claim of the token that holds the caller's
+	// groups (OIDC_GROUPS_CLAIM, groups by default): the groups of
+	// platform.yaml global.okdp.access.admins and of each project.yaml
+	// access, by name (Keycloak's groups mapper, "Full group path" off).
+	GroupsClaim string
 	// Disabled leaves the API open to anyone who can reach the port.
 	Disabled bool
+}
+
+// SQLConfig bounds the SQL editor (POST .../connections/:c/sql and
+// .../services/:s/sql) and the connections it, and the connection tests,
+// open.
+type SQLConfig struct {
+	// StatementTimeout bounds one execution (SQL_STATEMENT_TIMEOUT, a Go
+	// duration), PostgreSQL's statement_timeout too.
+	StatementTimeout time.Duration
+	// DefaultRows is the row cap of a request that names none
+	// (SQL_DEFAULT_ROWS); MaxRows the largest a request may ask
+	// (SQL_MAX_ROWS).
+	DefaultRows int
+	MaxRows     int
+	// MaxResultBytes caps the size of the rows of one result
+	// (SQL_MAX_RESULT_BYTES): past it, the rows are dropped and the result
+	// is truncated.
+	MaxResultBytes int
+	// MaxConcurrentPerUser is how many statements one user runs at once
+	// (SQL_MAX_CONCURRENT_PER_USER); past it the request answers 429.
+	MaxConcurrentPerUser int
+	// AllowedNetworks are the CIDRs (or addresses) the editor and the
+	// connection tests may reach although they are loopback, link-local or
+	// the Kubernetes API server (SQL_ALLOWED_NETWORKS, comma-separated):
+	// the platform's allow-list, empty by default.
+	AllowedNetworks []string
+	// CAFile is a PEM bundle of the CAs a database certificate is verified
+	// against, besides the system's (SQL_CA_FILE): the platform's CA bundle,
+	// global.okdp.tls.caBundleSecret, mounted by the chart.
+	CAFile string
 }
 
 const defaultSidecarPrefixes = "istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent"
@@ -126,13 +172,15 @@ func Load() (*Config, error) {
 		AllowedOrigins:    getEnv("ALLOWED_ORIGINS", "http://localhost:4200"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		OIDC: OIDCConfig{
-			Issuer:   strings.TrimSpace(getEnv("OIDC_ISSUER", "")),
-			ClientID: strings.TrimSpace(getEnv("OIDC_CLIENT_ID", "")),
-			Disabled: getEnv("AUTH_DISABLED", "") == "true",
+			Issuer:      strings.TrimSpace(getEnv("OIDC_ISSUER", "")),
+			ClientID:    strings.TrimSpace(getEnv("OIDC_CLIENT_ID", "")),
+			GroupsClaim: strings.TrimSpace(getEnv("OIDC_GROUPS_CLAIM", "groups")),
+			Disabled:    getEnv("AUTH_DISABLED", "") == "true",
 		},
 		GitOps: GitOpsConfig{
 			CredentialsDir:        getEnv("GITOPS_CREDENTIALS_DIR", "/etc/okdp/gitops-credentials"),
 			InsecureIgnoreHostKey: getEnv("GITOPS_SSH_INSECURE_IGNORE_HOST_KEY", "") == "true",
+			InsecureHTTPHosts:     gitops.InsecureHTTPHosts(os.Getenv(gitops.InsecureHTTPHostsEnv)),
 			AuthorName:            getEnv("GITOPS_AUTHOR_NAME", "OKDP control plane"),
 			AuthorEmail:           getEnv("GITOPS_AUTHOR_EMAIL", "okdp-control-plane@okdp.io"),
 			ConfigFile:            strings.TrimSpace(getEnv("GITOPS_CONFIG", "")),
@@ -158,6 +206,12 @@ func Load() (*Config, error) {
 		}
 	}
 
+	sql, err := loadSQL()
+	if err != nil {
+		return nil, err
+	}
+	cfg.SQL = sql
+
 	for _, h := range strings.Split(getEnv("INSECURE_OCI_REGISTRIES", ""), ",") {
 		if trimmed := strings.TrimSpace(h); trimmed != "" {
 			cfg.InsecureOCIRegistries = append(cfg.InsecureOCIRegistries, trimmed)
@@ -172,6 +226,41 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadSQL reads the SQL_* settings, each with its default.
+func loadSQL() (SQLConfig, error) {
+	sql := SQLConfig{CAFile: strings.TrimSpace(getEnv("SQL_CA_FILE", ""))}
+	timeout, err := time.ParseDuration(getEnv("SQL_STATEMENT_TIMEOUT", "2m"))
+	if err != nil || timeout <= 0 {
+		return sql, fmt.Errorf("SQL_STATEMENT_TIMEOUT: a positive duration, got %q", os.Getenv("SQL_STATEMENT_TIMEOUT"))
+	}
+	sql.StatementTimeout = timeout
+	for _, n := range []struct {
+		name     string
+		fallback int
+		into     *int
+	}{
+		{"SQL_DEFAULT_ROWS", 1000, &sql.DefaultRows},
+		{"SQL_MAX_ROWS", 10000, &sql.MaxRows},
+		{"SQL_MAX_RESULT_BYTES", 16 << 20, &sql.MaxResultBytes},
+		{"SQL_MAX_CONCURRENT_PER_USER", 2, &sql.MaxConcurrentPerUser},
+	} {
+		v, err := strconv.Atoi(getEnv(n.name, strconv.Itoa(n.fallback)))
+		if err != nil || v <= 0 {
+			return sql, fmt.Errorf("%s: a positive integer, got %q", n.name, os.Getenv(n.name))
+		}
+		*n.into = v
+	}
+	if sql.DefaultRows > sql.MaxRows {
+		sql.DefaultRows = sql.MaxRows
+	}
+	for _, n := range strings.Split(getEnv("SQL_ALLOWED_NETWORKS", ""), ",") {
+		if trimmed := strings.TrimSpace(n); trimmed != "" {
+			sql.AllowedNetworks = append(sql.AllowedNetworks, trimmed)
+		}
+	}
+	return sql, nil
 }
 
 // getEnv retrieves an environment variable or returns a default value

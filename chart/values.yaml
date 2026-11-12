@@ -16,6 +16,15 @@ configuration:
   # with a local registry). Leave empty in any real deployment.
   insecureOciRegistries: ""
 
+# The verification of the console's tokens. Issuer and client come from the
+# platform values (global.okdp.identity.oidc, else global.okdp.oidc).
+oidc:
+  # The claim of the token holding the caller's groups (OIDC_GROUPS_CLAIM), a
+  # list of group names: Keycloak's groups mapper with "Full group path" off,
+  # the names platform.yaml global.okdp.access.admins and project.yaml access
+  # give. A dotted name is a nested claim.
+  groupsClaim: groups
+
 # The deployments Git repositories: the only desired-state store. The server
 # commits the tree there (instances, connections, named claims, projects and
 # the catalog); okdp-gitops, in the CI of the output repository, compiles it
@@ -52,6 +61,13 @@ gitops:
   credentialsSecret: ""
   # Accept any SSH host key. Sandboxes only.
   sshInsecureIgnoreHostKey: false
+  # Hosts a credential (the repositories', the catalogs', the Forgejo
+  # token) is sent to over http://, in clear (GITOPS_INSECURE_HTTP_HOSTS):
+  # host names, or globs of them (path.Match), none by default, every
+  # credential for an http:// URL refused. Name the exact hosts, e.g. a
+  # sandbox's in-cluster Forgejo, forgejo-http.forgejo.svc.cluster.local;
+  # a glob such as *.svc.cluster.local trusts every Service of the cluster.
+  insecureHTTPHosts: []
   author:
     name: OKDP control plane
     email: okdp-control-plane@okdp.io
@@ -80,6 +96,47 @@ keycloak:
   # (KEYCLOAK_TLS_INSECURE; global.okdp.oidc.insecureSkipVerify also applies
   # when the URL comes from the platform issuer).
   tlsInsecure: false
+
+# The SQL editor (POST /api/projects/:p/connections/:c/sql and
+# .../services/:s/sql) and the connection tests (SQL_* variables).
+sqlEditor:
+  # A Secret of the release namespace holding the platform's CA bundle,
+  # the one global.okdp.tls.caBundleSecret of the platform values names
+  # (certs-bundle in the sandbox, written to every namespace by
+  # trust-manager), mounted at /etc/okdp/sql-ca (SQL_CA_FILE). Database
+  # certificates are verified against it and the system's CAs; empty: the
+  # system's only.
+  caBundleSecret: ""
+  caBundleKey: ca.crt
+  # Networks (CIDRs or addresses) the editor and the connection tests may
+  # reach although they are loopback, link-local (169.254.0.0/16,
+  # fe80::/10) or the Kubernetes API server, all refused otherwise.
+  allowedNetworks: []
+  # One statement's timeout (a Go duration), PostgreSQL's
+  # statement_timeout too.
+  statementTimeout: 2m
+  # The row cap of a request that names none, and the largest it may ask.
+  defaultRows: 1000
+  maxRows: 10000
+  # Past this size of a result's rows, the rest is dropped (truncated).
+  maxResultBytes: 16777216
+  # Statements one user runs at once; past it, 429.
+  maxConcurrentPerUser: 2
+
+# The server's rights outside the projects' namespaces (chart/templates/
+# rbac.yaml): Namespaces get, create, delete; the HelmReleases of
+# gitops.releasesNamespace (flux) or the Applications of
+# gitops.argocdNamespace (argocd), read only; the SparkApplication CRD. Its
+# rights in each project's namespace are the compiled output's: set
+# platform.yaml global.okdp.controlPlane.serviceAccount to this chart's
+# ServiceAccount (helm's NOTES print it), or the server reads and writes
+# nothing in the projects' namespaces.
+rbac:
+  # A ValidatingAdmissionPolicy (Kubernetes >= 1.30) letting the server's
+  # ServiceAccount create only a Namespace labelled okdp.io/project with
+  # its name and a Pod Security level that is not privileged, and delete
+  # only a Namespace so labelled.
+  namespacePolicy: true
 
 service:
   type: ClusterIP

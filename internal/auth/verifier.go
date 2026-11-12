@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -30,7 +31,17 @@ type Identity struct {
 	Name string
 	// Email is the "email" claim (Keycloak "email" scope); empty when absent.
 	Email string
+	// Groups are the groups of the caller, the token's groups claim
+	// (Config.GroupsClaim): the names of the platform's groups as the
+	// identity provider gives them, Keycloak's group names (its groups
+	// mapper's "Full group path" off), those of platform.yaml
+	// global.okdp.access.admins and of each project.yaml access.
+	Groups []string
 }
+
+// DefaultGroupsClaim is the claim of a token that holds the caller's
+// groups when Config.GroupsClaim names none (OIDC_GROUPS_CLAIM).
+const DefaultGroupsClaim = "groups"
 
 // Config describes the identity provider to trust.
 type Config struct {
@@ -38,11 +49,17 @@ type Config struct {
 	// InsecureSkipVerify takes the issuer's certificate on trust.
 	InsecureSkipVerify bool
 	ClientID           string
+	// GroupsClaim is the claim holding the caller's groups, a list of
+	// strings (a single string is one group); a dotted name is a claim
+	// nested in objects (Keycloak's mapper writes "a.b" so).
+	// DefaultGroupsClaim when empty.
+	GroupsClaim string
 }
 
 type oidcVerifier struct {
-	verifier *oidc.IDTokenVerifier
-	clientID string
+	verifier    *oidc.IDTokenVerifier
+	clientID    string
+	groupsClaim string
 }
 
 // idClaims contains the claims needed by Verify to identify the client and user.
@@ -77,9 +94,14 @@ func NewVerifier(ctx context.Context, cfg Config) (Verifier, error) {
 	}
 
 	// SkipClientIDCheck: Verify checks aud/azp/client_id itself, below.
+	groupsClaim := strings.TrimSpace(cfg.GroupsClaim)
+	if groupsClaim == "" {
+		groupsClaim = DefaultGroupsClaim
+	}
 	return &oidcVerifier{
-		verifier: provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
-		clientID: cfg.ClientID,
+		verifier:    provider.Verifier(&oidc.Config{SkipClientIDCheck: true}),
+		clientID:    cfg.ClientID,
+		groupsClaim: groupsClaim,
 	}, nil
 }
 
@@ -102,11 +124,43 @@ func (v *oidcVerifier) Verify(ctx context.Context, rawToken string) (*Identity, 
 		return nil, errors.New("the token was not issued for this client")
 	}
 
+	var all map[string]any
+	if err := token.Claims(&all); err != nil {
+		return nil, fmt.Errorf("could not read the token claims: %w", err)
+	}
+
 	username := claims.PreferredUsername
 	if username == "" {
 		username = claims.Email
 	}
-	return &Identity{Subject: token.Subject, Username: username, Name: claims.Name, Email: claims.Email}, nil
+	return &Identity{Subject: token.Subject, Username: username, Name: claims.Name, Email: claims.Email, Groups: groupsOf(all, v.groupsClaim)}, nil
+}
+
+// groupsOf returns the groups of the claim name of claims, a dotted name
+// one nested in objects: a list's strings, or a string as one group; none
+// otherwise.
+func groupsOf(claims map[string]any, name string) []string {
+	var v any = claims
+	for part := range strings.SplitSeq(name, ".") {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[part]
+	}
+	switch g := v.(type) {
+	case string:
+		return []string{g}
+	case []any:
+		groups := make([]string, 0, len(g))
+		for _, item := range g {
+			if s, ok := item.(string); ok {
+				groups = append(groups, s)
+			}
+		}
+		return groups
+	}
+	return nil
 }
 
 // ResolveIssuer prefers the environment override, then what the platform

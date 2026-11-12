@@ -1,0 +1,13 @@
+The control plane's ServiceAccount is {{ .Release.Namespace }}/{{ include "okdp-control-plane-server.fullname" . }}.
+
+Its rights in each project's namespace are those okdp-compiler writes there
+(the Role and RoleBinding okdp-control-plane): name it in platform.yaml,
+
+  global:
+    okdp:
+      controlPlane:
+        serviceAccount:
+          namespace: {{ .Release.Namespace }}
+          name: {{ include "okdp-control-plane-server.fullname" . }}
+
+or the server reads and writes nothing in the projects' namespaces.

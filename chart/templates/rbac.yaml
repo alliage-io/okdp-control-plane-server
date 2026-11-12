@@ -1,76 +1,122 @@
-# The server reaches the cluster through its ServiceAccount (in-cluster
-# config). A ClusterRole is required because project namespaces are created
-# dynamically and are not known ahead of time.
+{{- $name := include "okdp-control-plane-server.fullname" . }}
+{{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace $name }}
+# The server's rights outside the projects' namespaces only. In each
+# project's namespace its rights are the compiled output's: okdp-compiler
+# writes there, when platform.yaml sets global.okdp.controlPlane.serviceAccount
+# to this chart's ServiceAccount, the Role okdp-control-plane (Secrets by
+# name, never listed; pods, their logs and metrics; events; volumes;
+# SecretStores, ExternalSecrets, SparkApplications) and its RoleBinding.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "okdp-control-plane-server.fullname" . }}
+  name: {{ $name }}
   labels:
     {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
 rules:
-  # Projects are projects/<p>/project.yaml in Git. The server creates the
-  # namespace of a project it creates (label okdp.io/project) and deletes only
-  # namespaces carrying that label.
+  # The Namespace of a project the console creates, and deletes: only one
+  # labelled okdp.io/project with its name (the ValidatingAdmissionPolicy
+  # below, rbac.namespacePolicy).
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "create", "delete"]
-  # Secrets (SecretStore and connection credentials), pods + logs (service inspection)
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "create", "update", "delete"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "delete"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get", "list"]
-  # Warning events explain an instance that is not Ready; per-user volumes
-  # (JupyterHub homes) are reclaimed when their instance is deleted.
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "delete"]
-  # The SparkApplication form reads the operator's CRD schema.
+  # The SparkApplication form reads the operator's CRD schema, that CRD only.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["get", "list"]
-  # Resource usage panels — metrics-server
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods"]
-    verbs: ["get", "list"]
-  # Secret management (External Secrets Operator)
-  - apiGroups: ["external-secrets.io"]
-    resources: ["secretstores", "externalsecrets"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # Spark workloads
-  - apiGroups: ["sparkoperator.k8s.io"]
-    resources: ["sparkapplications"]
-    verbs: ["get", "list", "watch", "create", "update", "delete"]
-  # GitOps engine objects, read-only: the render/sync status of each release.
-  # The server never writes them, the engine makes them from Git.
-  {{- if eq .Values.gitops.engine "argocd" }}
-  - apiGroups: ["argoproj.io"]
-    resources: ["applications"]
-    verbs: ["get", "list", "watch"]
-  {{- else }}
-  - apiGroups: ["helm.toolkit.fluxcd.io"]
-    resources: ["helmreleases"]
-    verbs: ["get", "list", "watch"]
-  {{- end }}
+    resourceNames: ["sparkapplications.sparkoperator.k8s.io"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "okdp-control-plane-server.fullname" . }}
+  name: {{ $name }}
   labels:
     {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "okdp-control-plane-server.fullname" . }}
+    name: {{ $name }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "okdp-control-plane-server.fullname" . }}
+  name: {{ $name }}
   apiGroup: rbac.authorization.k8s.io
+---
+# The GitOps engine's objects, read only, in the engine's namespace: the
+# render/sync status of each release. The server never writes them.
+{{- $argocd := eq .Values.gitops.engine "argocd" }}
+{{- $engineNamespace := $argocd | ternary .Values.gitops.argocdNamespace .Values.gitops.releasesNamespace }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-engine
+  namespace: {{ $engineNamespace }}
+  labels:
+    {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [{{ $argocd | ternary "argoproj.io" "helm.toolkit.fluxcd.io" | quote }}]
+    resources: [{{ $argocd | ternary "applications" "helmreleases" | quote }}]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-engine
+  namespace: {{ $engineNamespace }}
+  labels:
+    {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $name }}-engine
+  apiGroup: rbac.authorization.k8s.io
+{{- if .Values.rbac.namespacePolicy }}
+---
+# The server's ServiceAccount creates a Namespace only labelled
+# okdp.io/project with its own name and a Pod Security level that is not
+# privileged, and deletes only a Namespace so labelled: never kube-system,
+# a platform namespace or anyone else's, whatever its ClusterRole allows.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}-namespaces
+  labels:
+    {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "DELETE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: the-control-plane
+      expression: request.userInfo.username == {{ $sa | quote }}
+  variables:
+    - name: ns
+      expression: "request.operation == 'DELETE' ? oldObject : object"
+  validations:
+    - expression: >-
+        has(variables.ns.metadata.labels) &&
+        'okdp.io/project' in variables.ns.metadata.labels &&
+        variables.ns.metadata.labels['okdp.io/project'] == variables.ns.metadata.name
+      message: the control plane creates and deletes only the Namespace of a project, labelled okdp.io/project with its name
+    - expression: >-
+        request.operation == 'DELETE' ||
+        (has(variables.ns.metadata.labels) &&
+        'pod-security.kubernetes.io/enforce' in variables.ns.metadata.labels &&
+        variables.ns.metadata.labels['pod-security.kubernetes.io/enforce'] != 'privileged')
+      message: the control plane creates no privileged Namespace
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}-namespaces
+  labels:
+    {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}-namespaces
+  validationActions: [Deny]
+{{- end }}

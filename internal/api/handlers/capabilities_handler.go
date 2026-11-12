@@ -5,7 +5,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
 )
 
 type CapabilitiesHandler struct {
@@ -26,8 +25,7 @@ func NewCapabilitiesHandler(service service.CapabilityService) *CapabilitiesHand
 func (h *CapabilitiesHandler) GetCapabilities(c *gin.Context) {
 	caps, err := h.service.GetCapabilities(c.Request.Context())
 	if err != nil {
-		logrus.WithError(err).Error("Failed to resolve platform capabilities")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to resolve platform capabilities")
 		return
 	}
 	c.JSON(http.StatusOK, caps)

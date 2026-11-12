@@ -7,7 +7,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -54,8 +53,7 @@ func (h *IdentityHandler) RequireAPI() gin.HandlerFunc {
 func (h *IdentityHandler) ListUsers(c *gin.Context) {
 	users, err := h.service.ListUsers(c.Request.Context())
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list users")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to list users")
 		return
 	}
 	c.JSON(http.StatusOK, users)
@@ -78,8 +76,7 @@ func (h *IdentityHandler) GetUser(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get user")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get user")
 		return
 	}
 	c.JSON(http.StatusOK, user)
@@ -102,8 +99,7 @@ func (h *IdentityHandler) CreateUser(c *gin.Context) {
 	}
 
 	if err := h.service.CreateUser(c.Request.Context(), &user); err != nil {
-		logrus.WithError(err).Error("Failed to create user")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to create user")
 		return
 	}
 	// Write-only: the answer must not carry the password back (logs, proxies,
@@ -134,8 +130,7 @@ func (h *IdentityHandler) UpdateUser(c *gin.Context) {
 	user.Username = name
 
 	if err := h.service.UpdateUser(c.Request.Context(), name, &user); err != nil {
-		logrus.WithError(err).Error("Failed to update user")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to update user")
 		return
 	}
 	user.Password = ""
@@ -154,8 +149,7 @@ func (h *IdentityHandler) UpdateUser(c *gin.Context) {
 func (h *IdentityHandler) DeleteUser(c *gin.Context) {
 	name := c.Param("name")
 	if err := h.service.DeleteUser(c.Request.Context(), name); err != nil {
-		logrus.WithError(err).Error("Failed to delete user")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete user")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -174,8 +168,7 @@ func (h *IdentityHandler) DeleteUser(c *gin.Context) {
 func (h *IdentityHandler) ListGroups(c *gin.Context) {
 	groups, err := h.service.ListGroups(c.Request.Context())
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list groups")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to list groups")
 		return
 	}
 	c.JSON(http.StatusOK, groups)
@@ -198,8 +191,7 @@ func (h *IdentityHandler) CreateGroup(c *gin.Context) {
 	}
 
 	if err := h.service.CreateGroup(c.Request.Context(), &group); err != nil {
-		logrus.WithError(err).Error("Failed to create group")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to create group")
 		return
 	}
 	c.JSON(http.StatusCreated, group)
@@ -224,8 +216,7 @@ func (h *IdentityHandler) UpdateGroup(c *gin.Context) {
 	}
 
 	if err := h.service.UpdateGroup(c.Request.Context(), name, &group); err != nil {
-		logrus.WithError(err).Error("Failed to update group")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to update group")
 		return
 	}
 	c.JSON(http.StatusOK, group)
@@ -243,8 +234,7 @@ func (h *IdentityHandler) UpdateGroup(c *gin.Context) {
 func (h *IdentityHandler) DeleteGroup(c *gin.Context) {
 	name := c.Param("name")
 	if err := h.service.DeleteGroup(c.Request.Context(), name); err != nil {
-		logrus.WithError(err).Error("Failed to delete group")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete group")
 		return
 	}
 	c.Status(http.StatusNoContent)

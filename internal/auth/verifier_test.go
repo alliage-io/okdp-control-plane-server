@@ -230,3 +230,33 @@ func TestVerifyReturnsTheNameAndEmail(t *testing.T) {
 	assert.Equal(t, "Alice Martin", identity.Name)
 	assert.Equal(t, "alice@example.com", identity.Email)
 }
+
+// The groups are those of the configured claim, a nested one by its dotted
+// name; the default claim is groups.
+func TestVerifyReturnsTheGroupsOfTheClaim(t *testing.T) {
+	idp := newFakeIDP(t)
+	for name, tc := range map[string]struct {
+		claim string
+		extra map[string]any
+		want  []string
+	}{
+		"the default claim":     {"", map[string]any{"groups": []string{"platform_admin", "okdp-project-demo"}}, []string{"platform_admin", "okdp-project-demo"}},
+		"a nested claim":        {"okdp.groups", map[string]any{"okdp": map[string]any{"groups": []string{"analysts"}}}, []string{"analysts"}},
+		"a single string":       {"", map[string]any{"groups": "analysts"}, []string{"analysts"}},
+		"no claim":              {"", map[string]any{}, nil},
+		"another claim ignored": {"roles", map[string]any{"groups": []string{"platform_admin"}}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			verifier, err := NewVerifier(context.Background(), Config{Issuer: idp.server.URL, ClientID: "okdp-ui", GroupsClaim: tc.claim})
+			require.NoError(t, err)
+			c := idp.claims()
+			c["aud"] = "okdp-ui"
+			for k, v := range tc.extra {
+				c[k] = v
+			}
+			identity, err := verifier.Verify(context.Background(), idp.mint(t, c))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, identity.Groups)
+		})
+	}
+}

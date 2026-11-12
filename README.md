@@ -39,8 +39,9 @@ and business logic stay on the server side, keeping the console a stateless brow
 
 - **Docker image** `quay.io/okdp/images/okdp-control-plane-server`: runs the Go control-plane API
   server on a minimal Alpine base, listening on port `8093`.
-- **Helm chart** (`chart/`): deploys the server in-cluster with its Git settings and the
-  read-mostly RBAC it needs on the Kubernetes API.
+- **Helm chart** (`chart/`): deploys the server in-cluster with its Git settings and its
+  RBAC outside the projects' namespaces; in each project's namespace, its rights are the
+  compiled output's ([RBAC](#rbac)).
 
 The image and chart provide the backend for the OKDP web console, so the platform is
 driven through the console instead of hand-written GitOps files. Both paths produce the
@@ -83,7 +84,9 @@ one, until it is published); the chart cache is okdp-compiler's `chartcache`.
 > it provides) is read from its compiled `okdp.info.yaml`; observed state from the
 > cluster: the workloads (`app.kubernetes.io/instance`) and the engine's own objects for
 > render/sync errors. There is no database; the local clones are a cache. Authentication
-> (OIDC) is verified on every `/api` call; TLS is provided by the platform ingress.
+> (OIDC) is verified on every `/api` call, and each route's permission against the
+> platform's own authority ([authorization](#authorization)); TLS is provided by the
+> platform ingress.
 
 The tree is okdp-compiler's
 ([repository layout](https://github.com/OKDP/okdp-compiler/blob/main/docs/01_usage.md#repository-layout)),
@@ -112,6 +115,52 @@ writes it: what it reads there (what an instance publishes, its compiled values)
 the last run wrote, and lags behind the tree for the time of a run. The platform's own services (the database servers, the
 ingress, the control plane) are instances of projects too: there are no platform
 components, and the deployment graph (connection references, claims) is the only order.
+
+### Authorization
+
+The console is a mirror of the platform's authority, never an authority of its own: the
+control plane is optional, every boundary holds without it, and the server grants no right
+the platform does not, nor refuses one only it would enforce. Its authority is the one
+okdp-compiler reads (decision D-1), from the tree:
+
+- the **platform admins**, the groups of `platform.yaml` `global.okdp.access.admins`
+  (`compiler.PlatformAdmins`), which the platform's bootstrap makes Argo CD and Forgejo
+  admins;
+- the **roles of each project**, `project.yaml` `access:` mapping groups to `viewer`,
+  `editor` or `admin`, `okdp-project-<project>` an editor when it gives none
+  (`compiler.ProjectAccess`, `compiler.DefaultProjectGroup`), which the compiler writes as
+  the project's Argo CD AppProject roles and its namespace's RoleBindings to `view`, `edit`
+  and `admin`, and Forgejo maps to its teams.
+
+The caller's groups are its verified token's groups claim (`OIDC_GROUPS_CLAIM`, `groups`
+by default; chart `oidc.groupsClaim`): the groups' names as Keycloak emits them, its groups
+mapper's "Full group path" off (`platform_admin`, not `/platform_admin`). Every route has a
+permission in the router's table (`router.Permissions`), deny by default: a route missing
+from it answers `403` to everyone.
+
+| Permission | Routes |
+|---|---|
+| none (public) | `GET /api/capabilities`, the console's bootstrap |
+| authenticated | `GET /api/me`; `GET /api/projects` and `/api/projects/stream` (the projects the caller may see only); the catalog and the platform's settings: `GET /api/platform-services[/…]`, `/api/platform-categories`, `/api/contracts`, `/api/profile-images`, `/api/spark-config`, `/api/spark-app-schema` |
+| platform admin | `/api/v1/identity/*` (users and groups, every method); `POST`, `PUT`, `DELETE /api/platform-services[/…]` (the menu of `catalogs.yaml`); `POST /api/projects`, `DELETE /api/projects/:name` |
+| project viewer | `GET /api/projects/:name` and every `GET` and stream under `/api/projects/:name/`; `POST …/services/:s/sql` (Trino, the caller's own token) |
+| project editor | every write under `/api/projects/:name/` (instances, connections and their tests, named claims, secret stores and their tests, external secrets, Spark applications); `POST …/connections/:c/sql`, and the write mode of the SQL editor |
+| project admin | `PUT /api/projects/:name` (its `project.yaml`) |
+
+A platform admin has every project role. A caller without the permission gets `403`
+`{"error": "<what it needs>", "code": "forbidden"}`; `GET /api/me` answers what it may do,
+so the console hides the rest:
+
+```json
+{"username": "alice", "groups": ["okdp-project-demo"], "platformAdmin": false, "projects": {"demo": "editor"}}
+```
+
+The authority is read from the deployments repositories, kept 5 seconds: a group added to
+`access.admins` or to a project's `access` counts within that time. A `project.yaml`
+whose `access` the compile refuses gives no group a role in that project but the platform
+admins. With `AUTH_DISABLED` (local development only), every caller holds every right.
+The console cannot change `access:` (the project's `PUT` edits its description only): it
+is changed in Git, where the project's admins push.
 
 ### Topology: where the parts live
 
@@ -165,8 +214,9 @@ compile would refuse every instance of the project with (okdp-compiler's
 `Deployments.CheckProjectName`):
 `platform`, `kube-*`, the deployer engines' namespaces (`argocd`, `flux-system`,
 `okdp-releases`) and those of `platform.yaml`'s `global.okdp.policy.reserved`. It also
-creates its Namespace (label `okdp.io/project`) so it can hold Secrets before any
-deployment, and refuses a name that is already a Namespace without that label. Deleting
+creates its Namespace (label `okdp.io/project`, and the Pod Security Admission labels
+of okdp-compiler's namespace manifest: `baseline` enforced, `restricted` audited and
+warned of) so it can hold Secrets before any deployment, and refuses a name that is already a Namespace without that label. Deleting
 a project removes
 `projects/<project>/` (the compile of that commit removes its compiled tree, and the
 engine uninstalls its releases), refused while an instance of another project uses one of
@@ -254,6 +304,58 @@ offer them (`GET .../connections/selectable`, scope `platform`), and the platfor
 administrators write them in Git; a project connection may not take the name of one. An
 instance references a connection by its name, in its parameters; nothing else lists it.
 
+### SQL editor
+
+`POST /api/projects/<p>/services/<instance>/sql` runs a statement on a Trino instance with
+the caller's own bearer token: Trino authorizes it. `POST /api/projects/<p>/connections/<c>/sql`
+runs one on a `database-server` connection (engine `postgresql`) declared in the tree: the
+project's, else the platform's, else a named claim of the project (the connection its
+provider granted it). Host, port and database are the connection's, never the request's,
+and the credentials come from four sources only:
+
+- the claim's provisioned Secret, labelled `okdp.io/credentials-database-server` by
+  okdp-compiler;
+- the platform's secret store (`secretRef: {remoteKey: <key>}`): the Secret an
+  ExternalSecret of the project fills from that key, once an instance references it;
+- the Secret the console wrote from the connection form (`<name>-credentials`);
+- a Secret named by `secretRef.name` (the console's `existingSecret`) carrying the label
+  `okdp.io/connection-credentials: "true"`, which its owner sets to allow it.
+
+Any other Secret is refused (`400`, code `sql-credentials-refused`): naming an operator's
+superuser Secret in a connection is not a way to hand it to every member of the project.
+The connection verifies TLS against the system's CAs and the platform's CA bundle
+(`sqlEditor.caBundleSecret`: `sslMode: verify-ca` checks the chain only, any other mode the
+host name too, `disable` and `prefer` are not honored), accepts SCRAM-SHA-256 only (a
+server asking for a clear-text or MD5 password gets nothing), and dials through a guard
+refusing loopback, link-local (`169.254.0.0/16`, `fe80::/10`) and the Kubernetes API
+server unless `sqlEditor.allowedNetworks` allows them; connection tests (`POST
+.../connections/test`) go through the same guard, with the credentials the caller typed
+only, and report a generic category, never the remote server's text.
+
+A statement runs read-only by default: alone (a batch of several is an SQL error), in a
+`READ ONLY` transaction rolled back after it. `write: true` in the request runs a batch of
+statements in write mode, a project `editor`'s ([authorization](#authorization)); a statement
+on a connection, read-only or not, is an editor's too (it runs with credentials of the
+project's Secrets, which a viewer cannot read), one on a Trino service a viewer's (with the
+caller's own token). Read-only guards against mistakes; the boundary is what the database grants
+the connection's user. Every statement is logged with the caller, the connection and the
+start of its text, and is bounded by `SQL_STATEMENT_TIMEOUT`, a row cap, a result-size
+cap and a per-user concurrency limit (`429`, code `sql-busy`); a client that disconnects
+cancels it.
+
+### Spark applications
+
+`POST /api/projects/<p>/spark-apps` builds a SparkApplication from an allow-list, never
+from a manifest passed through: its driver and executors run as the ServiceAccount of the
+project's `spark-rbac` instance (its compiled `serviceAccount.name`; a project without one
+is refused), its image is one the platform offers (`global.okdp.sparkOperator`:
+`spark.images`, or under `image.registry`; any when neither is set), its `sparkConf` keys
+are Spark's own settings: no `spark.kubernetes.*` key but the pods' labels, resources and
+executor allocation, nothing naming volumes, a ServiceAccount, a pod template, a host path
+or a security context. `POST .../spark-apps/yaml` reads a manifest into the same request
+(plus `imagePullPolicy`, `restartPolicy`, `deps`, `coreLimit`) and refuses any other
+field; an update is checked alike and runs as the project's ServiceAccount.
+
 ### Claims
 
 A connection reference of a package (`x-okdp-connection-ref` with `provision: true`) may
@@ -312,7 +414,9 @@ catalog/<service>/<version>/   Chart.yaml (name, version, the upstream charts as
 contracts/<contract>.schema.json
 ```
 
-`catalogs.yaml`, beside `platform.yaml`, names the catalogs and the console menu:
+`catalogs.yaml`, beside `platform.yaml`, names the catalogs and the console menu, read
+strictly as okdp-compiler reads it (`treeedit.ParseCatalogs`): any other key, a former
+`serviceCatalog` wrapper or a service's `versions` or `repository`, is refused:
 
 ```yaml
 repositories:
@@ -470,7 +574,46 @@ curl -s http://localhost:8093/health
 # {"status":"ok"}
 ```
 
-The Swagger UI is then available at `http://localhost:8093/swagger/index.html`.
+The API is described by [`docs/swagger.yaml`](docs/swagger.yaml) (`make swagger`); the
+server does not serve it. Every answer carries an `X-Request-Id` header; an internal error
+answers a generic message with that `requestId`, its cause in the server's log under it.
+
+### RBAC
+
+The chart grants the server only what lies outside the projects' namespaces:
+
+| Where | What |
+|---|---|
+| cluster | `namespaces`: `get`, `create`, `delete` (a project's Namespace), with a ValidatingAdmissionPolicy (`rbac.namespacePolicy`, Kubernetes >= 1.30) letting its ServiceAccount create only a Namespace labelled `okdp.io/project` with its name and a Pod Security level that is not `privileged`, and delete only a Namespace so labelled |
+| cluster | the CRD `sparkapplications.sparkoperator.k8s.io`: `get` (the SparkApplication form) |
+| `gitops.releasesNamespace` (flux) or `gitops.argocdNamespace` (argocd) | `helmreleases` or `applications`: `get`, `list`, `watch` (the render/sync status) |
+
+In each project's namespace the rights are the compiled output's: okdp-compiler writes
+there the Role `okdp-control-plane` and its RoleBinding to the ServiceAccount
+`global.okdp.controlPlane.serviceAccount` of `platform.yaml` names: `secrets` `get`,
+`create`, `update`, `delete` (by name, never listed), `pods` `get`, `list`, `delete`,
+`pods/log` `get`, `events` `list`, `persistentvolumeclaims` `get`, `list`, `delete`,
+`metrics.k8s.io` `pods` `list`, `external-secrets.io` `secretstores` and
+`externalsecrets` `get`, `list`, `create`, `update`, `delete`, `sparkoperator.k8s.io`
+`sparkapplications` `get`, `list`, `watch`, `create`, `update`, `delete`. So `platform.yaml`
+must name the chart's ServiceAccount, `<release>-okdp-control-plane-server` in the
+release's namespace (the release's name alone when it contains
+`okdp-control-plane-server`; `helm install` prints it):
+
+```yaml
+# platform.yaml, for the release okdp-control-plane-server in okdp-system
+global:
+  okdp:
+    controlPlane:
+      serviceAccount: {namespace: okdp-system, name: okdp-control-plane-server}
+```
+
+Without it, the server reads and writes nothing in the projects' namespaces (`403` from
+the Kubernetes API, answered `500`). A project the console creates gets its Namespace at
+once, but the Role only when the engine applies the project's compiled manifests (the
+output's next run, then the sync): until then its Secrets, secret stores and Spark
+applications cannot be written. Every claim's credentials Secret the SQL editor reads
+is in the namespace of its provider's project, which holds the Role too.
 
 ---
 
@@ -550,9 +693,13 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `ALLOWED_ORIGINS` | Single CORS origin, set verbatim in `Access-Control-Allow-Origin` (the console URL) | `http://localhost:4200` | No |
 | `LOG_LEVEL` | Log verbosity (`debug`, `info`, `warn`, `error`) | `info` | No |
 | `GIN_MODE` | HTTP framework mode (`debug` prints every route) | `release` | No |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` | Override the issuer and the client the console's tokens are verified against | the platform values (`global.okdp.identity.oidc`, else `global.okdp.oidc`) | No |
+| `OIDC_GROUPS_CLAIM` | The token's claim of the caller's groups, a list of group names, a dotted name for a nested claim (chart: `oidc.groupsClaim`); the permissions are read with them ([authorization](#authorization)) | `groups` | No |
+| `AUTH_DISABLED` | `true` serves the API without verifying tokens, every caller holding every right (local development only) | | No |
 | `GITOPS_CONFIG` | Topology file: the repositories of the platform, the projects and the output (`https://…`, `ssh://…`, `git@host:path`, `file://…`), and Forgejo ([topology](#topology-where-the-parts-live)). `GITOPS_REPO_URL`, `GITOPS_BRANCH` and `GITOPS_PATH` (one repository holding the whole tree) are gone; a `GITOPS_REPO_URL` still set is refused at startup | | Yes |
 | `GITOPS_CREDENTIALS_DIR` | Mounted credentials Secret (`username`/`password`, `bearerToken`, or `identity`/`known_hosts`), for every deployments repository, and the catalogs on their host | `/etc/okdp/gitops-credentials` | No |
 | `GITOPS_SSH_INSECURE_IGNORE_HOST_KEY` | Accept any SSH host key (sandboxes only) | `false` | No |
+| `GITOPS_INSECURE_HTTP_HOSTS` | Hosts a credential (the repositories', the catalogs', the Forgejo API token) is sent to over `http://`, in clear: comma-separated host names or globs (`path.Match`) of them (chart: `gitops.insecureHTTPHosts`). Name the exact hosts (a sandbox's `forgejo-http.forgejo.svc.cluster.local`); without it, every credential for an `http://` URL is refused and the server answers the fetch, the commit or the repository creation with that error | | No |
 | `GITOPS_AUTHOR_NAME` / `GITOPS_AUTHOR_EMAIL` | Commit committer (and author when the user has no email; the logged-in user authors the commit otherwise) | `OKDP control plane` / `okdp-control-plane@okdp.io` | No |
 | `GITOPS_CLONE_DIR` | Local clones, a cache, one per repository under `repos/` (empty: in memory) | in memory | No |
 | `GITOPS_CHART_CACHE_DIR` | Chart cache: the upstream charts of the compiled instances | `<GITOPS_CLONE_DIR>/charts`, else under the temporary directory | No |
@@ -564,7 +711,20 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `KEYCLOAK_CLIENT_SECRET` | Its secret (chart: `keycloak.credentialsSecret`, key `client_secret`). Unset: user and group management is off | | No |
 | `KEYCLOAK_URL` / `KEYCLOAK_REALM` | Keycloak base URL and realm of the Admin API | from the platform OIDC issuer `<url>/realms/<realm>` | No |
 | `KEYCLOAK_TLS_INSECURE` | Skip the Keycloak certificate check (sandboxes only) | `false` | No |
+| `SQL_STATEMENT_TIMEOUT` | One SQL editor statement's timeout, PostgreSQL's `statement_timeout` too (chart: `sqlEditor.statementTimeout`) | `2m` | No |
+| `SQL_DEFAULT_ROWS` / `SQL_MAX_ROWS` | Row cap of a request that names none / the largest it may ask | `1000` / `10000` | No |
+| `SQL_MAX_RESULT_BYTES` | Size of a result's rows past which the rest is dropped | `16777216` | No |
+| `SQL_MAX_CONCURRENT_PER_USER` | Statements one user runs at once (`429` past it) | `2` | No |
+| `SQL_ALLOWED_NETWORKS` | CIDRs the SQL editor and the connection tests may reach although loopback, link-local or the API server (comma-separated) | | No |
+| `SQL_CA_FILE` | PEM bundle database certificates are verified against, besides the system's (chart: `sqlEditor.caBundleSecret`, the platform's `global.okdp.tls.caBundleSecret`) | | No |
 | `EXCLUDED_SIDECAR_PREFIXES` | Container name prefixes excluded from pod/metrics views (comma-separated) | `istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent` | No |
+
+The server provisions and deletes no OAuth client: with
+`global.okdp.oidc.clientProvisioning: dcr` the compiled oidc-dcr Jobs register each
+instance's clients, with `existing` the platform provisions them, and deleting an instance
+never calls Keycloak. `global.okdp.identity.provisioning.provider` is only reported to the
+console (`/api/capabilities`); the credentials of `identity.provisioning.keycloak` are not
+read.
 
 Users and groups (`/api/v1/identity`, the console's Identity pages) are managed in the
 platform Keycloak realm through its Admin REST API. The client named by `KEYCLOAK_CLIENT_ID`
@@ -627,7 +787,9 @@ origin the console is served from, the browser blocks the response and its conso
 
 **Cause:** the menu is `catalogs.yaml` of the platform repository, the versions
 the catalogs of its `repositories`. A `500` means the platform repository cannot be
-reached (URL, branch or credentials; the log names the fetch error). An empty but
+reached (URL, branch or credentials; the log names the fetch error, a credential refused
+over `http://` among them: `GITOPS_INSECURE_HTTP_HOSTS`), or that `catalogs.yaml` holds a
+key the compiler does not read (the error names it). An empty but
 successful catalog means the file is missing or has no `categories`. Services without
 versions mean a catalog cannot be fetched (the log says which), or holds no
 `catalog/<service>/` for them.

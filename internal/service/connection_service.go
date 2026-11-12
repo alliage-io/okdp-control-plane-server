@@ -16,6 +16,7 @@ import (
 	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/sirupsen/logrus"
@@ -80,7 +81,13 @@ type DefaultConnectionService struct {
 	descriptors repository.DescriptorRepository
 	instances   InstanceLister
 	catalog     ContractCatalog
+	// guard is the network policy of the tests (netguard.Default when nil).
+	guard *netguard.Guard
 }
+
+// SetNetworkGuard sets the network policy the connection tests dial
+// through, the SQL editor's.
+func (s *DefaultConnectionService) SetNetworkGuard(guard *netguard.Guard) { s.guard = guard }
 
 func NewDefaultConnectionService(
 	deployments *gitops.Deployments,
@@ -432,7 +439,11 @@ func (s *DefaultConnectionService) Test(ctx context.Context, req models.Connecti
 	// workload will actually take, and the other checks travel along for
 	// diagnosis: a store reachable publicly and unreachable in-cluster passes
 	// and fails at once.
-	checks := tester(ctx, values)
+	guard := s.guard
+	if guard == nil {
+		guard = netguard.Default()
+	}
+	checks := tester(ctx, values, guard)
 	outcome := result(true, "", "Connection successful.")
 	outcome.Checks = checks
 	for _, c := range checks {

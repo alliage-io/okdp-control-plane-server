@@ -3,8 +3,14 @@ package models
 // SqlQueryRequest is a SQL statement to execute on a deployed SQL engine.
 type SqlQueryRequest struct {
 	Query string `json:"query" binding:"required"`
-	// MaxRows caps the number of result rows returned (default 1000).
+	// MaxRows caps the number of result rows returned (default 1000,
+	// SQL_DEFAULT_ROWS; at most SQL_MAX_ROWS, 10000 by default).
 	MaxRows int `json:"maxRows,omitempty"`
+	// Write runs a connection's statement in write mode: a batch of
+	// statements separated by ';', in one implicit transaction. Without
+	// it, one statement in a read-only transaction. Not read for a
+	// service instance (Trino authorizes the caller's own token).
+	Write bool `json:"write,omitempty"`
 }
 
 // SqlColumn describes one column of a SQL result set.

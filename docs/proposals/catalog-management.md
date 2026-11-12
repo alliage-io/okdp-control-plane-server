@@ -123,7 +123,7 @@ regardless.
 | 1 | Endpoint grouping | Keep under `/api/platform-services` (symmetry with the existing read routes). **Done.** |
 | 2 | Default vs per-project propagation | Moot since the platform Context became the only one: a catalog edit is visible to every project at once. |
 | 3 | Version validation strictness | **Hard-fail**: a version absent from the OCI registry is rejected (400). **Done** (reuses the OCI tag listing). |
-| 4 | Authorization (who can edit) | **Deferred.** Should eventually be gated on the `admins` group, but the server has no auth middleware yet — tracked separately with the broader authz work. |
+| 4 | Authorization (who can edit) | **Done.** The catalog's writes are a platform admin's, a group of `platform.yaml` `global.okdp.access.admins` (README, Authorization). |
 
 ## 9. Implementation status
 

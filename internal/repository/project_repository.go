@@ -45,11 +45,28 @@ func NewProjectNamespaceRepository(client kubernetes.Interface) ProjectNamespace
 	return &k8sProjectNamespaceRepository{client: client}
 }
 
+// projectPodSecurity are the Pod Security Admission labels of a project
+// Namespace, those of okdp-compiler's namespace manifest for a project
+// that is not one of the platform's privileged ones: baseline enforced,
+// restricted audited and warned of. Set at creation, before the engine
+// applies the compiled manifest, so no pod runs in between with no level;
+// a platform project the compile makes privileged gets its level from the
+// engine.
+var projectPodSecurity = map[string]string{
+	"pod-security.kubernetes.io/enforce": "baseline",
+	"pod-security.kubernetes.io/audit":   "restricted",
+	"pod-security.kubernetes.io/warn":    "restricted",
+}
+
 func (r *k8sProjectNamespaceRepository) CreateNamespace(ctx context.Context, project *models.Project) (bool, error) {
+	labels := map[string]string{ProjectLabel: project.Name}
+	for k, v := range projectPodSecurity {
+		labels[k] = v
+	}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        project.Name,
-			Labels:      map[string]string{ProjectLabel: project.Name},
+			Labels:      labels,
 			Annotations: map[string]string{ProjectDescriptionAnnot: project.Description},
 		},
 	}

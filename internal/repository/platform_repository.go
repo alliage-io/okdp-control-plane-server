@@ -55,10 +55,6 @@ type PlatformRepository interface {
 	// (global.okdp.identity.provisioning.provider, "" when unset, meaning none).
 	GetIdentityProvisioningProvider(ctx context.Context) (string, error)
 
-	// GetKeycloakProvisioningConfig returns the Keycloak adapter configuration
-	// (global.okdp.identity.provisioning.keycloak).
-	GetKeycloakProvisioningConfig(ctx context.Context) (*provisioning.KeycloakConfig, error)
-
 	// GetProfileImages returns available images per profile type from global.okdp.jupyter.profiles.
 	GetProfileImages(ctx context.Context) (map[string][]models.ProfileImage, error)
 
@@ -87,104 +83,68 @@ func NewPlatformRepository(deployments *gitops.Deployments) PlatformRepository {
 	return &platformRepository{deployments: deployments}
 }
 
-// catalogCategories returns the ordered sections of the catalog, each with its
-// raw services. A service belongs to the section it is nested in.
-func catalogCategories(v map[string]interface{}) ([]map[string]interface{}, bool, error) {
-	raw, found, err := unstructured.NestedSlice(v, "categories")
+// menu reads the console menu of catalogs.yaml as the compile reads it
+// (treeedit.ParseCatalogs, strictly: a key it does not know, a service's
+// versions or repository among them, refused).
+func (r *platformRepository) menu(ctx context.Context) ([]treeedit.MenuCategory, error) {
+	doc, err := r.catalog(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read categories from %s: %w", treeedit.CatalogsFile, err)
+		return nil, err
 	}
-	if !found {
-		return nil, false, nil
+	c, err := treeedit.ParseCatalogs(doc)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", treeedit.CatalogsFile, err)
 	}
-	var cats []map[string]interface{}
-	for _, r := range raw {
-		if m, ok := r.(map[string]interface{}); ok {
-			cats = append(cats, m)
-		}
-	}
-	return cats, true, nil
+	return c.Categories, nil
 }
 
-func platformServiceFromMap(m map[string]interface{}, category string) models.PlatformService {
-	defaultVersion := getString(m, "default")
-	if defaultVersion == "" {
-		defaultVersion = getString(m, "tag")
-	}
+// platformServiceFromMenu is the PlatformService of a menu entry of the
+// section category: its versions are the catalogs' (filled by the service
+// layer), the menu's default the only one known here.
+func platformServiceFromMenu(m treeedit.MenuService, category string) models.PlatformService {
 	svc := models.PlatformService{
-		Name:           getString(m, "name"),
-		DefaultVersion: defaultVersion,
-		Description:    getString(m, "description"),
+		Name:           m.Name,
+		DefaultVersion: m.Default,
+		Description:    m.Description,
 		Category:       category,
-		Repository:     getString(m, "repository"),
-		Label:          getString(m, "label"),
-		ExposesUI:      getBoolPtr(m, "exposesUI"),
+		Label:          m.Label,
+		ExposesUI:      m.ExposesUI,
 	}
-	if rawVersions, ok := m["versions"].([]interface{}); ok {
-		for _, v := range rawVersions {
-			if s, ok := v.(string); ok {
-				svc.Versions = append(svc.Versions, s)
-			}
-		}
-	}
-	if len(svc.Versions) == 0 && svc.DefaultVersion != "" {
+	if svc.DefaultVersion != "" {
 		svc.Versions = []string{svc.DefaultVersion}
 	}
 	return svc
 }
 
 func (r *platformRepository) GetPlatformServices(ctx context.Context) ([]models.PlatformService, error) {
-	u, err := r.catalog(ctx)
+	cats, err := r.menu(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	cats, found, err := catalogCategories(u)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
+	if len(cats) == 0 {
 		logrus.Warn("No categories found in " + treeedit.CatalogsFile)
-		return []models.PlatformService{}, nil
 	}
-
 	// Never nil: an empty catalog answers [] in JSON, not null.
 	services := make([]models.PlatformService, 0)
 	for _, cat := range cats {
-		title := getString(cat, "title")
-		rawServices, _ := cat["services"].([]interface{})
-		for _, raw := range rawServices {
-			m, ok := raw.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			services = append(services, platformServiceFromMap(m, title))
+		for _, m := range cat.Services {
+			services = append(services, platformServiceFromMenu(m, cat.Title))
 		}
 	}
 	return services, nil
 }
 
 func (r *platformRepository) GetMenuCategories(ctx context.Context) ([]models.MenuCategory, error) {
-	u, err := r.catalog(ctx)
+	cats, err := r.menu(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	cats, found, err := catalogCategories(u)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return []models.MenuCategory{}, nil
-	}
-
 	categories := make([]models.MenuCategory, 0, len(cats))
 	for i, cat := range cats {
-		title := getString(cat, "title")
 		categories = append(categories, models.MenuCategory{
-			Key:   title,
-			Label: title,
-			Icon:  getString(cat, "icon"),
+			Key:   cat.Title,
+			Label: cat.Title,
+			Icon:  cat.Icon,
 			Order: i + 1,
 		})
 	}
@@ -279,10 +239,11 @@ func (r *platformRepository) GetOidcInsecureSkipVerify(ctx context.Context) (boo
 	return insecure, nil
 }
 
-// GetIdentityProvisioningProvider names the backend that unmakes the OAuth
-// clients (global.okdp.identity.provisioning.provider). Unset means the platform
-// provisions no client of its own: with oidc.clientProvisioning existing or dcr,
-// the clients are made in Keycloak beforehand or by the packages themselves.
+// GetIdentityProvisioningProvider names the platform's OAuth client
+// provisioning backend (global.okdp.identity.provisioning.provider), for the
+// capabilities. Unset means none. The control plane itself provisions and
+// deletes no client: with oidc.clientProvisioning existing or dcr, the
+// clients are made in Keycloak beforehand or by the packages themselves.
 func (r *platformRepository) GetIdentityProvisioningProvider(ctx context.Context) (string, error) {
 	v, err := r.values(ctx)
 	if err != nil {
@@ -293,45 +254,6 @@ func (r *platformRepository) GetIdentityProvisioningProvider(ctx context.Context
 		return provider, nil
 	}
 	return provisioning.ProviderNone, nil
-}
-
-func (r *platformRepository) GetKeycloakProvisioningConfig(ctx context.Context) (*provisioning.KeycloakConfig, error) {
-	v, err := r.values(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	issuer, _, _ := unstructured.NestedString(v, "identity", "provisioning", "keycloak", "issuerUri")
-	if issuer == "" {
-		return nil, fmt.Errorf("identity.provisioning.keycloak.issuerUri not found in the platform values (global.okdp)")
-	}
-
-	secretPath := []string{"identity", "provisioning", "keycloak", "credentialsSecret"}
-	secretName, _, _ := unstructured.NestedString(v, append(secretPath, "name")...)
-	if secretName == "" {
-		return nil, fmt.Errorf("identity.provisioning.keycloak.credentialsSecret.name not found in the platform values (global.okdp)")
-	}
-	secretNamespace, _, _ := unstructured.NestedString(v, append(secretPath, "namespace")...)
-	clientIDKey, _, _ := unstructured.NestedString(v, append(secretPath, "clientIdKey")...)
-	if clientIDKey == "" {
-		clientIDKey = "client_id"
-	}
-	clientSecretKey, _, _ := unstructured.NestedString(v, append(secretPath, "clientSecretKey")...)
-	if clientSecretKey == "" {
-		clientSecretKey = "client_secret"
-	}
-	insecure, _, _ := unstructured.NestedBool(v, "identity", "provisioning", "keycloak", "insecureSkipTLSVerify")
-
-	return &provisioning.KeycloakConfig{
-		IssuerURI: issuer,
-		CredentialsSecret: provisioning.KeycloakSecretRef{
-			Namespace:       secretNamespace,
-			Name:            secretName,
-			ClientIDKey:     clientIDKey,
-			ClientSecretKey: clientSecretKey,
-		},
-		InsecureSkipTLSVerify: insecure,
-	}, nil
 }
 
 func (r *platformRepository) GetProfileImages(ctx context.Context) (map[string][]models.ProfileImage, error) {
@@ -466,8 +388,8 @@ func (r *platformRepository) readPlatformValues(ctx context.Context) ([]byte, st
 	return raw, compiler.PlatformFile, nil
 }
 
-// catalog returns catalogs.yaml. It is the former serviceCatalog
-// block; a file that keeps the serviceCatalog wrapper is read as well.
+// catalog returns catalogs.yaml, read as the compiler reads it (a
+// serviceCatalog wrapper is refused by the compile of the tree).
 func (r *platformRepository) catalog(ctx context.Context) (map[string]interface{}, error) {
 	if r.deployments == nil {
 		return nil, errors.New("no deployments repository configured")
@@ -479,16 +401,7 @@ func (r *platformRepository) catalog(ctx context.Context) (map[string]interface{
 		}
 		return nil, err
 	}
-	return unwrapCatalog(doc), nil
-}
-
-// unwrapCatalog returns the catalog body, with or without the serviceCatalog
-// wrapper.
-func unwrapCatalog(doc map[string]interface{}) map[string]interface{} {
-	if inner, ok := doc["serviceCatalog"].(map[string]interface{}); ok {
-		return inner
-	}
-	return doc
+	return doc, nil
 }
 
 func (r *platformRepository) Invalidate() {
@@ -504,15 +417,6 @@ func getString(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
-}
-
-func getBoolPtr(m map[string]interface{}, key string) *bool {
-	if v, ok := m[key]; ok {
-		if b, ok := v.(bool); ok {
-			return &b
-		}
-	}
-	return nil
 }
 
 func getInt(m map[string]interface{}, key string) int {

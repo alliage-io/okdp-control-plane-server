@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -18,16 +20,19 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/api/handlers"
 	"github.com/okdp/okdp-control-plane-server/internal/api/router"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
+	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/buildinfo"
 	"github.com/okdp/okdp-control-plane-server/internal/config"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
+	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
 )
 
 // @title           OKDP Server New API
 // @version         1.0
-// @description     Minimal API server for OKDP UI New
+// @description     Minimal API server for OKDP UI New. Every answer carries an X-Request-Id header; a 500 (and a 502 of the SQL routes) answers {"error": <generic message>, "requestId": <id>}, its cause in the server's log under that id. Every route needs a permission, deny by default, read from the platform's own authority: platform admin (a group of platform.yaml global.okdp.access.admins) for the identity routes, the catalog's writes and the creation and deletion of a project; a project role (project.yaml access, okdp-project-<p> an editor by default; a platform admin has every role) for the routes of /api/projects/{name}: viewer for its reads, editor for its writes, admin for its project.yaml. A caller without it answers 403 {"error": <what it needs>, "code": "forbidden"}; GET /api/me tells what the caller may do.
 // @termsOfService  http://swagger.io/terms/
 
 // @contact.name    API Support
@@ -94,7 +99,18 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Invalid GitOps topology: %v", err)
 	}
-	deployments, err := buildDeployments(cfg.GitOps, topology)
+	// One Credentials for every credential the server sends: the
+	// repositories', the catalogs' and the Forgejo API token, refused over
+	// http:// to a host GITOPS_INSECURE_HTTP_HOSTS does not name.
+	creds, err := gitops.NewCredentials(gitops.CredentialsConfig{
+		Dir:                   cfg.GitOps.CredentialsDir,
+		InsecureIgnoreHostKey: cfg.GitOps.InsecureIgnoreHostKey,
+		InsecureHTTPHosts:     cfg.GitOps.InsecureHTTPHosts,
+	})
+	if err != nil {
+		logrus.Fatalf("Invalid GitOps credentials configuration: %v", err)
+	}
+	deployments, err := buildDeployments(cfg.GitOps, topology, creds)
 	if err != nil {
 		logrus.Fatalf("Failed to prepare the deployments repositories: %v", err)
 	}
@@ -104,7 +120,7 @@ func main() {
 	// of the whole tree with okdp-compiler (okdp-gitops: each claim bound to
 	// its provider, of any namespace), against the upstream charts (the
 	// chart cache); the read paths get the same compile (deployments.Tree).
-	catalogs := &catalog.Loader{Auth: gitops.CatalogAuth(topology.Platform.URL, cfg.GitOps.CredentialsDir, cfg.GitOps.InsecureIgnoreHostKey)}
+	catalogs := &catalog.Loader{Auth: creds.Catalogs(topology.Platform.URL)}
 	chartCache := chartcache.NewCache(cfg.GitOps.ChartCacheDir, chartcache.NewRepositoryPuller(cfg.InsecureOCIRegistries))
 	deployments.Compiler = gitops.NewCompiler(catalogs)
 	deployments.Compiler.Charts = chartCache
@@ -185,14 +201,11 @@ func main() {
 
 	// Initialize Service stack (instances in Git, status from the cluster)
 	schemaService := service.NewDefaultPackageSchemaService(contextRepo, catalogSource)
-	// OIDC client provisioning (backend selected per call from the platform values)
-	oidcProvisioner := provisioning.NewContextSelector(contextRepo, k8sClient)
 	serviceService := service.NewDefaultServiceService(service.ServiceDeps{
 		Deployments:     deployments,
 		PlatformRepo:    contextRepo,
 		CatalogWriter:   catalogWriter,
 		SchemaService:   schemaService,
-		OidcProvisioner: oidcProvisioner,
 		Engine:          engine,
 		Descriptors:     descriptors,
 		K8sClient:       k8sClient,
@@ -205,32 +218,73 @@ func main() {
 	// over the defaults of the upstream chart (the chart cache).
 	serviceHandler.SetRenderedValuesService(service.NewDefaultRenderedValuesService(deployments, chartCache))
 
-	// Initialize Spark stack (SparkApplication CRUD)
+	// Initialize Spark stack (SparkApplication CRUD): every SparkApplication
+	// built by the server from an allow-list, its pods run as the
+	// ServiceAccount of the project's spark-rbac instance in the compiled
+	// tree.
 	sparkRepo := repository.NewSparkAppRepository(k8sClient)
-	sparkService := service.NewDefaultSparkService(sparkRepo, contextRepo, k8sTypedClient)
+	sparkService := service.NewDefaultSparkService(sparkRepo, contextRepo, k8sTypedClient, deployments.Tree)
 	sparkHandler := handlers.NewSparkHandler(sparkService)
 
 	// Initialize Connection stack (connections declared in Git, the
 	// project's and the platform's, + internal ones published by the
 	// instances deployed in a project)
 	connectionSecrets := repository.NewConnectionSecretRepository(k8sTypedClient)
+	// The network the SQL editor and the connection tests reach: never
+	// loopback, link-local or the Kubernetes API server, unless
+	// SQL_ALLOWED_NETWORKS allows it.
+	guard, err := netguard.New(cfg.SQL.AllowedNetworks, netguard.KubernetesAPIServer())
+	if err != nil {
+		logrus.Fatalf("Invalid SQL_ALLOWED_NETWORKS: %v", err)
+	}
 	connectionService := service.NewDefaultConnectionService(deployments, connectionSecrets, descriptors, serviceService.ListServices, contractCatalog)
+	connectionService.SetNetworkGuard(guard)
 	connectionHandler := handlers.NewConnectionHandler(connectionService)
 
 	// SQL editor: statements run on a deployed engine (Trino) at the URL of its
 	// instance descriptor with the caller's bearer token, or on a PostgreSQL
-	// connection of the project with its credentials Secret. Engine
-	// certificates are taken on trust when the platform does so for its issuer.
-	sqlConnections := service.SqlConnectionSource{Get: deployments.GetConnection, Secrets: connectionSecrets}
+	// connection declared in the tree (the project's, the platform's, a named
+	// claim's) with the credentials of an allowed Secret. Certificates are
+	// verified against the system's CAs and the platform's bundle
+	// (SQL_CA_FILE); Trino's are taken on trust when the platform does so
+	// for its issuer.
+	rootCAs, err := sqlRootCAs(cfg.SQL.CAFile)
+	if err != nil {
+		logrus.Fatalf("Invalid SQL_CA_FILE: %v", err)
+	}
+	sqlConnections := service.SqlConnectionSource{
+		Get:     deployments.GetConnection,
+		Claims:  deployments.ListClaims,
+		Tree:    deployments.Tree,
+		Secrets: connectionSecrets,
+		ExternalSecrets: func(ctx context.Context, namespace string) ([]crd.ESOExternalSecret, error) {
+			if !externalSecretRepo.Available(ctx) {
+				return nil, nil
+			}
+			return externalSecretRepo.List(ctx, namespace)
+		},
+	}
 	sqlService := service.NewDefaultSqlService(serviceService.GetService, sqlConnections, func(ctx context.Context) bool {
 		insecure, err := contextRepo.GetOidcInsecureSkipVerify(ctx)
 		return err == nil && insecure
+	}, service.SqlOptions{
+		Limits: service.SqlLimits{
+			StatementTimeout:     cfg.SQL.StatementTimeout,
+			DefaultRows:          cfg.SQL.DefaultRows,
+			MaxRows:              cfg.SQL.MaxRows,
+			MaxResultBytes:       cfg.SQL.MaxResultBytes,
+			MaxConcurrentPerUser: cfg.SQL.MaxConcurrentPerUser,
+		},
+		Guard:   guard,
+		RootCAs: rootCAs,
+		// Write mode is a project editor's, as every write of a project.
+		AuthorizeWrite: func(ctx context.Context, project string) error {
+			return authz.Require(ctx, authz.ProjectEditor, project)
+		},
 	})
 	sqlHandler := handlers.NewSqlHandler(sqlService)
 
-	// The identity block is checked once, at startup. A platform whose
-	// provisioning backend is misconfigured would deploy services fine and fail
-	// much later, when a deleted service leaves its OIDC client behind.
+	// The identity block is checked once, at startup.
 	checkIdentityConfiguration(context.Background(), contextRepo)
 
 	verifier := buildTokenVerifier(context.Background(), cfg, contextRepo)
@@ -241,7 +295,12 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	r := router.SetupRouter(cfg, verifier, capabilitiesHandler, projectHandler, identityHandler, secretStoreHandler, externalSecretHandler, serviceHandler, sparkHandler, connectionHandler, sqlHandler, claimHandler)
+	// The platform's authority, which every route's permission is read
+	// against (router.Permissions): platform.yaml global.okdp.access.admins
+	// and each project.yaml access, as the compiler reads them.
+	authority := authz.NewAuthority(authz.DeploymentsSource(deployments))
+
+	r := router.SetupRouter(cfg, verifier, authority, capabilitiesHandler, projectHandler, identityHandler, secretStoreHandler, externalSecretHandler, serviceHandler, sparkHandler, connectionHandler, sqlHandler, claimHandler)
 
 	// Start Server
 	//
@@ -265,10 +324,30 @@ func main() {
 	}
 }
 
-// checkIdentityConfiguration fails fast on an identity block that cannot hold,
-// and stays quiet otherwise. Platform values that cannot be read at all are not
-// fatal: they may simply not be there yet on a fresh cluster, and the routes
-// that need them already report their own absence.
+// sqlRootCAs is the system's CA pool, with the PEM bundle of file when set
+// (the platform's CA bundle).
+func sqlRootCAs(file string) (*x509.CertPool, error) {
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if file == "" {
+		return pool, nil
+	}
+	pem, err := os.ReadFile(file) // #nosec G304 -- the operator's setting
+	if err != nil {
+		return nil, err
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s holds no PEM certificate", file)
+	}
+	return pool, nil
+}
+
+// checkIdentityConfiguration fails fast on an identity block that cannot
+// hold, and stays quiet otherwise. Platform values that cannot be read at
+// all are not fatal: they may simply not be there yet on a fresh cluster,
+// and the routes that need them already report their own absence.
 func checkIdentityConfiguration(ctx context.Context, contextRepo repository.PlatformRepository) {
 	identity, err := contextRepo.GetIdentity(ctx)
 	if err != nil {
@@ -282,24 +361,18 @@ func checkIdentityConfiguration(ctx context.Context, contextRepo repository.Plat
 		return
 	}
 
-	// The check follows the field the provisioner actually resolves from, so a
-	// platform accepted here is a platform whose clients really get unmade.
 	provider, err := contextRepo.GetIdentityProvisioningProvider(ctx)
 	if err != nil {
 		logrus.WithError(err).Warn("Could not read identity.provisioning.provider, assuming clients are provisioned elsewhere")
 		return
 	}
 
-	// Every provider is checked here: an unsupported value or an incomplete
-	// Keycloak block would otherwise start fine and fail at the
-	// first client cleanup, leaving stale OIDC clients behind.
 	switch provider {
 	case "", provisioning.ProviderNone:
 	case provisioning.ProviderKeycloak:
-		if _, err := contextRepo.GetKeycloakProvisioningConfig(ctx); err != nil {
-			logrus.Fatalf("identity.provisioning.provider is %q but its configuration is unusable: %v",
-				provisioning.ProviderKeycloak, err)
-		}
+		// Reported to the console only: the control plane neither creates
+		// nor deletes OAuth clients any more.
+		logrus.Infof("identity.provisioning.provider is %q: the control plane provisions and deletes no OAuth client, the compiled oidc-dcr Jobs (oidc.clientProvisioning: dcr) or the platform (existing) do", provider)
 	default:
 		logrus.Fatalf("identity.provisioning.provider is %q, which is not supported. Use %q or %q.",
 			provider, provisioning.ProviderNone, provisioning.ProviderKeycloak)
@@ -329,7 +402,7 @@ func keycloakIssuerSource(cfg *config.Config, contextRepo repository.PlatformRep
 // when the deployment asked to run without verification.
 func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo repository.PlatformRepository) auth.Verifier {
 	if cfg.OIDC.Disabled {
-		logrus.Warn("AUTH_DISABLED is set: the API accepts unauthenticated requests. Never do this outside local development.")
+		logrus.Warn("AUTH_DISABLED is set: the API accepts unauthenticated requests, every caller holding every right. Never do this outside local development.")
 		return nil
 	}
 
@@ -355,6 +428,7 @@ func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo rep
 		Issuer:             issuer,
 		InsecureSkipVerify: insecure,
 		ClientID:           clientID,
+		GroupsClaim:        cfg.OIDC.GroupsClaim,
 	})
 	if err != nil {
 		logrus.Fatalf("Failed to initialize token verification: %v", err)
@@ -366,10 +440,10 @@ func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo rep
 
 // buildDeployments opens the deployments Git repositories of a topology,
 // each cloned under GITOPS_CLONE_DIR/repos (in memory without it), with the
-// credentials of GITOPS_CREDENTIALS_DIR.
-func buildDeployments(cfg config.GitOpsConfig, topology *gitops.Topology) (*gitops.Deployments, error) {
+// credentials creds (GITOPS_CREDENTIALS_DIR).
+func buildDeployments(cfg config.GitOpsConfig, topology *gitops.Topology, creds *gitops.Credentials) (*gitops.Deployments, error) {
 	open := func(loc gitops.Location) (gitops.Store, error) {
-		authMethod, err := gitops.AuthFromDir(loc.URL, cfg.CredentialsDir, cfg.InsecureIgnoreHostKey)
+		authMethod, err := creds.For(loc.URL)
 		if err != nil {
 			return nil, err
 		}
@@ -388,7 +462,7 @@ func buildDeployments(cfg config.GitOpsConfig, topology *gitops.Topology) (*gito
 	}
 	d := gitops.NewDeployments(gitops.NewRepositories(topology, open))
 	if topology.Forgejo != nil {
-		d.Forgejo = gitops.NewForgejoClient(*topology.Forgejo)
+		d.Forgejo = gitops.NewForgejoClient(*topology.Forgejo, creds)
 	}
 	logrus.WithFields(logrus.Fields{
 		"platform": topology.Platform.URL + " " + topology.Platform.Branch + " " + topology.Platform.Path,

@@ -9,6 +9,8 @@ data:
   PLATFORM_NAMESPACE: {{ .Values.configuration.platformNamespace | quote }}
   ALLOWED_ORIGINS: {{ .Values.configuration.allowedOrigins | quote }}
   LOG_LEVEL: {{ .Values.configuration.logLevel | quote }}
+  # The claim of the caller's groups, which every permission is read with.
+  OIDC_GROUPS_CLAIM: {{ .Values.oidc.groupsClaim | default "groups" | quote }}
   # Where the platform, the projects and the output live (gitops.topology).
   GITOPS_CONFIG: /etc/okdp/gitops/topology.yaml
   GITOPS_ENGINE: {{ .Values.gitops.engine | quote }}
@@ -22,6 +24,10 @@ data:
   {{- if .Values.gitops.sshInsecureIgnoreHostKey }}
   # Sandboxes only: any SSH host key is accepted.
   GITOPS_SSH_INSECURE_IGNORE_HOST_KEY: "true"
+  {{- end }}
+  {{- with .Values.gitops.insecureHTTPHosts }}
+  # The hosts a credential goes to over http://, in clear.
+  GITOPS_INSECURE_HTTP_HOSTS: {{ join "," . | quote }}
   {{- end }}
   {{- if .Values.configuration.insecureOciRegistries }}
   # Development sandboxes only: registry hosts reached over plain HTTP.
@@ -37,5 +43,19 @@ data:
   {{- if .tlsInsecure }}
   # Sandboxes only: the Keycloak certificate is not checked.
   KEYCLOAK_TLS_INSECURE: "true"
+  {{- end }}
+  {{- end }}
+  {{- with .Values.sqlEditor }}
+  SQL_STATEMENT_TIMEOUT: {{ .statementTimeout | quote }}
+  SQL_DEFAULT_ROWS: {{ .defaultRows | quote }}
+  SQL_MAX_ROWS: {{ .maxRows | quote }}
+  SQL_MAX_RESULT_BYTES: {{ .maxResultBytes | int64 | quote }}
+  SQL_MAX_CONCURRENT_PER_USER: {{ .maxConcurrentPerUser | quote }}
+  {{- if .allowedNetworks }}
+  SQL_ALLOWED_NETWORKS: {{ join "," .allowedNetworks | quote }}
+  {{- end }}
+  {{- if .caBundleSecret }}
+  # The platform's CA bundle (sqlEditor.caBundleSecret).
+  SQL_CA_FILE: /etc/okdp/sql-ca/ca.crt
   {{- end }}
   {{- end }}

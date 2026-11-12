@@ -16,9 +16,11 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+// SparkAppRepository stores SparkApplications. It takes the typed object
+// only, the fields the server builds (sparkPolicy): a manifest is never
+// passed through.
 type SparkAppRepository interface {
 	Create(ctx context.Context, namespace string, app *crd.SparkApplication) error
-	CreateRaw(ctx context.Context, namespace string, obj *unstructured.Unstructured) error
 	Get(ctx context.Context, namespace, name string) (*crd.SparkApplication, error)
 	Update(ctx context.Context, namespace string, app *crd.SparkApplication) error
 	List(ctx context.Context, namespace, project string) ([]crd.SparkApplication, error)
@@ -48,12 +50,6 @@ func (r *k8sSparkAppRepository) Create(ctx context.Context, namespace string, ap
 	_, err = r.client.Resource(r.gvr).Namespace(namespace).Create(
 		ctx, &unstructured.Unstructured{Object: unstructuredMap}, metav1.CreateOptions{},
 	)
-	return err
-}
-
-func (r *k8sSparkAppRepository) CreateRaw(ctx context.Context, namespace string, obj *unstructured.Unstructured) error {
-	obj.SetNamespace(namespace)
-	_, err := r.client.Resource(r.gvr).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
 	return err
 }
 

@@ -19,7 +19,7 @@ import (
 func gitBackedRouter(t *testing.T) (*gin.Engine, *gitops.MemoryStore) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	store := gitops.NewMemoryStore(map[string]string{
+	store := gitops.MustMemoryStore(map[string]string{
 		"projects/demo/project.yaml":                    "name: demo\n",
 		"projects/demo/kustomization.yaml":              "resources: []\n",
 		"projects/demo/services/trino/instance.yaml":    "name: trino\nproject: demo\nservice: trino\nchart: oci://quay.io/okdp/platform-charts/trino\nversion: 1.0.0\nconnections: []\n",
@@ -33,7 +33,7 @@ func gitBackedRouter(t *testing.T) (*gin.Engine, *gitops.MemoryStore) {
 	projects := handlers.NewProjectHandler(service.NewDefaultProjectService(nil, deployments))
 	services := handlers.NewServiceHandler(service.NewDefaultServiceService(service.ServiceDeps{Deployments: deployments}), nil)
 	cfg := &config.Config{AllowedOrigins: "https://console.example"}
-	return SetupRouter(cfg, nil, nil, projects, nil, nil, nil, services, nil, nil, nil, nil), store
+	return SetupRouter(cfg, nil, nil, nil, projects, nil, nil, nil, services, nil, nil, nil, nil), store
 }
 
 // DELETE …/services/.. used to resolve to projects/demo and remove the whole
@@ -98,7 +98,7 @@ func TestObjectNamesInThePathAreValidated(t *testing.T) {
 
 func testRouterWithoutAuth() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	return SetupRouter(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return SetupRouter(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestResponsesCarryTheSecurityHeaders(t *testing.T) {

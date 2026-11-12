@@ -9,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -53,8 +52,7 @@ func (h *ExternalSecretHandler) ListExternalSecrets(c *gin.Context) {
 
 	items, err := h.service.ListExternalSecrets(c.Request.Context(), namespace)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list external secrets")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to list external secrets")
 		return
 	}
 	c.JSON(http.StatusOK, items)
@@ -100,8 +98,7 @@ func (h *ExternalSecretHandler) CreateExternalSecret(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logrus.WithError(err).Error("Failed to create external secret")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to create external secret")
 		return
 	}
 	c.JSON(http.StatusCreated, es)
@@ -147,8 +144,7 @@ func (h *ExternalSecretHandler) UpdateExternalSecret(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logrus.WithError(err).Error("Failed to update external secret")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to update external secret")
 		return
 	}
 	c.JSON(http.StatusOK, es)
@@ -177,8 +173,7 @@ func (h *ExternalSecretHandler) DeleteExternalSecret(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to delete external secret")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete external secret")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -208,8 +203,7 @@ func (h *ExternalSecretHandler) GetExternalSecretStatus(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get external secret status")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get external secret status")
 		return
 	}
 	c.JSON(http.StatusOK, status)

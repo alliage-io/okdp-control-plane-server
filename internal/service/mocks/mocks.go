@@ -232,11 +232,15 @@ func (m *ConnectionSecretRepository) InspectSecret(ctx context.Context, namespac
 	return content, args.Bool(1), args.Error(2)
 }
 
-func (m *ConnectionSecretRepository) ReadSecret(ctx context.Context, namespace, name string) (map[string][]byte, bool, error) {
+func (m *ConnectionSecretRepository) ReadSecret(ctx context.Context, namespace, name string) (map[string][]byte, map[string]string, bool, error) {
 	args := m.Called(ctx, namespace, name)
 	var data map[string][]byte
 	if raw := args.Get(0); raw != nil {
 		data = raw.(map[string][]byte)
 	}
-	return data, args.Bool(1), args.Error(2)
+	var labels map[string]string
+	if raw := args.Get(1); raw != nil {
+		labels = raw.(map[string]string)
+	}
+	return data, labels, args.Bool(2), args.Error(3)
 }

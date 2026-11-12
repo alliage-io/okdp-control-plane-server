@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,11 +92,30 @@ func TestTheTopologyFileNamesTheRepositories(t *testing.T) {
 	topology, err := cfg.GitOps.Topology()
 	require.NoError(t, err)
 	assert.True(t, topology.Split())
-	assert.Equal(t, "https://git/okdp-project-demo.git", topology.Project("demo", nil).URL)
+	demo, err := topology.Project("demo", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "https://git/okdp-project-demo.git", demo.URL)
 
 	// The output in a repository of the sources: no topology of one
 	// repository.
 	require.NoError(t, os.WriteFile(file, []byte("platform: {url: https://git/deployments.git}\nprojects: {url: https://git/deployments.git, path: \"projects/{project}\"}\noutput: {url: https://git/deployments.git}\n"), 0o644))
 	_, err = cfg.GitOps.Topology()
 	assert.ErrorContains(t, err, "repository of its own")
+}
+
+func TestSQLDefaultsAndValidation(t *testing.T) {
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, SQLConfig{StatementTimeout: 2 * time.Minute, DefaultRows: 1000, MaxRows: 10000, MaxResultBytes: 16 << 20, MaxConcurrentPerUser: 2}, cfg.SQL)
+
+	t.Setenv("SQL_ALLOWED_NETWORKS", " 10.0.0.0/8, ,127.0.0.1")
+	t.Setenv("SQL_MAX_ROWS", "500")
+	cfg, err = Load()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"10.0.0.0/8", "127.0.0.1"}, cfg.SQL.AllowedNetworks)
+	assert.Equal(t, 500, cfg.SQL.DefaultRows, "the default row cap never passes the maximum")
+
+	t.Setenv("SQL_STATEMENT_TIMEOUT", "soon")
+	_, err = Load()
+	assert.ErrorContains(t, err, "SQL_STATEMENT_TIMEOUT")
 }

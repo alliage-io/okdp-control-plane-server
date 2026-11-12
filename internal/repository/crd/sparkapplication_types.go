@@ -30,6 +30,7 @@ type SparkApplicationSpec struct {
 	Type                string            `json:"type"`
 	Mode                string            `json:"mode"`
 	Image               string            `json:"image"`
+	ImagePullPolicy     string            `json:"imagePullPolicy,omitempty"`
 	MainClass           string            `json:"mainClass,omitempty"`
 	MainApplicationFile string            `json:"mainApplicationFile,omitempty"`
 	Arguments           []string          `json:"arguments,omitempty"`
@@ -44,6 +45,7 @@ type SparkApplicationSpec struct {
 
 type SparkPodSpec struct {
 	Cores          *int32            `json:"cores,omitempty"`
+	CoreLimit      string            `json:"coreLimit,omitempty"`
 	Memory         string            `json:"memory,omitempty"`
 	ServiceAccount string            `json:"serviceAccount,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`

@@ -10,7 +10,7 @@ import (
 
 // What an instance publishes is its okdp.info.yaml in the output.
 func TestDescriptorsAreWhatTheCompiledInstancesPublish(t *testing.T) {
-	store := gitops.NewMemoryStore(map[string]string{
+	store := gitops.MustMemoryStore(map[string]string{
 		"projects/demo/instances/hive/instance.yaml":                "service: hive-metastore\nversion: 4.0.1-1.0.0\n",
 		"projects/demo/instances/web/instance.yaml":                 "service: webapp\nversion: 1.0.0\n",
 		"compiled/projects/demo/instances/demo-hive/Chart.yaml":     "apiVersion: v2\nname: hive-metastore\nversion: 4.0.1-1.0.0\n",

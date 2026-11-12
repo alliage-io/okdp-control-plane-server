@@ -28,6 +28,16 @@ func TestCreateNamespaceLabelsANewProjectNamespace(t *testing.T) {
 	if err != nil || ns.Labels[ProjectLabel] != "demo" || ns.Annotations[ProjectDescriptionAnnot] != "Demo" {
 		t.Fatalf("namespace demo = %+v, %v", ns, err)
 	}
+	// The compiler's namespace manifest of a project, from its creation.
+	for k, v := range map[string]string{
+		"pod-security.kubernetes.io/enforce": "baseline",
+		"pod-security.kubernetes.io/audit":   "restricted",
+		"pod-security.kubernetes.io/warn":    "restricted",
+	} {
+		if ns.Labels[k] != v {
+			t.Errorf("label %s = %q, want %q", k, ns.Labels[k], v)
+		}
+	}
 
 	created, err = repo.CreateNamespace(ctx, &models.Project{Name: "old"})
 	if err != nil || created {

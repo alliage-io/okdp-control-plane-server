@@ -23,7 +23,7 @@ func NewSparkHandler(svc service.SparkService) *SparkHandler {
 
 // SubmitSparkApp godoc
 // @Summary      Submit a Spark application
-// @Description  Create and submit a SparkApplication to the Spark operator
+// @Description  Builds a SparkApplication from the request and submits it to the Spark operator. Its driver and executors run as the ServiceAccount of the project's spark-rbac instance (400 when the project has none). type is Scala, Java, Python or R; mode cluster; image one the platform allows (global.okdp.sparkOperator.spark.images, or its image.registry; any when neither is set); sparkConf keys Spark's own settings only: no spark.kubernetes.* key but the driver's and executors' labels, resources and allocation, nothing naming volumes, a ServiceAccount, a pod template, a host path or a security context (400 otherwise).
 // @Tags         spark-apps
 // @Accept       json
 // @Produce      json
@@ -51,8 +51,11 @@ func (h *SparkHandler) SubmitSparkApp(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to submit Spark application")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if service.IsValidationError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		writeError(c, err, "Failed to submit Spark application")
 		return
 	}
 	c.JSON(http.StatusCreated, instance)
@@ -60,7 +63,7 @@ func (h *SparkHandler) SubmitSparkApp(c *gin.Context) {
 
 // SubmitSparkAppYAML godoc
 // @Summary      Submit a Spark application from YAML
-// @Description  Create and submit a SparkApplication from raw YAML manifest
+// @Description  Reads a SparkApplication manifest into the request of POST /spark-apps and submits it the same way. Besides metadata.name (and metadata.namespace, the project's), it may hold the form's fields, imagePullPolicy, restartPolicy, deps and the driver's and executors' coreLimit; a serviceAccount other than the project's, or any other field (volumes, securityContext, podTemplate, nodeSelector...), answers 400.
 // @Tags         spark-apps
 // @Accept       json
 // @Produce      json
@@ -88,8 +91,11 @@ func (h *SparkHandler) SubmitSparkAppYAML(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to submit Spark application from YAML")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if service.IsValidationError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		writeError(c, err, "Failed to submit Spark application from YAML")
 		return
 	}
 	c.JSON(http.StatusCreated, instance)
@@ -109,8 +115,7 @@ func (h *SparkHandler) ListSparkApps(c *gin.Context) {
 
 	apps, err := h.service.ListApps(c.Request.Context(), project)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list Spark applications")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to list Spark applications")
 		return
 	}
 	c.JSON(http.StatusOK, apps)
@@ -136,7 +141,7 @@ func (h *SparkHandler) StreamSparkApps(c *gin.Context) {
 
 	watcher, err := h.service.WatchApps(c.Request.Context(), project)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err)
 		return
 	}
 	defer watcher.Stop()
@@ -197,8 +202,7 @@ func (h *SparkHandler) GetSparkApp(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get Spark application")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get Spark application")
 		return
 	}
 	c.JSON(http.StatusOK, instance)
@@ -226,8 +230,7 @@ func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to delete Spark application")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete Spark application")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -235,7 +238,7 @@ func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 
 // UpdateSparkApp godoc
 // @Summary      Update a Spark application
-// @Description  Update an existing SparkApplication spec fields
+// @Description  Update an existing SparkApplication spec fields, checked as on submit (image, sparkConf); its driver and executors run as the project's spark-rbac ServiceAccount, and the fields the server does not build are dropped.
 // @Tags         spark-apps
 // @Accept       json
 // @Produce      json
@@ -265,8 +268,11 @@ func (h *SparkHandler) UpdateSparkApp(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to update Spark application")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if service.IsValidationError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		writeError(c, err, "Failed to update Spark application")
 		return
 	}
 	c.JSON(http.StatusOK, instance)
@@ -295,8 +301,7 @@ func (h *SparkHandler) GetSparkUI(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get Spark UI info")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get Spark UI info")
 		return
 	}
 	c.JSON(http.StatusOK, info)
@@ -332,8 +337,7 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get Spark application logs")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get Spark application logs")
 		return
 	}
 	defer stream.Close()
@@ -413,8 +417,7 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 func (h *SparkHandler) GetSparkConfig(c *gin.Context) {
 	cfg, err := h.service.GetSparkConfig(c.Request.Context())
 	if err != nil {
-		logrus.WithError(err).Error("Failed to get Spark configuration")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get Spark configuration")
 		return
 	}
 	c.JSON(http.StatusOK, cfg)

@@ -66,11 +66,11 @@ func TestPlatformServiceToMap(t *testing.T) {
 // and a writer bound to it.
 func newWriterWith(t *testing.T, categories []interface{}) (CatalogWriterRepository, func() []interface{}) {
 	t.Helper()
-	raw, err := treeedit.MarshalYAML(map[string]interface{}{"defaultRepository": "quay.io/okdp/platform-charts", "categories": categories})
+	raw, err := treeedit.MarshalYAML(map[string]interface{}{"repositories": []interface{}{map[string]interface{}{"name": "okdp", "url": "https://git.example.org/okdp/sandbox-charts.git"}}, "categories": categories})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := gitops.NewMemoryStore(map[string]string{treeedit.CatalogsFile: string(raw)})
+	store := gitops.MustMemoryStore(map[string]string{treeedit.CatalogsFile: string(raw)})
 	d := gitops.NewDeployments(store)
 	w := NewCatalogWriterRepository(d)
 	read := func() []interface{} {
@@ -78,7 +78,7 @@ func newWriterWith(t *testing.T, categories []interface{}) (CatalogWriterReposit
 		if err != nil {
 			t.Fatalf("read back: %v", err)
 		}
-		if doc["defaultRepository"] != "quay.io/okdp/platform-charts" {
+		if repos, _ := doc["repositories"].([]interface{}); len(repos) != 1 {
 			t.Fatalf("the writer lost the rest of the catalog: %v", doc)
 		}
 		cats, _ := doc["categories"].([]interface{})
@@ -105,7 +105,7 @@ func namesIn(cats []interface{}, title string) []string {
 func TestCatalogWriterNestsServicesUnderTheirSection(t *testing.T) {
 	w, read := newWriterWith(t, []interface{}{
 		map[string]interface{}{"title": "Data Catalog", "icon": "pi-database", "services": []interface{}{
-			map[string]interface{}{"name": "hive-metastore", "versions": []interface{}{"4.0.1"}, "default": "4.0.1"},
+			map[string]interface{}{"name": "hive-metastore", "default": "4.0.1"},
 		}},
 	})
 	ctx := context.Background()

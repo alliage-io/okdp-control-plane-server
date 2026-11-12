@@ -65,7 +65,7 @@ func newRenderedValuesUnderTest(t *testing.T, charts ChartFiles, instance string
 	for p, content := range files {
 		all[p] = content
 	}
-	return NewDefaultRenderedValuesService(gitops.NewDeployments(gitops.NewMemoryStore(all)), charts)
+	return NewDefaultRenderedValuesService(gitops.NewDeployments(gitops.MustMemoryStore(all)), charts)
 }
 
 func TestRenderedValuesAreTheDefaultsUnderTheCompiledValues(t *testing.T) {

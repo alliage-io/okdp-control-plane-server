@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 )
 
 // fakeTrino serves three pages of two rows. Its nextUri points to an
@@ -65,7 +66,17 @@ func sqlServiceFor(url, service string) *DefaultSqlService {
 			return nil, apierrors.NewNotFound(servicesResource, name)
 		}
 		return &models.ServiceInstance{Name: name, Service: service, URL: url}, nil
-	}, SqlConnectionSource{}, nil)
+	}, SqlConnectionSource{}, nil, SqlOptions{Guard: loopbackAllowed()})
+}
+
+// loopbackAllowed is the guard of a test whose servers listen on the
+// loopback: the platform's allow-list naming it.
+func loopbackAllowed() *netguard.Guard {
+	g, err := netguard.New([]string{"127.0.0.0/8", "::1"}, nil)
+	if err != nil {
+		panic(err)
+	}
+	return g
 }
 
 func TestSqlFollowsPagesOnTheInstanceURL(t *testing.T) {

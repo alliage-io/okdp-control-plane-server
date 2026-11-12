@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -43,8 +42,7 @@ func (h *SecretStoreHandler) ListSecretStores(c *gin.Context) {
 
 	stores, err := h.service.ListSecretStores(c.Request.Context(), namespace)
 	if err != nil {
-		logrus.WithError(err).Error("Failed to list secret stores")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to list secret stores")
 		return
 	}
 	c.JSON(http.StatusOK, stores)
@@ -86,8 +84,7 @@ func (h *SecretStoreHandler) CreateSecretStore(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logrus.WithError(err).Error("Failed to create secret store")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to create secret store")
 		return
 	}
 	c.JSON(http.StatusCreated, store)
@@ -129,8 +126,7 @@ func (h *SecretStoreHandler) UpdateSecretStore(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		logrus.WithError(err).Error("Failed to update secret store")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to update secret store")
 		return
 	}
 	c.JSON(http.StatusOK, store)
@@ -159,8 +155,7 @@ func (h *SecretStoreHandler) DeleteSecretStore(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to delete secret store")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete secret store")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -215,8 +210,7 @@ func (h *SecretStoreHandler) GetStatus(c *gin.Context) {
 			})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get secret store status")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get secret store status")
 		return
 	}
 	c.JSON(http.StatusOK, status)

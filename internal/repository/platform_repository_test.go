@@ -34,7 +34,7 @@ func newContextWith(t *testing.T, body map[string]interface{}) PlatformRepositor
 		t.Fatal(err)
 	}
 	files[compiler.PlatformFile] = string(raw)
-	return NewPlatformRepository(gitops.NewDeployments(gitops.NewMemoryStore(files)))
+	return NewPlatformRepository(gitops.NewDeployments(gitops.MustMemoryStore(files)))
 }
 
 func TestGetMenuCategories(t *testing.T) {
@@ -43,7 +43,7 @@ func TestGetMenuCategories(t *testing.T) {
 			map[string]interface{}{"title": "Data Processing", "icon": "pi-cog", "services": []interface{}{
 				map[string]interface{}{"name": "spark-operator", "default": "0.3.0"},
 			}},
-			map[string]interface{}{"title": "Data Science"},
+			map[string]interface{}{"title": "Data Science", "services": []interface{}{}},
 		},
 	}})
 
@@ -67,7 +67,7 @@ func TestGetMenuCategories(t *testing.T) {
 // iterates the answer.
 func TestGetMenuCategoriesAndServicesAbsentAreEmpty(t *testing.T) {
 	repo := newContextWith(t, map[string]interface{}{"serviceCatalog": map[string]interface{}{
-		"defaultRepository": "quay.io/okdp/platform-packages",
+		"repositories": []interface{}{map[string]interface{}{"name": "okdp", "url": "https://git.example.org/okdp/sandbox-charts.git"}},
 	}})
 
 	cats, err := repo.GetMenuCategories(context.Background())

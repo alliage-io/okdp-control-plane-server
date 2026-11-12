@@ -18,7 +18,6 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
-	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-gitops/gitops"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/sirupsen/logrus"
@@ -96,7 +95,6 @@ type ServiceDeps struct {
 	PlatformRepo    repository.PlatformRepository
 	CatalogWriter   repository.CatalogWriterRepository
 	SchemaService   PackageSchemaService
-	OidcProvisioner provisioning.OidcClientProvisioner
 	Engine          repository.EngineAdapter
 	Descriptors     repository.DescriptorRepository
 	K8sClient       dynamic.Interface
@@ -115,7 +113,6 @@ type DefaultServiceService struct {
 	platformRepo    repository.PlatformRepository
 	catalogWriter   repository.CatalogWriterRepository
 	schemaService   PackageSchemaService
-	oidcProvisioner provisioning.OidcClientProvisioner
 	engine          repository.EngineAdapter
 	descriptors     repository.DescriptorRepository
 	k8sClient       dynamic.Interface
@@ -134,7 +131,6 @@ func NewDefaultServiceService(d ServiceDeps) *DefaultServiceService {
 		platformRepo:    d.PlatformRepo,
 		catalogWriter:   d.CatalogWriter,
 		schemaService:   d.SchemaService,
-		oidcProvisioner: d.OidcProvisioner,
 		engine:          d.Engine,
 		descriptors:     d.Descriptors,
 		k8sClient:       d.K8sClient,
@@ -484,26 +480,12 @@ func (s *DefaultServiceService) DeleteService(ctx context.Context, project, name
 	}
 	s.changes.Notify(project, name, "DELETED")
 
+	// No OAuth client is deleted: the control plane made none (the
+	// compiled output's oidc-dcr Jobs register them, or the platform
+	// does), and a client named after the release may be anyone's.
 	releaseName := compiler.ReleaseName(project, name)
-	s.cleanupOidcClient(ctx, releaseName)
 	s.cleanupUserResources(ctx, project, releaseName)
 	return nil
-}
-
-// cleanupOidcClient best-effort unregisters the OIDC client of a deleted
-// service through the configured provisioning backend (no-op when
-// identity.provisioning.provider is unset/none).
-func (s *DefaultServiceService) cleanupOidcClient(ctx context.Context, releaseName string) {
-	if s.oidcProvisioner == nil {
-		return
-	}
-	if err := s.oidcProvisioner.DeleteClient(ctx, releaseName); err != nil {
-		// Warn, not Debug: a client left registered outlives the service that
-		// owned it and nothing else reports it.
-		logrus.WithError(err).WithField("oidcClient", releaseName).Warn("OidcClient cleanup failed")
-	} else {
-		logrus.WithField("oidcClient", releaseName).Info("Cleaned up OidcClient")
-	}
 }
 
 // MergePatch applies patch to target as a JSON Merge Patch (RFC 7386) and

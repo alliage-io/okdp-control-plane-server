@@ -64,6 +64,35 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/me": {
+            "get": {
+                "description": "The caller's rights, read as every route reads them: whether it is a platform admin (a group of platform.yaml global.okdp.access.admins: identity, catalog writes, project creation and deletion) and its role in each project (project.yaml access, okdp-project-\u003cp\u003e an editor by default; a viewer reads, an editor writes, an admin edits project.yaml; a platform admin is admin everywhere). A project absent from projects is one the caller may not see. A route the caller may not use answers 403 {\"error\", \"code\": \"forbidden\"}",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "access"
+                ],
+                "summary": "What the caller may do",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.CallerAccess"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/api/platform-categories": {
             "get": {
                 "description": "Get the ordered menu sections (key, label, icon, order) the console groups services under",
@@ -463,7 +492,7 @@ const docTemplate = `{
         },
         "/api/projects": {
             "get": {
-                "description": "List the projects declared in the deployments repository (projects/\u003cp\u003e/project.yaml), whether written by the console or by hand in Git",
+                "description": "List the projects declared in the deployments repository (projects/\u003cp\u003e/project.yaml), whether written by the console or by hand in Git, that the caller may see: those it has a role in (project.yaml access, okdp-project-\u003cp\u003e an editor by default), every one for a platform admin",
                 "consumes": [
                     "application/json"
                 ],
@@ -473,7 +502,7 @@ const docTemplate = `{
                 "tags": [
                     "projects"
                 ],
-                "summary": "List all projects",
+                "summary": "List the caller's projects",
                 "responses": {
                     "200": {
                         "description": "OK",
@@ -557,7 +586,7 @@ const docTemplate = `{
         },
         "/api/projects/stream": {
             "get": {
-                "description": "Stream project updates using Server-Sent Events (SSE): an ADDED event per existing project, then ADDED/MODIFIED/DELETED as project.yaml files change in the deployments repository (read every few seconds, at once after a console change)",
+                "description": "Stream project updates using Server-Sent Events (SSE): an ADDED event per existing project the caller may see, then ADDED/MODIFIED/DELETED as project.yaml files change in the deployments repository (read every few seconds, at once after a console change); a project the caller stops seeing (its access changed) is DELETED from its stream",
                 "produces": [
                     "text/event-stream"
                 ],
@@ -1400,7 +1429,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/connections/{connName}/sql": {
             "post": {
-                "description": "Runs a statement batch on a database-server connection of the project (engine postgresql) with the connection's credentials, writes included: every project member acts as the connection's database user. Several statements separated by ';' run in one implicit transaction; the result is the last statement that returned columns, with the command tag of the last statement. Rows past maxRows are dropped (not cancelled). SQL errors (errorName = SQLSTATE) and the 2-minute timeout answer 200 with ` + "`" + `error` + "`" + ` set.",
+                "description": "Runs a statement on a database-server connection (engine postgresql) declared in the tree: the project's, else the platform's, else a named claim of the project (the connection its provider granted). Host, port and database are the connection's, never the request's. The credentials come only from the claim's provisioned Secret (labelled okdp.io/credentials-database-server), the platform's secret store (secretRef.remoteKey, the Secret an ExternalSecret of the project fills from it), the Secret the console wrote from the connection form, or a Secret labelled okdp.io/connection-credentials: \"true\"; any other answers 400 (code sql-credentials-refused). Every project member acts as the connection's database user. TLS is always verified against the platform CA bundle (sslMode verify-ca checks the chain only; disable and prefer are not honored): 502 (code sql-tls-unverified) otherwise. Only SCRAM-SHA-256 authentication: a server asking for a clear-text or MD5 password answers 502 (code sql-auth-method-refused). Loopback, link-local and Kubernetes API server addresses answer 400 (code sql-address-refused) unless SQL_ALLOWED_NETWORKS allows them. Read-only by default: one statement, in a READ ONLY transaction rolled back after it (a batch of several is an SQL error, 42601). With ` + "`" + `write: true` + "`" + `, a batch: several statements separated by ';' run in one implicit transaction; the result is the last statement that returned columns, with the command tag of the last statement. Every statement is logged with the caller and the connection. Rows past maxRows (at most SQL_MAX_ROWS) or SQL_MAX_RESULT_BYTES are dropped (not cancelled). SQL errors (errorName = SQLSTATE) and the statement timeout (SQL_STATEMENT_TIMEOUT, 2 minutes) answer 200 with ` + "`" + `error` + "`" + ` set. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-claim-unbound): a named claim no provider granted yet. Any other failure of the database answers 502 with a generic message and the requestId, its cause in the server's log.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1410,7 +1439,7 @@ const docTemplate = `{
                 "tags": [
                     "sql"
                 ],
-                "summary": "Execute SQL on an external database connection",
+                "summary": "Execute SQL on a database connection",
                 "parameters": [
                     {
                         "type": "string",
@@ -1452,8 +1481,26 @@ const docTemplate = `{
                             }
                         }
                     },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -1760,7 +1807,7 @@ const docTemplate = `{
                 }
             },
             "delete": {
-                "description": "Remove a deployed service from a project: removes its directory from the deployments Git repository; the compile of that commit (okdp-gitops, in CI) removes its compiled files, and the GitOps engine uninstalls it. 400 while another instance of the project references it.",
+                "description": "Remove a deployed service from a project: removes its directory from the deployments Git repository; the compile of that commit (okdp-gitops, in CI) removes its compiled files, and the GitOps engine uninstalls it. No OAuth client is deleted: the control plane makes none (the compiled oidc-dcr Jobs register them, or the platform). 400 while another instance of the project references it.",
                 "produces": [
                     "application/json"
                 ],
@@ -2121,7 +2168,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/services/{serviceName}/sql": {
             "post": {
-                "description": "Proxies the statement to the service instance (Trino only), forwarding the caller's bearer token. Engine-side SQL errors answer 200 with ` + "`" + `error` + "`" + ` set.",
+                "description": "Proxies the statement to the service instance (Trino only), forwarding the caller's bearer token; ` + "`" + `write` + "`" + ` is not read (the engine authorizes the token). Engine-side SQL errors answer 200 with ` + "`" + `error` + "`" + ` set. Every statement is logged with the caller and the instance. Bounded by the statement timeout (SQL_STATEMENT_TIMEOUT), the row cap (maxRows, at most SQL_MAX_ROWS) and the result-size cap (SQL_MAX_RESULT_BYTES), past which the result is truncated; a client that disconnects cancels the query. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-address-refused): the engine address is loopback, link-local or the Kubernetes API server. Any other failure of the engine answers 502 with a generic message and the requestId, its cause in the server's log.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2175,6 +2222,15 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Too Many Requests",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -2292,7 +2348,7 @@ const docTemplate = `{
                 }
             },
             "post": {
-                "description": "Create and submit a SparkApplication to the Spark operator",
+                "description": "Builds a SparkApplication from the request and submits it to the Spark operator. Its driver and executors run as the ServiceAccount of the project's spark-rbac instance (400 when the project has none). type is Scala, Java, Python or R; mode cluster; image one the platform allows (global.okdp.sparkOperator.spark.images, or its image.registry; any when neither is set); sparkConf keys Spark's own settings only: no spark.kubernetes.* key but the driver's and executors' labels, resources and allocation, nothing naming volumes, a ServiceAccount, a pod template, a host path or a security context (400 otherwise).",
                 "consumes": [
                     "application/json"
                 ],
@@ -2398,7 +2454,7 @@ const docTemplate = `{
         },
         "/api/projects/{name}/spark-apps/yaml": {
             "post": {
-                "description": "Create and submit a SparkApplication from raw YAML manifest",
+                "description": "Reads a SparkApplication manifest into the request of POST /spark-apps and submits it the same way. Besides metadata.name (and metadata.namespace, the project's), it may hold the form's fields, imagePullPolicy, restartPolicy, deps and the driver's and executors' coreLimit; a serviceAccount other than the project's, or any other field (volumes, securityContext, podTemplate, nodeSelector...), answers 400.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2518,7 +2574,7 @@ const docTemplate = `{
                 }
             },
             "put": {
-                "description": "Update an existing SparkApplication spec fields",
+                "description": "Update an existing SparkApplication spec fields, checked as on submit (image, sparkConf); its driver and executors run as the project's spark-rbac ServiceAccount, and the fields the server does not build are dropped.",
                 "consumes": [
                     "application/json"
                 ],
@@ -3792,6 +3848,33 @@ const docTemplate = `{
                 },
                 "name": {
                     "description": "Name is the named claim the reference names; empty for a claim\nwritten in the parameters (a claim template).",
+                    "type": "string"
+                }
+            }
+        },
+        "models.CallerAccess": {
+            "type": "object",
+            "properties": {
+                "groups": {
+                    "description": "Groups are the caller's groups, its token's groups claim.",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "platformAdmin": {
+                    "description": "PlatformAdmin: a member of a group of global.okdp.access.admins.",
+                    "type": "boolean"
+                },
+                "projects": {
+                    "description": "Projects maps each project the caller has a role in to it: viewer,\neditor or admin. A project absent has none: the caller does not see\nit.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                },
+                "username": {
+                    "description": "Username is the caller's, from its token.",
                     "type": "string"
                 }
             }
@@ -5490,11 +5573,15 @@ const docTemplate = `{
             ],
             "properties": {
                 "maxRows": {
-                    "description": "MaxRows caps the number of result rows returned (default 1000).",
+                    "description": "MaxRows caps the number of result rows returned (default 1000,\nSQL_DEFAULT_ROWS; at most SQL_MAX_ROWS, 10000 by default).",
                     "type": "integer"
                 },
                 "query": {
                     "type": "string"
+                },
+                "write": {
+                    "description": "Write runs a connection's statement in write mode: a batch of\nstatements separated by ';', in one implicit transaction. Without\nit, one statement in a read-only transaction. Not read for a\nservice instance (Trino authorizes the caller's own token).",
+                    "type": "boolean"
                 }
             }
         },
@@ -5641,7 +5728,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/",
 	Schemes:          []string{},
 	Title:            "OKDP Server New API",
-	Description:      "Minimal API server for OKDP UI New",
+	Description:      "Minimal API server for OKDP UI New. Every answer carries an X-Request-Id header; a 500 (and a 502 of the SQL routes) answers {\"error\": <generic message>, \"requestId\": <id>}, its cause in the server's log under that id. Every route needs a permission, deny by default, read from the platform's own authority: platform admin (a group of platform.yaml global.okdp.access.admins) for the identity routes, the catalog's writes and the creation and deletion of a project; a project role (project.yaml access, okdp-project-<p> an editor by default; a platform admin has every role) for the routes of /api/projects/{name}: viewer for its reads, editor for its writes, admin for its project.yaml. A caller without it answers 403 {\"error\": <what it needs>, \"code\": \"forbidden\"}; GET /api/me tells what the caller may do.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

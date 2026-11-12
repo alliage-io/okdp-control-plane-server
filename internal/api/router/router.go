@@ -1,30 +1,155 @@
 package router
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
-	swaggerFiles "github.com/swaggo/files"
-	ginSwagger "github.com/swaggo/gin-swagger"
 
 	"github.com/okdp/okdp-control-plane-server/internal/api/handlers"
 	"github.com/okdp/okdp-control-plane-server/internal/api/middleware"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
+	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/config"
 )
 
+// Short names of the permissions of the table.
+const (
+	public        = authz.Public
+	authenticated = authz.Authenticated
+	platformAdmin = authz.PlatformAdmin
+	viewer        = authz.ProjectViewer
+	editor        = authz.ProjectEditor
+	projectAdmin  = authz.ProjectAdmin
+)
+
+// route is a key of the table.
+func route(method, path string) string { return middleware.RouteKey(method, path) }
+
+// Permissions is what each route of the API needs, deny by default: a
+// route missing here answers 403 to everyone (middleware.Authorize). It
+// mirrors the platform's authority (decision D-1), the one Argo CD, the
+// namespaces' RoleBindings and Forgejo enforce without the control plane:
+//
+//   - platform admin, a group of platform.yaml global.okdp.access.admins:
+//     users and groups (/v1/identity), the catalog's menu
+//     (/platform-services writes), the creation and the deletion of a
+//     project; a platform admin has every project role;
+//   - project viewer, editor, admin, a group's role in project.yaml access
+//     (okdp-project-<p> an editor by default): the reads of a project are
+//     a viewer's, its writes an editor's, its project.yaml an admin's;
+//   - authenticated: what the platform shows every user, its catalog and
+//     its settings; the lists of projects show the caller's only.
+//
+// A SQL statement on a connection runs with credentials of the project's
+// Secrets, which a viewer cannot read (the namespace's view role): an
+// editor's. On a Trino service it runs with the caller's own token, the
+// engine authorizing it: a viewer's. Write mode is an editor's
+// (SqlOptions.AuthorizeWrite).
+var Permissions = middleware.Permissions{
+	route(http.MethodGet, "/api/capabilities"): public,
+	route(http.MethodGet, "/api/me"):           authenticated,
+
+	route(http.MethodGet, "/api/projects"):               authenticated,
+	route(http.MethodGet, "/api/projects/stream"):        authenticated,
+	route(http.MethodPost, "/api/projects"):              platformAdmin,
+	route(http.MethodGet, "/api/projects/:name"):         viewer,
+	route(http.MethodPut, "/api/projects/:name"):         projectAdmin,
+	route(http.MethodDelete, "/api/projects/:name"):      platformAdmin,
+	route(http.MethodGet, "/api/projects/:name/metrics"): viewer,
+
+	route(http.MethodGet, "/api/v1/identity/users"):           platformAdmin,
+	route(http.MethodGet, "/api/v1/identity/users/:name"):     platformAdmin,
+	route(http.MethodPost, "/api/v1/identity/users"):          platformAdmin,
+	route(http.MethodPut, "/api/v1/identity/users/:name"):     platformAdmin,
+	route(http.MethodDelete, "/api/v1/identity/users/:name"):  platformAdmin,
+	route(http.MethodGet, "/api/v1/identity/groups"):          platformAdmin,
+	route(http.MethodPost, "/api/v1/identity/groups"):         platformAdmin,
+	route(http.MethodPut, "/api/v1/identity/groups/:name"):    platformAdmin,
+	route(http.MethodDelete, "/api/v1/identity/groups/:name"): platformAdmin,
+
+	route(http.MethodGet, "/api/projects/:name/secret-stores"):                   viewer,
+	route(http.MethodPost, "/api/projects/:name/secret-stores"):                  editor,
+	route(http.MethodPost, "/api/projects/:name/secret-stores/test"):             editor,
+	route(http.MethodPut, "/api/projects/:name/secret-stores/:storeName"):        editor,
+	route(http.MethodDelete, "/api/projects/:name/secret-stores/:storeName"):     editor,
+	route(http.MethodGet, "/api/projects/:name/secret-stores/:storeName/status"): viewer,
+	route(http.MethodGet, "/api/projects/:name/external-secrets"):                viewer,
+	route(http.MethodPost, "/api/projects/:name/external-secrets"):               editor,
+	route(http.MethodPut, "/api/projects/:name/external-secrets/:esName"):        editor,
+	route(http.MethodDelete, "/api/projects/:name/external-secrets/:esName"):     editor,
+	route(http.MethodGet, "/api/projects/:name/external-secrets/:esName/status"): viewer,
+
+	route(http.MethodGet, "/api/contracts"):                                      authenticated,
+	route(http.MethodGet, "/api/projects/:name/connections"):                     viewer,
+	route(http.MethodGet, "/api/projects/:name/connections/internal"):            viewer,
+	route(http.MethodGet, "/api/projects/:name/connections/selectable"):          viewer,
+	route(http.MethodGet, "/api/projects/:name/connections/:connName/consumers"): viewer,
+	route(http.MethodPost, "/api/projects/:name/connections/:connName/sql"):      editor,
+	route(http.MethodPost, "/api/projects/:name/connections"):                    editor,
+	route(http.MethodPost, "/api/projects/:name/connections/test"):               editor,
+	route(http.MethodPut, "/api/projects/:name/connections/:connName"):           editor,
+	route(http.MethodDelete, "/api/projects/:name/connections/:connName"):        editor,
+
+	route(http.MethodGet, "/api/platform-services"):                       authenticated,
+	route(http.MethodGet, "/api/platform-categories"):                     authenticated,
+	route(http.MethodPost, "/api/platform-services"):                      platformAdmin,
+	route(http.MethodPut, "/api/platform-services/:serviceName"):          platformAdmin,
+	route(http.MethodDelete, "/api/platform-services/:serviceName"):       platformAdmin,
+	route(http.MethodGet, "/api/platform-services/:serviceName/versions"): authenticated,
+	route(http.MethodGet, "/api/platform-services/:serviceName/schema"):   authenticated,
+	route(http.MethodGet, "/api/platform-services/:serviceName/inputs"):   authenticated,
+	route(http.MethodGet, "/api/profile-images"):                          authenticated,
+
+	route(http.MethodGet, "/api/projects/:name/services"):                                 viewer,
+	route(http.MethodGet, "/api/projects/:name/services/stream"):                          viewer,
+	route(http.MethodPost, "/api/projects/:name/services"):                                editor,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName"):                    viewer,
+	route(http.MethodPatch, "/api/projects/:name/services/:serviceName/parameters"):       editor,
+	route(http.MethodDelete, "/api/projects/:name/services/:serviceName"):                 editor,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName/pods"):               viewer,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName/pods/:podName/logs"): viewer,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName/metrics"):            viewer,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName/values"):             viewer,
+	route(http.MethodPost, "/api/projects/:name/services/:serviceName/sql"):               viewer,
+	route(http.MethodGet, "/api/projects/:name/services/:serviceName/claims"):             viewer,
+
+	route(http.MethodGet, "/api/projects/:name/claims"):               viewer,
+	route(http.MethodPost, "/api/projects/:name/claims"):              editor,
+	route(http.MethodPut, "/api/projects/:name/claims/:claimName"):    editor,
+	route(http.MethodDelete, "/api/projects/:name/claims/:claimName"): editor,
+	route(http.MethodGet, "/api/projects/:name/provisioning"):         viewer,
+
+	route(http.MethodGet, "/api/spark-config"):                            authenticated,
+	route(http.MethodGet, "/api/spark-app-schema"):                        authenticated,
+	route(http.MethodGet, "/api/projects/:name/spark-apps"):               viewer,
+	route(http.MethodGet, "/api/projects/:name/spark-apps/stream"):        viewer,
+	route(http.MethodPost, "/api/projects/:name/spark-apps"):              editor,
+	route(http.MethodPost, "/api/projects/:name/spark-apps/yaml"):         editor,
+	route(http.MethodGet, "/api/projects/:name/spark-apps/:appName"):      viewer,
+	route(http.MethodPut, "/api/projects/:name/spark-apps/:appName"):      editor,
+	route(http.MethodDelete, "/api/projects/:name/spark-apps/:appName"):   editor,
+	route(http.MethodGet, "/api/projects/:name/spark-apps/:appName/logs"): viewer,
+	route(http.MethodGet, "/api/projects/:name/spark-apps/:appName/ui"):   viewer,
+}
+
 // SetupRouter initializes the Gin router and defines routes. A nil verifier
-// serves the API without token verification, which only AUTH_DISABLED produces.
-func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler *handlers.CapabilitiesHandler, projectHandler *handlers.ProjectHandler, identityHandler *handlers.IdentityHandler, secretStoreHandler *handlers.SecretStoreHandler, externalSecretHandler *handlers.ExternalSecretHandler, serviceHandler *handlers.ServiceHandler, sparkHandler *handlers.SparkHandler, connectionHandler *handlers.ConnectionHandler, sqlHandler *handlers.SqlHandler, claimHandler *handlers.ClaimHandler) *gin.Engine {
+// serves the API without token verification, which only AUTH_DISABLED
+// produces, every caller holding every right; authority is the platform's
+// authority each route's permission is read against (Permissions).
+func SetupRouter(cfg *config.Config, verifier auth.Verifier, authority *authz.Authority, capabilitiesHandler *handlers.CapabilitiesHandler, projectHandler *handlers.ProjectHandler, identityHandler *handlers.IdentityHandler, secretStoreHandler *handlers.SecretStoreHandler, externalSecretHandler *handlers.ExternalSecretHandler, serviceHandler *handlers.ServiceHandler, sparkHandler *handlers.SparkHandler, connectionHandler *handlers.ConnectionHandler, sqlHandler *handlers.SqlHandler, claimHandler *handlers.ClaimHandler) *gin.Engine {
 	r := gin.New() // Use New() to skip default logger/recovery (we add them manually)
 
-	// Middleware
+	// Middleware: the request id first, for the log line and the error
+	// answers.
+	r.Use(middleware.RequestID())
 	r.Use(middleware.RequestLogger())
 	r.Use(gin.Recovery())
 	r.Use(middleware.SecurityHeaders())
 	r.Use(corsMiddleware(cfg))
 	r.Use(middleware.LimitRequestBody(middleware.DefaultMaxBodyBytes))
 
-	// Swagger documentation
-	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	// No /swagger route: the API's description is docs/swagger.yaml of the
+	// repository (make swagger), not served.
 
 	// Health check
 	r.GET("/health", func(c *gin.Context) {
@@ -42,9 +167,14 @@ func SetupRouter(cfg *config.Config, verifier auth.Verifier, capabilitiesHandler
 	// could leave its directory never reaches a store (RequireProject
 	// included).
 	api.Use(middleware.ValidatePathNames())
+	// Deny by default: each route the permission of Permissions, before
+	// any group middleware (RequireProject, RequireAPI) or handler.
+	api.Use(middleware.Authorize(Permissions, authority, verifier == nil))
 	{
 		// Platform capabilities (UI feature discovery)
 		api.GET("/capabilities", capabilitiesHandler.GetCapabilities)
+		// What the caller may do: platform admin, its role in each project.
+		api.GET("/me", projectHandler.GetCallerAccess)
 
 		// Projects (projects/<p>/project.yaml in the deployments repository)
 		api.GET("/projects", projectHandler.ListProjects)
@@ -199,7 +329,8 @@ func corsMiddleware(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", cfg.AllowedOrigins)
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Request-Id")
+		c.Writer.Header().Set("Access-Control-Expose-Headers", "X-Request-Id")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
 		// Tells caches the CORS answer is about the requesting origin, so one
 		// origin's cached response is never replayed to another.

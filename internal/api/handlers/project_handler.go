@@ -24,8 +24,8 @@ func NewProjectHandler(service service.ProjectService) *ProjectHandler {
 }
 
 // ListProjects godoc
-// @Summary      List all projects
-// @Description  List the projects declared in the deployments repository (projects/<p>/project.yaml), whether written by the console or by hand in Git
+// @Summary      List the caller's projects
+// @Description  List the projects declared in the deployments repository (projects/<p>/project.yaml), whether written by the console or by hand in Git, that the caller may see: those it has a role in (project.yaml access, okdp-project-<p> an editor by default), every one for a platform admin
 // @Tags         projects
 // @Accept       json
 // @Produce      json
@@ -35,10 +35,10 @@ func NewProjectHandler(service service.ProjectService) *ProjectHandler {
 func (h *ProjectHandler) ListProjects(c *gin.Context) {
 	projects, err := h.service.ListProjects(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, projects)
+	c.JSON(http.StatusOK, visibleProjects(c.Request.Context(), projects))
 }
 
 // GetProject godoc
@@ -60,8 +60,7 @@ func (h *ProjectHandler) GetProject(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 			return
 		}
-		logrus.WithError(err).Error("Failed to get project")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to get project")
 		return
 	}
 
@@ -97,7 +96,7 @@ func (h *ProjectHandler) CreateProject(c *gin.Context) {
 			return
 		}
 		logrus.Errorf("Failed to create project: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, project)
@@ -131,8 +130,7 @@ func (h *ProjectHandler) UpdateProject(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 			return
 		}
-		logrus.WithError(err).Error("Failed to update project")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to update project")
 		return
 	}
 
@@ -157,8 +155,7 @@ func (h *ProjectHandler) DeleteProject(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Project not found"})
 			return
 		}
-		logrus.WithError(err).Error("Failed to delete project")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err, "Failed to delete project")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -166,7 +163,7 @@ func (h *ProjectHandler) DeleteProject(c *gin.Context) {
 
 // StreamProjects godoc
 // @Summary      Stream project updates
-// @Description  Stream project updates using Server-Sent Events (SSE): an ADDED event per existing project, then ADDED/MODIFIED/DELETED as project.yaml files change in the deployments repository (read every few seconds, at once after a console change)
+// @Description  Stream project updates using Server-Sent Events (SSE): an ADDED event per existing project the caller may see, then ADDED/MODIFIED/DELETED as project.yaml files change in the deployments repository (read every few seconds, at once after a console change); a project the caller stops seeing (its access changed) is DELETED from its stream
 // @Tags         projects
 // @Produce      text/event-stream
 // @Success      200  {string}  string  "stream"
@@ -181,7 +178,7 @@ func (h *ProjectHandler) StreamProjects(c *gin.Context) {
 
 	events, err := h.service.WatchProjects(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeError(c, err)
 		return
 	}
 
@@ -189,6 +186,11 @@ func (h *ProjectHandler) StreamProjects(c *gin.Context) {
 	defer keepalive.Stop()
 
 	c.Writer.Flush()
+
+	// The projects this stream showed: a DELETED is sent of those only, and
+	// one the caller stops seeing is DELETED.
+	shown := map[string]bool{}
+	ctx := c.Request.Context()
 
 	for {
 		select {
@@ -203,6 +205,20 @@ func (h *ProjectHandler) StreamProjects(c *gin.Context) {
 		case event, ok := <-events:
 			if !ok {
 				return
+			}
+			name := event.Object.Name
+			switch {
+			case event.Type == "DELETED" && !shown[name]:
+				continue
+			case event.Type == "DELETED":
+				delete(shown, name)
+			case canView(ctx, name):
+				shown[name] = true
+			case shown[name]:
+				delete(shown, name)
+				event.Type = "DELETED"
+			default:
+				continue
 			}
 			c.SSEvent("message", event)
 			c.Writer.Flush()

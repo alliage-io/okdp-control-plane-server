@@ -103,6 +103,13 @@ spec:
               mountPath: /etc/okdp/forgejo
               readOnly: true
             {{- end }}
+            {{- if .Values.sqlEditor.caBundleSecret }}
+            # The platform's CA bundle: database certificates are verified
+            # against it.
+            - name: sql-ca
+              mountPath: /etc/okdp/sql-ca
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -129,4 +136,14 @@ spec:
             items:
               - key: token
                 path: token
+        {{- end }}
+        {{- with .Values.sqlEditor }}
+        {{- if .caBundleSecret }}
+        - name: sql-ca
+          secret:
+            secretName: {{ .caBundleSecret }}
+            items:
+              - key: {{ .caBundleKey | default "ca.crt" }}
+                path: ca.crt
+        {{- end }}
         {{- end }}

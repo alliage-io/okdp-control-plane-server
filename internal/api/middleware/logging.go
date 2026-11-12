@@ -28,6 +28,9 @@ func RequestLogger() gin.HandlerFunc {
 			"latency":  latency.String(), // Text output is cleaner than ns
 			"duration": latency,
 		}
+		if id := RequestIDOf(c); id != "" {
+			fields["requestId"] = id
+		}
 		if actor := CallerIdentity(c); actor != nil {
 			fields["actorSubject"] = actor.Subject
 			fields["actorUsername"] = actor.Username

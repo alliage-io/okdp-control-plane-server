@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 )
 
 // testTimeout bounds a connectivity test. The console waits for the answer, so
@@ -44,7 +46,14 @@ func failure(reason, format string, args ...any) *testFailure {
 // case worth naming. A check succeeds only when the endpoint answered *and*
 // accepted the credentials, since reachability alone would pass a wrong
 // password.
-type connectionTester func(ctx context.Context, values connectionValues) []models.ConnectionTestCheck
+//
+// A probe uses only the values the caller typed, never a Secret, and dials
+// through the guard: an address it refuses (loopback, link-local, the
+// Kubernetes API server) is never reached. What it reports is one of the
+// generic categories of models.TestReason* with a message of its own, never
+// the remote server's text: a probe must not read a service it has no
+// credentials for.
+type connectionTester func(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck
 
 // check turns the error of a single probe into a reportable verdict.
 func check(label, target string, decisive bool, err error) models.ConnectionTestCheck {
@@ -59,7 +68,7 @@ func check(label, target string, decisive bool, err error) models.ConnectionTest
 		result.Message = failed.message
 		result.Reason = failed.reason
 	} else {
-		result.Message = err.Error()
+		result.Message = "The connection failed."
 		result.Reason = models.TestReasonUnknown
 	}
 	return result
@@ -75,14 +84,14 @@ var connectionTesters = map[string]connectionTester{
 // testDatabaseServer picks the driver from the engine field. One type means one
 // contract, so the entry form is shared and only the probe differs. A database
 // publishes a single address, so there is a single check.
-func testDatabaseServer(ctx context.Context, values connectionValues) []models.ConnectionTestCheck {
+func testDatabaseServer(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck {
 	target := net.JoinHostPort(values.String("host"), fmt.Sprint(values.Int("port", 0)))
 	var err error
 	switch engine := values.String("engine"); engine {
 	case "postgresql":
-		err = testPostgreSQLAt(ctx, values)
+		err = testPostgreSQLAt(ctx, values, guard)
 	case "mysql":
-		err = testMySQLAt(ctx, values)
+		err = testMySQLAt(ctx, values, guard)
 	default:
 		err = failure(models.TestReasonInvalidConfig, "Unknown database engine %q", engine)
 	}
@@ -122,8 +131,12 @@ func (v connectionValues) Bool(name string, fallback bool) bool {
 func postgresConfig(values connectionValues) (*pgx.ConnConfig, error) {
 	config, err := pgx.ParseConfig("")
 	if err != nil {
-		return nil, failure(models.TestReasonInvalidConfig, "Could not build the connection settings: %v", err)
+		return nil, failure(models.TestReasonInvalidConfig, "Could not build the connection settings.")
 	}
+	// The defaults of an empty connection string fall back to the local
+	// host and sockets: the connection goes to the host it names, or
+	// nowhere.
+	config.Fallbacks = nil
 	config.Host = values.String("host")
 	config.Port = uint16(values.Int("port", 5432))
 	config.Database = values.String("dbName")
@@ -153,11 +166,12 @@ func postgresConfig(values connectionValues) (*pgx.ConnConfig, error) {
 	return config, nil
 }
 
-func testPostgreSQLAt(ctx context.Context, values connectionValues) error {
+func testPostgreSQLAt(ctx context.Context, values connectionValues, guard *netguard.Guard) error {
 	config, err := postgresConfig(values)
 	if err != nil {
 		return err
 	}
+	config.DialFunc = guard.Dialer(testTimeout).DialContext
 
 	ctx, cancel := context.WithTimeout(ctx, testTimeout)
 	defer cancel()
@@ -183,7 +197,7 @@ func classifyPostgresError(ctx context.Context, err error) error {
 		case "3D000":
 			return failure(models.TestReasonNotFound, "The database does not exist on this server.")
 		}
-		return failure(models.TestReasonUnknown, "The server rejected the connection: %s", pgErr.Message)
+		return failure(models.TestReasonUnknown, "The server rejected the connection.")
 	}
 	return classifyNetworkError(ctx, err)
 }
@@ -204,6 +218,8 @@ func mysqlConfig(values connectionValues) (*mysqldriver.Config, error) {
 	config.ReadTimeout = testTimeout
 	config.WriteTimeout = testTimeout
 	config.AllowNativePasswords = true
+	// The cleartext plugin sends the password as it is: never.
+	config.AllowCleartextPasswords = false
 
 	switch tlsMode := values.String("tls"); tlsMode {
 	case "", "false":
@@ -217,16 +233,18 @@ func mysqlConfig(values connectionValues) (*mysqldriver.Config, error) {
 	return config, nil
 }
 
-func testMySQLAt(ctx context.Context, values connectionValues) error {
+func testMySQLAt(ctx context.Context, values connectionValues, guard *netguard.Guard) error {
 	config, err := mysqlConfig(values)
 	if err != nil {
 		return err
 	}
+	config.DialFunc = guard.Dialer(testTimeout).DialContext
 
-	db, err := sql.Open("mysql", config.FormatDSN())
+	connector, err := mysqldriver.NewConnector(config)
 	if err != nil {
-		return failure(models.TestReasonInvalidConfig, "Could not build the connection settings: %v", err)
+		return failure(models.TestReasonInvalidConfig, "Could not build the connection settings.")
 	}
+	db := sql.OpenDB(connector)
 	defer func() { _ = db.Close() }()
 
 	ctx, cancel := context.WithTimeout(ctx, testTimeout)
@@ -247,7 +265,7 @@ func classifyMySQLError(ctx context.Context, err error) error {
 		case 1049:
 			return failure(models.TestReasonNotFound, "The database does not exist on this server.")
 		}
-		return failure(models.TestReasonUnknown, "The server rejected the connection: %s", mysqlErr.Message)
+		return failure(models.TestReasonUnknown, "The server rejected the connection.")
 	}
 	return classifyNetworkError(ctx, err)
 }
@@ -258,18 +276,18 @@ func classifyMySQLError(ctx context.Context, err error) error {
 // one a workload will use, so it is the decisive verdict. Testing only the
 // public one, as this did, reported success for a store the deployed service
 // could not reach.
-func testS3(ctx context.Context, values connectionValues) []models.ConnectionTestCheck {
+func testS3(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck {
 	internal := values.String("internalUrl")
 	public := values.String("apiUrl")
 
 	var checks []models.ConnectionTestCheck
 	if internal != "" {
-		checks = append(checks, check("In-cluster URL", internal, true, testS3At(ctx, values, internal)))
+		checks = append(checks, check("In-cluster URL", internal, true, testS3At(ctx, values, internal, guard)))
 	}
 	if public != "" {
 		// Decisive only when no in-cluster address exists, in which case this is
 		// the path the workload takes.
-		checks = append(checks, check("Public URL", public, internal == "", testS3At(ctx, values, public)))
+		checks = append(checks, check("Public URL", public, internal == "", testS3At(ctx, values, public, guard)))
 	}
 	if len(checks) == 0 {
 		checks = append(checks, check("S3 endpoint", "", true,
@@ -278,7 +296,7 @@ func testS3(ctx context.Context, values connectionValues) []models.ConnectionTes
 	return checks
 }
 
-func testS3At(ctx context.Context, values connectionValues, endpoint string) error {
+func testS3At(ctx context.Context, values connectionValues, endpoint string, guard *netguard.Guard) error {
 	host, secure, err := parseS3Endpoint(endpoint)
 	if err != nil {
 		return err
@@ -290,14 +308,17 @@ func testS3At(ctx context.Context, values connectionValues, endpoint string) err
 		lookup = minio.BucketLookupPath
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = guard.Dialer(testTimeout).DialContext
 	client, err := minio.New(host, &minio.Options{
 		Creds:        credentials.NewStaticV4(values.String("accessKey"), values.String("secretKey"), ""),
 		Secure:       secure,
 		Region:       values.String("region"),
 		BucketLookup: lookup,
+		Transport:    transport,
 	})
 	if err != nil {
-		return failure(models.TestReasonInvalidConfig, "Could not build the S3 client: %v", err)
+		return failure(models.TestReasonInvalidConfig, "Could not build the S3 client.")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, testTimeout)
@@ -346,8 +367,8 @@ func classifyS3Error(ctx context.Context, err error) error {
 		case "NoSuchBucket":
 			return failure(models.TestReasonNotFound, "The bucket does not exist on this server.")
 		}
-		if errResp.Message != "" {
-			return failure(models.TestReasonUnknown, "The server rejected the request: %s", errResp.Message)
+		if errResp.Code != "" || errResp.StatusCode != 0 {
+			return failure(models.TestReasonUnknown, "The server rejected the request.")
 		}
 	}
 	return classifyNetworkError(ctx, err)
@@ -363,14 +384,18 @@ func classifyNetworkError(ctx context.Context, err error) error {
 		return failure(models.TestReasonTimeout, "The server did not answer within %s.", testTimeout)
 	}
 
+	if errors.Is(err, netguard.ErrRefused) {
+		return failure(models.TestReasonUnreachable, "The control plane does not connect to this address: a loopback, link-local or Kubernetes API server address, unless the platform allows its network.")
+	}
+
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
-		return failure(models.TestReasonUnreachable, "The host %q could not be resolved.", dnsErr.Name)
+		return failure(models.TestReasonUnreachable, "The host could not be resolved.")
 	}
 
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
-		return failure(models.TestReasonUnreachable, "The server could not be reached: %v", opErr.Err)
+		return failure(models.TestReasonUnreachable, "The server could not be reached.")
 	}
 
 	var tlsErr *tls.CertificateVerificationError
@@ -378,5 +403,5 @@ func classifyNetworkError(ctx context.Context, err error) error {
 		return failure(models.TestReasonInvalidConfig, "The server certificate could not be verified. Relax the TLS setting, or make the issuing CA trusted by the cluster.")
 	}
 
-	return failure(models.TestReasonUnknown, "The connection failed: %v", err)
+	return failure(models.TestReasonUnknown, "The connection failed.")
 }

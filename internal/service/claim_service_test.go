@@ -62,7 +62,7 @@ claims:
 	for k, v := range extra {
 		files[k] = v
 	}
-	return gitops.NewMemoryStore(files)
+	return gitops.MustMemoryStore(files)
 }
 
 // claimsDeployments are the deployments of store, compiled with the claims

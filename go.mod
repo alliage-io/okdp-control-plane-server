@@ -15,8 +15,6 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/sirupsen/logrus v1.9.4
 	github.com/stretchr/testify v1.11.1
-	github.com/swaggo/files v1.0.1
-	github.com/swaggo/gin-swagger v1.6.1
 	github.com/swaggo/swag v1.16.6
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.35.0

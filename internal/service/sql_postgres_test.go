@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -23,7 +24,7 @@ import (
 func sqlOnConnections(t *testing.T) (*DefaultSqlService, *DefaultConnectionService) {
 	t.Helper()
 	connections, env, _ := newServiceUnderTest(t)
-	sql := NewDefaultSqlService(nil, SqlConnectionSource{Get: env.deployments.GetConnection, Secrets: env.secrets}, nil)
+	sql := NewDefaultSqlService(nil, SqlConnectionSource{Get: env.deployments.GetConnection, Secrets: env.secrets}, nil, SqlOptions{Guard: loopbackAllowed()})
 	return sql, connections
 }
 
@@ -55,7 +56,7 @@ func TestSqlOnConnectionResolution(t *testing.T) {
 func TestSqlOnConnectionMissingSecret(t *testing.T) {
 	ctx := context.Background()
 	connections, env, _ := newServiceUnderTest(t)
-	sql := NewDefaultSqlService(nil, SqlConnectionSource{Get: env.deployments.GetConnection, Secrets: env.secrets}, nil)
+	sql := NewDefaultSqlService(nil, SqlConnectionSource{Get: env.deployments.GetConnection, Secrets: env.secrets}, nil, SqlOptions{})
 	_, err := connections.Create(ctx, "demo", postgresRequest())
 	require.NoError(t, err)
 	delete(env.secrets.secrets, "demo/warehouse-credentials")
@@ -65,7 +66,7 @@ func TestSqlOnConnectionMissingSecret(t *testing.T) {
 }
 
 func TestSqlOnConnectionWithoutRepository(t *testing.T) {
-	_, err := NewDefaultSqlService(nil, SqlConnectionSource{}, nil).ExecuteOnConnection(context.Background(), "demo", "w", models.SqlQueryRequest{Query: "SELECT 1"})
+	_, err := NewDefaultSqlService(nil, SqlConnectionSource{}, nil, SqlOptions{}).ExecuteOnConnection(context.Background(), "demo", "w", models.SqlQueryRequest{Query: "SELECT 1"})
 	assert.True(t, errors.Is(err, ErrConnectionsUnavailable))
 }
 
@@ -97,14 +98,22 @@ func TestLineColumn(t *testing.T) {
 	assert.Equal(t, [2]int{1, 10}, [2]int{line, column}, "positions count characters, not bytes")
 }
 
-// TestSqlOnPostgres runs against a live server, e.g.
+// TestSqlOnPostgres runs against a live server with TLS and SCRAM (the
+// editor accepts nothing else), its certificate signed by the CA of the PEM
+// file OKDP_TEST_POSTGRES_CA, valid for the URL's host, e.g. a postgres:17
+// with ssl=on, ssl_cert_file/ssl_key_file mounted, password_encryption
+// scram-sha-256:
 //
-//	docker run -d --rm -p 55432:5432 -e POSTGRES_PASSWORD=pw postgres:17
-//	OKDP_TEST_POSTGRES_URL=postgres://postgres:pw@localhost:55432/postgres go test ./internal/service -run SqlOnPostgres
+//	OKDP_TEST_POSTGRES_URL=postgres://postgres:pw@127.0.0.1:55432/postgres \
+//	OKDP_TEST_POSTGRES_CA=ca.crt go test ./internal/service -run SqlOnPostgres
 func TestSqlOnPostgres(t *testing.T) {
 	raw := os.Getenv("OKDP_TEST_POSTGRES_URL")
 	if raw == "" {
 		t.Skip("OKDP_TEST_POSTGRES_URL is not set")
+	}
+	roots := x509.NewCertPool()
+	if pem, err := os.ReadFile(os.Getenv("OKDP_TEST_POSTGRES_CA")); err == nil {
+		roots.AppendCertsFromPEM(pem)
 	}
 	u, err := url.Parse(raw)
 	require.NoError(t, err)
@@ -114,19 +123,26 @@ func TestSqlOnPostgres(t *testing.T) {
 
 	ctx := context.Background()
 	sql, connections := sqlOnConnections(t)
+	sql.rootCAs = roots
 	req := postgresRequest()
 	req.Values["host"] = u.Hostname()
 	req.Values["port"] = float64(port)
 	req.Values["dbName"] = strings.TrimPrefix(u.Path, "/")
 	req.Values["username"] = u.User.Username()
 	req.Values["password"] = password
-	req.Values["sslMode"] = "prefer"
+	req.Values["sslMode"] = "verify-full"
 	_, err = connections.Create(ctx, "demo", req)
 	require.NoError(t, err)
 
 	run := func(query string, maxRows int) *models.SqlQueryResult {
 		t.Helper()
-		res, err := sql.ExecuteOnConnection(ctx, "demo", "warehouse", models.SqlQueryRequest{Query: query, MaxRows: maxRows})
+		res, err := sql.ExecuteOnConnection(ctx, "demo", "warehouse", models.SqlQueryRequest{Query: query, MaxRows: maxRows, Write: true})
+		require.NoError(t, err)
+		return res
+	}
+	readOnly := func(query string) *models.SqlQueryResult {
+		t.Helper()
+		res, err := sql.ExecuteOnConnection(ctx, "demo", "warehouse", models.SqlQueryRequest{Query: query})
 		require.NoError(t, err)
 		return res
 	}
@@ -162,6 +178,15 @@ INSERT INTO okdp_sql_test SELECT g, 'n' || g, g * 1.5, jsonb_build_object('g', g
 	assert.Equal(t, "22012", res.Error.ErrorName)
 	res = run("SELECT count(*) FROM okdp_sql_test WHERE id = 100", 0)
 	assert.Equal(t, [][]any{{int64(0)}}, res.Rows, "a failing batch rolls back its implicit transaction")
+
+	res = readOnly("DELETE FROM okdp_sql_test")
+	require.NotNil(t, res.Error)
+	assert.Equal(t, "25006", res.Error.ErrorName, "read-only unless asked")
+	res = readOnly("SELECT 1; DELETE FROM okdp_sql_test")
+	require.NotNil(t, res.Error, "one statement at a time when read-only")
+	res = readOnly("SELECT count(*) FROM okdp_sql_test")
+	require.Nil(t, res.Error)
+	assert.Equal(t, [][]any{{int64(5)}}, res.Rows)
 
 	res = run("DROP TABLE okdp_sql_test", 0)
 	require.Nil(t, res.Error)

@@ -16,7 +16,9 @@ import (
 
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
+	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 )
 
 // fakeSecrets is an in-memory ConnectionSecretRepository with the real
@@ -25,12 +27,18 @@ type fakeSecrets struct {
 	mu      sync.Mutex
 	secrets map[string]map[string][]byte
 	managed map[string]bool
+	labels  map[string]map[string]string
 	deleted []string
 	failPut error
 }
 
 func newFakeSecrets() *fakeSecrets {
-	return &fakeSecrets{secrets: map[string]map[string][]byte{}, managed: map[string]bool{}}
+	return &fakeSecrets{secrets: map[string]map[string][]byte{}, managed: map[string]bool{}, labels: map[string]map[string]string{}}
+}
+
+// label sets labels on a Secret of the fake.
+func (f *fakeSecrets) label(namespace, name string, labels map[string]string) {
+	f.labels[namespace+"/"+name] = labels
 }
 
 func (f *fakeSecrets) put(namespace, name string, managed bool, keys ...string) {
@@ -86,11 +94,19 @@ func (f *fakeSecrets) InspectSecret(_ context.Context, namespace, name string) (
 	return repository.SecretContent{Keys: keys, Managed: f.managed[namespace+"/"+name]}, true, nil
 }
 
-func (f *fakeSecrets) ReadSecret(_ context.Context, namespace, name string) (map[string][]byte, bool, error) {
+func (f *fakeSecrets) ReadSecret(_ context.Context, namespace, name string) (map[string][]byte, map[string]string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	data, ok := f.secrets[namespace+"/"+name]
-	return data, ok, nil
+	key := namespace + "/" + name
+	data, ok := f.secrets[key]
+	labels := map[string]string{}
+	for k, v := range f.labels[key] {
+		labels[k] = v
+	}
+	if f.managed[key] {
+		labels[crd.LabelManagedBy] = crd.ManagedByValue
+	}
+	return data, labels, ok, nil
 }
 
 // fakeDescriptors serves fixed instance descriptors.
@@ -120,7 +136,7 @@ type testEnv struct {
 
 func newServiceUnderTest(t *testing.T) (*DefaultConnectionService, *testEnv, *gitops.MemoryStore) {
 	t.Helper()
-	env := &testEnv{store: gitops.NewMemoryStore(map[string]string{"projects/demo/project.yaml": "{}\n"}), secrets: newFakeSecrets(), descriptors: &fakeDescriptors{}}
+	env := &testEnv{store: gitops.MustMemoryStore(map[string]string{"projects/demo/project.yaml": "{}\n"}), secrets: newFakeSecrets(), descriptors: &fakeDescriptors{}}
 	env.deployments = gitops.NewDeployments(env.store)
 	catalog, err := testContractCatalog()
 	require.NoError(t, err)
@@ -541,7 +557,7 @@ func TestDatabaseProbeRejectsAnUnknownEngine(t *testing.T) {
 		"engine": "oracle",
 		"host":   "db.example.com",
 		"port":   float64(1521),
-	})
+	}, netguard.Default())
 
 	require.Len(t, checks, 1)
 	assert.False(t, checks[0].Success)

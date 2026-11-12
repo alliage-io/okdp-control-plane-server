@@ -41,7 +41,7 @@ func TestMissingKeysNameThePlatformValues(t *testing.T) {
 
 // The platform values are platform.yaml, in Git.
 func TestPlatformValuesAreThePlatformFile(t *testing.T) {
-	store := gitops.NewMemoryStore(map[string]string{
+	store := gitops.MustMemoryStore(map[string]string{
 		compiler.PlatformFile: "global:\n  okdp:\n    ingress:\n      suffix: okdp.sandbox\n",
 	})
 	repo := NewPlatformRepository(gitops.NewDeployments(store))
@@ -52,7 +52,7 @@ func TestPlatformValuesAreThePlatformFile(t *testing.T) {
 }
 
 func TestNoPlatformValuesAtAllIsAnError(t *testing.T) {
-	repo := NewPlatformRepository(gitops.NewDeployments(gitops.NewMemoryStore(nil)))
+	repo := NewPlatformRepository(gitops.NewDeployments(gitops.MustMemoryStore(nil)))
 	if _, err := repo.GetIngressSuffix(context.Background()); err == nil || !strings.Contains(err.Error(), compiler.PlatformFile) {
 		t.Fatalf("err = %v, want one naming %s", err, compiler.PlatformFile)
 	}

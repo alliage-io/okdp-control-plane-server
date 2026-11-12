@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,7 +109,7 @@ func trinoSchema() map[string]any {
 
 func newGitServiceUnderTest(t *testing.T, engine repository.EngineAdapter, descriptors repository.DescriptorRepository) (*DefaultServiceService, *gitops.MemoryStore) {
 	t.Helper()
-	store := gitops.NewMemoryStore(map[string]string{
+	store := gitops.MustMemoryStore(map[string]string{
 		compiler.PlatformFile:        "{}\n",
 		"projects/demo/project.yaml": "connections:\n  lake-hms:\n    contract: hive\n    thriftUri: thrift://hms:9083\n",
 	})
@@ -449,6 +452,11 @@ func TestReleaseNameCollisionIsNotADuplicateInstance(t *testing.T) {
 		if err := tx.WriteFile(treeedit.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n")); err != nil {
 			return err
 		}
+		// Every connection is checked at its declaration against its
+		// contract, which the test catalog has none of: no connection.
+		if err := tx.WriteFile("projects/demo/project.yaml", []byte("{}\n")); err != nil {
+			return err
+		}
 		return tx.WriteFile("projects/demo-sql/project.yaml", []byte("{}\n"))
 	})
 	require.NoError(t, err)
@@ -478,4 +486,50 @@ func TestDeployThatDoesNotCompileIsRefusedWithItsCode(t *testing.T) {
 	assert.True(t, strings.HasPrefix(err.Error(), "instance demo/sql does not compile: "), err.Error())
 	assert.Contains(t, err.Error(), `service "trino" is in the catalog of no repository`)
 	assert.Len(t, store.Messages, before)
+}
+
+// identityPlatform points every identity setting at a Keycloak, the
+// provisioning backend keycloak among them.
+type identityPlatform struct {
+	stubPlatform
+	keycloak string
+}
+
+func (p identityPlatform) GetIdentityProvisioningProvider(context.Context) (string, error) {
+	return "keycloak", nil
+}
+func (p identityPlatform) GetOidcIssuer(context.Context) (string, error) {
+	return p.keycloak + "/realms/okdp", nil
+}
+
+// Deleting an instance deletes no OAuth client: the control plane made
+// none, and the client named after the release (okdp-control-plane, the
+// console's own here) is not its to remove (SRV-09).
+func TestDeletingAnInstanceKeepsTheKeycloakClients(t *testing.T) {
+	var calls atomic.Int32
+	keycloak := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer keycloak.Close()
+	store := gitops.MustMemoryStore(map[string]string{
+		compiler.PlatformFile:        "{}\n",
+		"projects/okdp/project.yaml": "{}\n",
+	})
+	svc := NewDefaultServiceService(ServiceDeps{
+		Deployments:   gitops.NewDeployments(store),
+		PlatformRepo:  identityPlatform{keycloak: keycloak.URL},
+		SchemaService: stubSchema{schema: trinoSchema()},
+		Engine:        stubEngine{},
+		K8sClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+			{Version: "v1", Resource: "pods"}:                   "PodList",
+			{Version: "v1", Resource: "persistentvolumeclaims"}: "PersistentVolumeClaimList",
+			{Version: "v1", Resource: "events"}:                 "EventList",
+		}),
+	})
+	_, err := svc.DeployService(aliceContext(), "okdp", models.ServiceRequest{Service: "trino", InstanceName: "control-plane"})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.DeleteService(aliceContext(), "okdp", "control-plane"))
+	assert.Zero(t, calls.Load(), "Keycloak is never called on a delete")
 }

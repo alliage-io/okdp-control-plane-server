@@ -4,8 +4,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 )
 
 // A probe reading a field the descriptor does not write is invisible: the value
@@ -58,7 +62,7 @@ func TestS3ProbesEveryAddressTheContractPublishes(t *testing.T) {
 		"bucket":      "warehouse",
 		"accessKey":   "key",
 		"secretKey":   "secret",
-	})
+	}, netguard.Default())
 
 	require.Len(t, checks, 2)
 	assert.Equal(t, "In-cluster URL", checks[0].Label)
@@ -75,9 +79,50 @@ func TestS3MakesThePublicURLDecisiveWhenItIsTheOnlyOne(t *testing.T) {
 		"bucket":    "warehouse",
 		"accessKey": "key",
 		"secretKey": "secret",
-	})
+	}, netguard.Default())
 
 	require.Len(t, checks, 1)
 	assert.Equal(t, "Public URL", checks[0].Label)
 	assert.True(t, checks[0].Decisive)
+}
+
+// A test dials through the editor's guard: the pod's own loopback (or the
+// cloud metadata endpoint) is not a target, whatever the caller typed.
+func TestATestNeverReachesTheLoopback(t *testing.T) {
+	f := startFakePG(t, nil, askCleartext)
+	checks := testDatabaseServer(context.Background(), connectionValues{
+		"engine": "postgresql", "host": "127.0.0.1", "port": float64(f.port),
+		"username": "u", "password": "p", "sslMode": "disable",
+	}, netguard.Default())
+	require.Len(t, checks, 1)
+	assert.False(t, checks[0].Success)
+	assert.Equal(t, models.TestReasonUnreachable, checks[0].Reason)
+	select {
+	case <-f.startup:
+		t.Fatal("the server was reached")
+	default:
+	}
+
+	checks = testS3(context.Background(), connectionValues{
+		"apiUrl": "http://169.254.169.254", "bucket": "warehouse", "accessKey": "k", "secretKey": "s",
+	}, netguard.Default())
+	require.Len(t, checks, 1)
+	assert.Equal(t, models.TestReasonUnreachable, checks[0].Reason)
+}
+
+// What a server answers is reduced to a category: its text never reaches
+// the caller, a test is no way to read a service.
+func TestATestReportsNoRemoteText(t *testing.T) {
+	f := startFakePG(t, nil, func(be *pgproto3.Backend) {
+		be.Send(&pgproto3.ErrorResponse{Severity: "FATAL", Code: "XX000", Message: "internal banner s3cr3t"})
+		_ = be.Flush()
+	})
+	checks := testDatabaseServer(context.Background(), connectionValues{
+		"engine": "postgresql", "host": "127.0.0.1", "port": float64(f.port),
+		"username": "u", "password": "p", "sslMode": "disable",
+	}, loopbackAllowed())
+	require.Len(t, checks, 1)
+	assert.False(t, checks[0].Success)
+	assert.NotContains(t, checks[0].Message, "s3cr3t")
+	assert.Equal(t, models.TestReasonUnknown, checks[0].Reason)
 }

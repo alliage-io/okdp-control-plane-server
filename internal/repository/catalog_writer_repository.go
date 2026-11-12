@@ -38,8 +38,7 @@ func NewCatalogWriterRepository(deployments *gitops.Deployments) CatalogWriterRe
 // concurrent edits don't clobber each other.
 func (r *gitCatalogWriterRepository) mutateCategories(ctx context.Context, target string, fn func(categories []interface{}) ([]interface{}, error)) error {
 	_, err := r.deployments.UpdateCatalog(ctx, auth.ActorFrom(ctx), target, func(doc map[string]interface{}) error {
-		body := unwrapCatalog(doc)
-		categories, _ := body["categories"].([]interface{})
+		categories, _ := doc["categories"].([]interface{})
 		updated, err := fn(categories)
 		if err != nil {
 			return err
@@ -47,7 +46,7 @@ func (r *gitCatalogWriterRepository) mutateCategories(ctx context.Context, targe
 		if updated == nil {
 			updated = []interface{}{}
 		}
-		body["categories"] = updated
+		doc["categories"] = updated
 		return nil
 	})
 	if err != nil {

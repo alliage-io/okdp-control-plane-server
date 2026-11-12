@@ -6,8 +6,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // ClaimHandler handles the claims of a project: its named claims, the
@@ -158,15 +156,5 @@ func (h *ClaimHandler) GetInstanceClaims(c *gin.Context) {
 // or instance (404), a claim of that name (409), rejected input (400, the
 // compiler's message for a compile that fails), anything else (500).
 func (h *ClaimHandler) writeError(c *gin.Context, err error, logMessage string) {
-	switch {
-	case apierrors.IsNotFound(err):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case apierrors.IsAlreadyExists(err):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-	case service.IsValidationError(err):
-		c.JSON(http.StatusBadRequest, validationBody(err))
-	default:
-		logrus.WithError(err).Error(logMessage)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-	}
+	writeError(c, err, logMessage)
 }

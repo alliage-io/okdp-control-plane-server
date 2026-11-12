@@ -26,7 +26,7 @@ func (refuseAllVerifier) Verify(context.Context, string) (*auth.Identity, error)
 // dereference one and panic, so a gap in the guard cannot read as a pass.
 func testRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	return SetupRouter(&config.Config{}, refuseAllVerifier{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return SetupRouter(&config.Config{}, refuseAllVerifier{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // Repeated from the middleware on purpose: one more exemption has to be added
@@ -82,7 +82,7 @@ func TestTheConsoleBootstrapStaysAnonymous(t *testing.T) {
 	}
 }
 
-func TestHealthAndSwaggerStayOutsideTheGuardedGroup(t *testing.T) {
+func TestHealthStaysOutsideTheGuardedGroup(t *testing.T) {
 	r := testRouter()
 
 	w := httptest.NewRecorder()
@@ -90,11 +90,15 @@ func TestHealthAndSwaggerStayOutsideTheGuardedGroup(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("/health answered %d without a token, wanted 200", w.Code)
 	}
+	if w.Header().Get("X-Request-Id") == "" {
+		t.Fatal("every answer carries its request id")
+	}
 
+	// No Swagger UI is served (SRV-13): its spec was never registered.
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil))
-	if w.Code == http.StatusUnauthorized {
-		t.Fatal("/swagger requires a token, which no browser will send")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/swagger answered %d, wanted 404", w.Code)
 	}
 }
 

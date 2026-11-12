@@ -4,16 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
+
+	compiler "github.com/okdp/okdp-compiler"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	k8syaml "sigs.k8s.io/yaml"
 )
 
 type SparkService interface {
@@ -34,56 +35,81 @@ type DefaultSparkService struct {
 	sparkRepo   repository.SparkAppRepository
 	contextRepo repository.PlatformRepository
 	typedClient kubernetes.Interface
+	// tree is the compile of the tree: the spark-rbac instance of each
+	// project (sparkPolicy).
+	tree func(ctx context.Context) (*compiler.Tree, error)
 }
 
-func NewDefaultSparkService(sparkRepo repository.SparkAppRepository, contextRepo repository.PlatformRepository, typedClient kubernetes.Interface) *DefaultSparkService {
+// NewDefaultSparkService builds the Spark service; tree is the compile of
+// the tree the policy of a project's SparkApplications is read from.
+func NewDefaultSparkService(sparkRepo repository.SparkAppRepository, contextRepo repository.PlatformRepository, typedClient kubernetes.Interface, tree func(ctx context.Context) (*compiler.Tree, error)) *DefaultSparkService {
 	return &DefaultSparkService{
 		sparkRepo:   sparkRepo,
 		contextRepo: contextRepo,
 		typedClient: typedClient,
+		tree:        tree,
 	}
 }
 
+// sparkTTL is how long a finished SparkApplication is kept.
+const sparkTTL = int64(3600)
+
+// SubmitApp builds a SparkApplication from the request, checked against
+// the project's policy (sparkPolicy): its driver and executors run as the
+// project's spark-rbac ServiceAccount.
 func (s *DefaultSparkService) SubmitApp(ctx context.Context, project string, req models.SparkAppRequest) (*models.SparkAppInstance, error) {
+	policy, err := s.policy(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	if err := policy.checkSparkRequest(req); err != nil {
+		return nil, err
+	}
+	return s.create(ctx, project, s.build(ctx, project, policy, req))
+}
+
+// SubmitAppYAML reads a SparkApplication YAML into the form's request
+// (parseSparkManifest: any field the server does not build is refused) and
+// submits it as SubmitApp does.
+func (s *DefaultSparkService) SubmitAppYAML(ctx context.Context, project string, req models.SparkAppYAMLRequest) (*models.SparkAppInstance, error) {
+	policy, err := s.policy(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := parseSparkManifest(req.YAML, project, policy.serviceAccount)
+	if err != nil {
+		return nil, err
+	}
+	form := manifest.request()
+	if err := policy.checkSparkRequest(form); err != nil {
+		return nil, err
+	}
+	app := s.build(ctx, project, policy, form)
+	manifest.extras(app)
+	return s.create(ctx, project, app)
+}
+
+func (s *DefaultSparkService) create(ctx context.Context, project string, app *crd.SparkApplication) (*models.SparkAppInstance, error) {
+	if err := s.sparkRepo.Create(ctx, project, app); err != nil {
+		return nil, err
+	}
+	return &models.SparkAppInstance{
+		Name:   app.Name,
+		Type:   app.Spec.Type,
+		Mode:   app.Spec.Mode,
+		Image:  app.Spec.Image,
+		Status: "SUBMITTED",
+	}, nil
+}
+
+// build is the SparkApplication of a checked request.
+func (s *DefaultSparkService) build(ctx context.Context, project string, policy *sparkPolicy, req models.SparkAppRequest) *crd.SparkApplication {
 	mode := req.Mode
 	if mode == "" {
 		mode = "cluster"
 	}
-
-	defaultTTL := int64(3600)
-
-	sparkConf := req.SparkConf
-	if sparkConf == nil {
-		sparkConf = map[string]string{}
-	}
-	if _, ok := sparkConf["spark.ui.enabled"]; !ok {
-		sparkConf["spark.ui.enabled"] = "true"
-	}
-	if _, ok := sparkConf["spark.ui.port"]; !ok {
-		sparkConf["spark.ui.port"] = "4040"
-	}
-	if _, ok := sparkConf["spark.ui.reverseProxy"]; !ok {
-		sparkConf["spark.ui.reverseProxy"] = "true"
-	}
-	if _, ok := sparkConf["spark.ui.reverseProxyUrl"]; !ok {
-		if ingressSuffix, _ := s.contextRepo.GetIngressSuffix(ctx); ingressSuffix != "" {
-			releaseName := project + "-spark-history-server"
-			sparkConf["spark.ui.reverseProxyUrl"] = fmt.Sprintf("https://%s.%s", releaseName, ingressSuffix)
-		}
-	}
-
-	eventPVCName := s.findEventLogPVC(ctx, project)
-	if eventPVCName != "" {
-		if _, ok := sparkConf["spark.eventLog.enabled"]; !ok {
-			sparkConf["spark.eventLog.enabled"] = "true"
-		}
-		if _, ok := sparkConf["spark.eventLog.dir"]; !ok {
-			sparkConf["spark.eventLog.dir"] = "file:///mnt/spark-events"
-		}
-		s.injectEventLogVolumeConf(sparkConf, eventPVCName)
-	}
-
-	app := &crd.SparkApplication{
+	ttl := sparkTTL
+	return &crd.SparkApplication{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: crd.SparkAppAPIVersion,
 			Kind:       crd.SparkAppKind,
@@ -103,109 +129,59 @@ func (s *DefaultSparkService) SubmitApp(ctx context.Context, project string, req
 			MainApplicationFile: req.MainApplicationFile,
 			Arguments:           req.Arguments,
 			SparkVersion:        req.SparkVersion,
-			SparkConf:           sparkConf,
-			TimeToLiveSeconds:   &defaultTTL,
+			SparkConf:           s.completeConf(ctx, project, req.SparkConf),
+			TimeToLiveSeconds:   &ttl,
 			Driver: crd.SparkPodSpec{
-				Cores:  req.DriverCores,
-				Memory: req.DriverMemory,
+				Cores:          req.DriverCores,
+				Memory:         req.DriverMemory,
+				ServiceAccount: policy.serviceAccount,
 			},
 			Executor: crd.ExecutorSpec{
 				SparkPodSpec: crd.SparkPodSpec{
-					Cores:  req.ExecutorCores,
-					Memory: req.ExecutorMemory,
+					Cores:          req.ExecutorCores,
+					Memory:         req.ExecutorMemory,
+					ServiceAccount: policy.serviceAccount,
 				},
 				Instances: req.ExecutorInstances,
 			},
 		},
 	}
-
-	if err := s.sparkRepo.Create(ctx, project, app); err != nil {
-		return nil, err
-	}
-
-	instance := &models.SparkAppInstance{
-		Name:   req.Name,
-		Type:   req.Type,
-		Mode:   mode,
-		Image:  req.Image,
-		Status: "SUBMITTED",
-	}
-	return instance, nil
 }
 
-func (s *DefaultSparkService) SubmitAppYAML(ctx context.Context, project string, req models.SparkAppYAMLRequest) (*models.SparkAppInstance, error) {
-	obj := &unstructured.Unstructured{}
-	if err := k8syaml.Unmarshal([]byte(req.YAML), &obj.Object); err != nil {
-		return nil, fmt.Errorf("invalid YAML: %w", err)
+// completeConf is a checked sparkConf with what the server adds: the
+// Spark UI behind the project's history server, the event log on its
+// volume when the project has one.
+func (s *DefaultSparkService) completeConf(ctx context.Context, project string, requested map[string]string) map[string]string {
+	sparkConf := map[string]string{}
+	for k, v := range requested {
+		sparkConf[k] = v
+	}
+	if _, ok := sparkConf["spark.ui.enabled"]; !ok {
+		sparkConf["spark.ui.enabled"] = "true"
+	}
+	if _, ok := sparkConf["spark.ui.port"]; !ok {
+		sparkConf["spark.ui.port"] = "4040"
+	}
+	if _, ok := sparkConf["spark.ui.reverseProxy"]; !ok {
+		sparkConf["spark.ui.reverseProxy"] = "true"
+	}
+	if _, ok := sparkConf["spark.ui.reverseProxyUrl"]; !ok {
+		if ingressSuffix, _ := s.contextRepo.GetIngressSuffix(ctx); ingressSuffix != "" {
+			releaseName := project + "-spark-history-server"
+			sparkConf["spark.ui.reverseProxyUrl"] = fmt.Sprintf("https://%s.%s", releaseName, ingressSuffix)
+		}
 	}
 
-	if obj.GetAPIVersion() != crd.SparkAppAPIVersion || obj.GetKind() != crd.SparkAppKind {
-		return nil, fmt.Errorf("expected apiVersion %s kind %s, got %s %s",
-			crd.SparkAppAPIVersion, crd.SparkAppKind, obj.GetAPIVersion(), obj.GetKind())
+	if eventPVCName := s.findEventLogPVC(ctx, project); eventPVCName != "" {
+		if _, ok := sparkConf["spark.eventLog.enabled"]; !ok {
+			sparkConf["spark.eventLog.enabled"] = "true"
+		}
+		if _, ok := sparkConf["spark.eventLog.dir"]; !ok {
+			sparkConf["spark.eventLog.dir"] = "file:///mnt/spark-events"
+		}
+		s.injectEventLogVolumeConf(sparkConf, eventPVCName)
 	}
-
-	labels := obj.GetLabels()
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-	labels[crd.LabelProject] = project
-	obj.SetLabels(labels)
-
-	spec, _ := obj.Object["spec"].(map[string]interface{})
-	if spec != nil {
-		if _, hasTTL := spec["timeToLiveSeconds"]; !hasTTL {
-			spec["timeToLiveSeconds"] = int64(3600)
-		}
-		sparkConf, _ := spec["sparkConf"].(map[string]interface{})
-		if sparkConf == nil {
-			sparkConf = map[string]interface{}{}
-		}
-		if _, ok := sparkConf["spark.ui.enabled"]; !ok {
-			sparkConf["spark.ui.enabled"] = "true"
-		}
-		if _, ok := sparkConf["spark.ui.port"]; !ok {
-			sparkConf["spark.ui.port"] = "4040"
-		}
-		if _, ok := sparkConf["spark.ui.reverseProxy"]; !ok {
-			sparkConf["spark.ui.reverseProxy"] = "true"
-		}
-		if _, ok := sparkConf["spark.ui.reverseProxyUrl"]; !ok {
-			if ingressSuffix, _ := s.contextRepo.GetIngressSuffix(ctx); ingressSuffix != "" {
-				releaseName := project + "-spark-history-server"
-				sparkConf["spark.ui.reverseProxyUrl"] = fmt.Sprintf("https://%s.%s", releaseName, ingressSuffix)
-			}
-		}
-
-		eventPVCName := s.findEventLogPVC(ctx, project)
-		if eventPVCName != "" {
-			if _, ok := sparkConf["spark.eventLog.enabled"]; !ok {
-				sparkConf["spark.eventLog.enabled"] = "true"
-			}
-			if _, ok := sparkConf["spark.eventLog.dir"]; !ok {
-				sparkConf["spark.eventLog.dir"] = "file:///mnt/spark-events"
-			}
-			s.injectEventLogVolumeConfUnstructured(sparkConf, eventPVCName)
-		}
-
-		spec["sparkConf"] = sparkConf
-	}
-
-	if err := s.sparkRepo.CreateRaw(ctx, project, obj); err != nil {
-		return nil, err
-	}
-
-	appType, _ := spec["type"].(string)
-	mode, _ := spec["mode"].(string)
-	image, _ := spec["image"].(string)
-
-	instance := &models.SparkAppInstance{
-		Name:   obj.GetName(),
-		Type:   appType,
-		Mode:   mode,
-		Image:  image,
-		Status: "SUBMITTED",
-	}
-	return instance, nil
+	return sparkConf
 }
 
 func (s *DefaultSparkService) GetApp(ctx context.Context, project, name string) (*models.SparkAppInstance, error) {
@@ -240,11 +216,30 @@ func (s *DefaultSparkService) WatchApps(ctx context.Context, project string) (wa
 }
 
 func (s *DefaultSparkService) UpdateApp(ctx context.Context, project, appName string, req models.SparkAppUpdateRequest) (*models.SparkAppInstance, error) {
+	policy, err := s.policy(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	if req.Image != "" {
+		if err := policy.checkImage(req.Image); err != nil {
+			return nil, err
+		}
+	}
+	if req.SparkConf != nil {
+		if err := checkSparkConf(req.SparkConf); err != nil {
+			return nil, err
+		}
+	}
 	app, err := s.sparkRepo.Get(ctx, project, appName)
 	if err != nil {
 		return nil, err
 	}
 
+	// The typed object holds only the fields the server builds: what else
+	// the stored one had is dropped by the update. Its pods run as the
+	// project's ServiceAccount, whatever it was.
+	app.Spec.Driver.ServiceAccount = policy.serviceAccount
+	app.Spec.Executor.ServiceAccount = policy.serviceAccount
 	if req.Image != "" {
 		app.Spec.Image = req.Image
 	}
@@ -273,7 +268,9 @@ func (s *DefaultSparkService) UpdateApp(ctx context.Context, project, appName st
 		app.Spec.Executor.Memory = req.ExecutorMemory
 	}
 	if req.SparkConf != nil {
-		app.Spec.SparkConf = req.SparkConf
+		app.Spec.SparkConf = s.completeConf(ctx, project, req.SparkConf)
+	} else if err := checkSparkConf(withoutServerConf(app.Spec.SparkConf)); err != nil {
+		return nil, err
 	}
 
 	if err := s.sparkRepo.Update(ctx, project, app); err != nil {
@@ -411,15 +408,15 @@ func (s *DefaultSparkService) injectEventLogVolumeConf(sparkConf map[string]stri
 	}
 }
 
-func (s *DefaultSparkService) injectEventLogVolumeConfUnstructured(sparkConf map[string]interface{}, pvcName string) {
-	prefix := "spark.kubernetes.driver.volumes.persistentVolumeClaim.spark-events."
-	if _, ok := sparkConf[prefix+"options.claimName"]; !ok {
-		sparkConf[prefix+"options.claimName"] = pvcName
-		sparkConf[prefix+"mount.path"] = "/mnt/spark-events"
+// withoutServerConf is a stored sparkConf without the keys the server adds
+// (completeConf): the event log volume.
+func withoutServerConf(conf map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range conf {
+		if strings.Contains(k, ".volumes.persistentVolumeClaim.spark-events.") {
+			continue
+		}
+		out[k] = v
 	}
-	exPrefix := "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-events."
-	if _, ok := sparkConf[exPrefix+"options.claimName"]; !ok {
-		sparkConf[exPrefix+"options.claimName"] = pvcName
-		sparkConf[exPrefix+"mount.path"] = "/mnt/spark-events"
-	}
+	return out
 }

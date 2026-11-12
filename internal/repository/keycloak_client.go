@@ -66,6 +66,10 @@ func (e *kcAPIError) Error() string {
 	return fmt.Sprintf("keycloak request %s %s failed (%d): %s", e.Method, e.Path, e.Status, e.Body)
 }
 
+// Conflict reports a refusal of Keycloak because the user or group exists
+// already: the API answers 409, Keycloak's body stays in the log.
+func (e *kcAPIError) Conflict() bool { return e.Status == http.StatusConflict }
+
 func newKeycloakClient(cfg *config.Config, issuer KeycloakIssuerSource) *keycloakClient {
 	// Cloned, not built from scratch: a bare Transport has no Proxy, and the
 	// chart passes the egress proxy the pod must go through.

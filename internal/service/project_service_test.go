@@ -23,7 +23,7 @@ const handWritten = "# declared by hand\ndescription: Demo project\nglobal: {}\n
 
 func newProjectServiceUnderTest(files map[string]string) (*DefaultProjectService, *mocks.ProjectNamespaceRepository, *gitops.MemoryStore) {
 	namespaces := new(mocks.ProjectNamespaceRepository)
-	store := gitops.NewMemoryStore(files)
+	store := gitops.MustMemoryStore(files)
 	return NewDefaultProjectService(namespaces, gitops.NewDeployments(store)), namespaces, store
 }
 
