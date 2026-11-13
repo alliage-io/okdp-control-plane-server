@@ -20,7 +20,7 @@
     "paths": {
         "/api/capabilities": {
             "get": {
-                "description": "Capabilities the platform is configured with (user management through Keycloak, console OIDC client, OIDC client provisioning backend), so the UI can adapt",
+                "description": "Capabilities the platform is configured with (user management through Keycloak, console OIDC client, OIDC client provisioning backend, the bounds of the SQL editor), so the UI can adapt. Public: what the caller may do is GET /api/me",
                 "produces": [
                     "application/json"
                 ],
@@ -770,7 +770,7 @@
         },
         "/api/projects/{name}/claims": {
             "get": {
-                "description": "The named claims of the project (claims.\u003cname\u003e of projects/\u003cp\u003e/project.yaml): each a connection of its contract, declared once, that every instance of the project naming it shares; with the provider the compile of the tree binds it to (its class, or the provider it names), the instances that name it, and why it does not bind",
+                "description": "The named claims of the project (claims.\u003cname\u003e of projects/\u003cp\u003e/project.yaml): each a connection of its contract, declared once, that every instance of the project naming it shares; with the provider the compile of the tree binds it to (its class, or the provider it names), the instances that name it, and why it does not bind; the engine of the connection its provider granted, and whether the SQL editor runs on it (sql)",
                 "produces": [
                     "application/json"
                 ],
@@ -1173,7 +1173,7 @@
         },
         "/api/projects/{name}/connections/selectable": {
             "get": {
-                "description": "The project's connections (scope project), the platform's (scope platform: connections.\u003cname\u003e of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed)",
+                "description": "The project's connections (scope project), the platform's (scope platform: connections.\u003cname\u003e of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed). Each with its engine value (database-server: postgresql, mysql) and whether the SQL editor runs on it (sql: a declared database-server connection of engine postgresql)",
                 "produces": [
                     "application/json"
                 ],
@@ -1423,7 +1423,7 @@
         },
         "/api/projects/{name}/connections/{connName}/sql": {
             "post": {
-                "description": "Runs a statement on a database-server connection (engine postgresql) declared in the tree: the project's, else the platform's, else a named claim of the project (the connection its provider granted). Host, port and database are the connection's, never the request's. The credentials come only from the claim's provisioned Secret (labelled okdp.io/credentials-database-server), the platform's secret store (secretRef.remoteKey, the Secret an ExternalSecret of the project fills from it), the Secret the console wrote from the connection form, or a Secret labelled okdp.io/connection-credentials: \"true\"; any other answers 400 (code sql-credentials-refused). Every project member acts as the connection's database user. TLS is always verified against the platform CA bundle (sslMode verify-ca checks the chain only; disable and prefer are not honored): 502 (code sql-tls-unverified) otherwise. Only SCRAM-SHA-256 authentication: a server asking for a clear-text or MD5 password answers 502 (code sql-auth-method-refused). Loopback, link-local and Kubernetes API server addresses answer 400 (code sql-address-refused) unless SQL_ALLOWED_NETWORKS allows them. Read-only by default: one statement, in a READ ONLY transaction rolled back after it (a batch of several is an SQL error, 42601). With `write: true`, a batch: several statements separated by ';' run in one implicit transaction; the result is the last statement that returned columns, with the command tag of the last statement. Every statement is logged with the caller and the connection. Rows past maxRows (at most SQL_MAX_ROWS) or SQL_MAX_RESULT_BYTES are dropped (not cancelled). SQL errors (errorName = SQLSTATE) and the statement timeout (SQL_STATEMENT_TIMEOUT, 2 minutes) answer 200 with `error` set. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-claim-unbound): a named claim no provider granted yet. Any other failure of the database answers 502 with a generic message and the requestId, its cause in the server's log.",
+                "description": "Runs a statement on a database-server connection (engine postgresql) declared in the tree: the project's, else the platform's, else a named claim of the project (the connection its provider granted). Host, port and database are the connection's, never the request's. The credentials come only from the claim's provisioned Secret (labelled okdp.io/credentials-database-server), the platform's secret store (secretRef.remoteKey, the Secret an ExternalSecret of the project fills from it), the Secret the console wrote from the connection form, or a Secret labelled okdp.io/connection-credentials: \"true\"; any other answers 400 (code sql-credentials-refused). Every project member acts as the connection's database user. TLS is always verified against the platform CA bundle (sslMode verify-ca checks the chain only; disable and prefer are not honored): 502 (code sql-tls-unverified) otherwise. Only SCRAM-SHA-256 authentication: a server asking for a clear-text or MD5 password answers 502 (code sql-auth-method-refused). Loopback, link-local and Kubernetes API server addresses answer 400 (code sql-address-refused) unless SQL_ALLOWED_NETWORKS allows them. Read-only by default: one statement, in a READ ONLY transaction rolled back after it (a batch of several is an SQL error, 42601). With `write: true`, a batch: several statements separated by ';' run in one implicit transaction; the result is the last statement that returned columns, with the command tag of the last statement. Every statement is logged with the caller and the connection. Rows past maxRows (at most SQL_MAX_ROWS; the result's maxRows is the cap applied) or SQL_MAX_RESULT_BYTES are dropped (not cancelled), truncatedBy rows or bytes. SQL errors (errorName = SQLSTATE) and the statement timeout (SQL_STATEMENT_TIMEOUT, 2 minutes) answer 200 with `error` set. A project editor's: it runs with credentials of the project's Secrets, which a viewer cannot read (403, code forbidden). 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-claim-unbound): a named claim no provider granted yet; 400 (code sql-unsupported): the connection is no database-server of engine postgresql (the sql flag of GET .../connections/selectable and .../claims); 400 (code sql-no-credentials): its credentials Secret does not exist yet. Any other failure of the database answers 502 with a generic message and the requestId, its cause in the server's log.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2162,7 +2162,7 @@
         },
         "/api/projects/{name}/services/{serviceName}/sql": {
             "post": {
-                "description": "Proxies the statement to the service instance (Trino only), forwarding the caller's bearer token; `write` is not read (the engine authorizes the token). Engine-side SQL errors answer 200 with `error` set. Every statement is logged with the caller and the instance. Bounded by the statement timeout (SQL_STATEMENT_TIMEOUT), the row cap (maxRows, at most SQL_MAX_ROWS) and the result-size cap (SQL_MAX_RESULT_BYTES), past which the result is truncated; a client that disconnects cancels the query. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-address-refused): the engine address is loopback, link-local or the Kubernetes API server. Any other failure of the engine answers 502 with a generic message and the requestId, its cause in the server's log.",
+                "description": "Proxies the statement to the service instance (Trino only), forwarding the caller's bearer token; `write` is not read (the engine authorizes the token). Engine-side SQL errors answer 200 with `error` set. Every statement is logged with the caller and the instance. Bounded by the statement timeout (SQL_STATEMENT_TIMEOUT: 504, code sql-timeout, the query cancelled), the row cap (maxRows, at most SQL_MAX_ROWS; the result's maxRows is the cap applied) and the result-size cap (SQL_MAX_RESULT_BYTES), past which the result is truncated (truncatedBy: rows or bytes); a client that disconnects cancels the query. A viewer of the project may run it. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-address-refused): the engine address is loopback, link-local or the Kubernetes API server; 400 (code sql-unsupported): the instance is no Trino; 400 (code sql-no-url): it publishes no URL yet. Any other failure of the engine answers 502 with a generic message and the requestId, its cause in the server's log.",
                 "consumes": [
                     "application/json"
                 ],
@@ -2214,6 +2214,15 @@
                             }
                         }
                     },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
                     "404": {
                         "description": "Not Found",
                         "schema": {
@@ -2234,6 +2243,15 @@
                     },
                     "502": {
                         "description": "Bad Gateway",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "504": {
+                        "description": "Gateway Timeout",
                         "schema": {
                             "type": "object",
                             "additionalProperties": {
@@ -3881,6 +3899,14 @@
                 },
                 "oidcProvisioning": {
                     "$ref": "#/definitions/models.OidcProvisioningCapability"
+                },
+                "sql": {
+                    "description": "Sql are the bounds of the SQL editor.",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/models.SqlCapability"
+                        }
+                    ]
                 }
             }
         },
@@ -4688,6 +4714,10 @@
                     "description": "Contract is the contract of its connection (database-server, s3).",
                     "type": "string"
                 },
+                "engine": {
+                    "description": "Engine is the engine value of the connection its provider granted it\n(database-server: postgresql, mysql), \"\" when none is granted yet.",
+                    "type": "string"
+                },
                 "error": {
                     "description": "Error is why the claim does not bind, the compiler's message.",
                     "type": "string"
@@ -4708,6 +4738,10 @@
                     "description": "Request is what it requests of its provider, as the contract's claim\nschema allows (x-okdp-claim).",
                     "type": "object",
                     "additionalProperties": {}
+                },
+                "sql": {
+                    "description": "Sql reports whether the SQL editor runs statements on it (POST\n.../connections/:claim/sql): a database-server connection of engine\npostgresql granted by its provider.",
+                    "type": "boolean"
                 },
                 "users": {
                     "description": "Users are the instances of the project whose parameters name it.",
@@ -5161,6 +5195,10 @@
                 "description": {
                     "type": "string"
                 },
+                "engine": {
+                    "description": "Engine is the connection's engine value (database-server:\npostgresql, mysql), \"\" when it has none.",
+                    "type": "string"
+                },
                 "managed": {
                     "type": "boolean"
                 },
@@ -5173,6 +5211,10 @@
                 },
                 "scope": {
                     "type": "string"
+                },
+                "sql": {
+                    "description": "Sql reports whether the SQL editor runs statements on it (POST\n.../connections/:c/sql): a declared database-server connection of\nengine postgresql; any other answers 400 sql-unsupported.",
+                    "type": "boolean"
                 },
                 "status": {
                     "type": "string"
@@ -5532,6 +5574,30 @@
                 }
             }
         },
+        "models.SqlCapability": {
+            "type": "object",
+            "properties": {
+                "defaultRows": {
+                    "description": "DefaultRows is the row cap of a request that names none\n(SQL_DEFAULT_ROWS); MaxRows the largest maxRows a request may ask\n(SQL_MAX_ROWS), a larger one taken as it.",
+                    "type": "integer"
+                },
+                "maxConcurrentPerUser": {
+                    "description": "MaxConcurrentPerUser is how many statements one user runs at once\n(SQL_MAX_CONCURRENT_PER_USER): past it, 429 sql-busy.",
+                    "type": "integer"
+                },
+                "maxResultBytes": {
+                    "description": "MaxResultBytes caps the size of a result's rows\n(SQL_MAX_RESULT_BYTES): past it, truncatedBy bytes.",
+                    "type": "integer"
+                },
+                "maxRows": {
+                    "type": "integer"
+                },
+                "statementTimeoutSeconds": {
+                    "description": "StatementTimeoutSeconds bounds one statement (SQL_STATEMENT_TIMEOUT).",
+                    "type": "integer"
+                }
+            }
+        },
         "models.SqlColumn": {
             "type": "object",
             "properties": {
@@ -5598,6 +5664,10 @@
                 "error": {
                     "$ref": "#/definitions/models.SqlQueryError"
                 },
+                "maxRows": {
+                    "description": "MaxRows is the row cap the statement ran with: the request's\nmaxRows, else SQL_DEFAULT_ROWS, at most SQL_MAX_ROWS.",
+                    "type": "integer"
+                },
                 "queryId": {
                     "type": "string"
                 },
@@ -5613,6 +5683,10 @@
                 },
                 "truncated": {
                     "type": "boolean"
+                },
+                "truncatedBy": {
+                    "description": "TruncatedBy says which cap dropped rows when Truncated: rows (the\nrow cap, MaxRows) or bytes (SQL_MAX_RESULT_BYTES).",
+                    "type": "string"
                 }
             }
         },

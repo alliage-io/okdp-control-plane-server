@@ -239,6 +239,14 @@ func supportedSql(name, contract string, values connectionValues) error {
 	return fmt.Errorf("connection '%s' (%s) %w", name, engine, ErrSqlUnsupported)
 }
 
+// sqlTargetOf is the engine of a connection's values and whether the SQL
+// editor runs statements on it (supportedSql), for the console to offer
+// only those.
+func sqlTargetOf(name, contract string, values map[string]any) (string, bool) {
+	v := connectionValues(values)
+	return v.String("engine"), supportedSql(name, contract, v) == nil
+}
+
 // pick keeps the credential keys of a Secret's data.
 func pick(data map[string][]byte) map[string][]byte {
 	out := map[string][]byte{}

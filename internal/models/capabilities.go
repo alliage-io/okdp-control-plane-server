@@ -7,6 +7,26 @@ package models
 type Capabilities struct {
 	Identity         IdentityCapability         `json:"identity"`
 	OidcProvisioning OidcProvisioningCapability `json:"oidcProvisioning"`
+	// Sql are the bounds of the SQL editor.
+	Sql SqlCapability `json:"sql"`
+}
+
+// SqlCapability are the bounds of the SQL editor (the SQL_* settings), so
+// the console bounds its own inputs.
+type SqlCapability struct {
+	// DefaultRows is the row cap of a request that names none
+	// (SQL_DEFAULT_ROWS); MaxRows the largest maxRows a request may ask
+	// (SQL_MAX_ROWS), a larger one taken as it.
+	DefaultRows int `json:"defaultRows"`
+	MaxRows     int `json:"maxRows"`
+	// MaxResultBytes caps the size of a result's rows
+	// (SQL_MAX_RESULT_BYTES): past it, truncatedBy bytes.
+	MaxResultBytes int `json:"maxResultBytes"`
+	// StatementTimeoutSeconds bounds one statement (SQL_STATEMENT_TIMEOUT).
+	StatementTimeoutSeconds int `json:"statementTimeoutSeconds"`
+	// MaxConcurrentPerUser is how many statements one user runs at once
+	// (SQL_MAX_CONCURRENT_PER_USER): past it, 429 sql-busy.
+	MaxConcurrentPerUser int `json:"maxConcurrentPerUser"`
 }
 
 // IdentityCapability describes how the console authenticates against the

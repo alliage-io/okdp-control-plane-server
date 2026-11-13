@@ -127,7 +127,7 @@ func (s *DefaultRenderedValuesService) fill(ctx context.Context, rendered *model
 	if err != nil {
 		return compiledOnly("the defaults do not parse: " + err.Error())
 	}
-	encoded, err := treeedit.EncodeValues(Coalesce(values, parsed))
+	encoded, err := treeedit.EncodeValues(compiler.CoalesceValues(values, parsed))
 	if err != nil {
 		return err
 	}
@@ -138,32 +138,4 @@ func (s *DefaultRenderedValuesService) fill(ctx context.Context, rendered *model
 		rendered.ChangedLines = lines
 	}
 	return nil
-}
-
-// Coalesce returns values over defaults as Helm coalesces a chart's
-// defaults under its values: maps merge key by key; a value that is not a
-// map (a list included) replaces the default; a null deletes the default
-// key; the null defaults the values leave unset are dropped. Neither input
-// is modified.
-func Coalesce(values, defaults map[string]any) map[string]any {
-	out := map[string]any{}
-	for k, d := range defaults {
-		if d != nil {
-			out[k] = d
-		}
-	}
-	for k, v := range values {
-		if v == nil {
-			delete(out, k)
-			continue
-		}
-		vm, vok := v.(map[string]any)
-		dm, dok := out[k].(map[string]any)
-		if vok && dok {
-			out[k] = Coalesce(vm, dm)
-			continue
-		}
-		out[k] = v
-	}
-	return out
 }

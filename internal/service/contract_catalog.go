@@ -1,329 +1,146 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/sirupsen/logrus"
 )
 
 // The contract schemas are those of the catalogs (contracts/ of each
-// repository of catalogs.yaml), the ones the compiler checks the
-// connections against. The same document drives the form rendered by the
-// console (converted to a ContractDescriptor), the server-side validation
-// of submitted values, and the address shown for a connection of that
-// contract.
+// repository of catalogs.yaml), read as the compile reads them
+// (compiler.ReadContracts). The server maps each to the form the console
+// renders (a ContractDescriptor) and to the address shown for a connection
+// of that contract; a connection is checked by the compiler itself
+// (compiler.CheckConnection), never here.
 
 // ContractCatalog exposes the known contracts.
 type ContractCatalog interface {
 	List() []models.ContractDescriptor
 	Get(name string) (*models.ContractDescriptor, bool)
-	// Validate checks submitted values against the contract descriptor.
-	Validate(typeName string, values map[string]any) error
-	// ValidateUpdate is Validate for an edit. The console does not resend a
-	// credential that has not changed, so a missing secret field is a value
-	// left as it is, not an omission.
-	ValidateUpdate(typeName string, values map[string]any) error
 	// Normalize fills the derived fields and drops the ones the submitted
-	// values put out of play, so that validation and storage see a coherent
-	// set. Called before Validate, on both create and update.
+	// values put out of play, so that the check and the storage see a
+	// coherent set. Called before the check, on both create and update.
 	Normalize(typeName string, values map[string]any) map[string]any
-	// ValidatePublic checks the non-secret values, as they are written to the
-	// connection's entry, against the contract's JSON Schema itself.
-	ValidatePublic(typeName string, values map[string]any) error
-	// ValidateClaimRequest checks what a claim requests against the
-	// contract's claim schema (x-okdp-claim); a contract without one takes
-	// no request.
-	ValidateClaimRequest(typeName string, request map[string]any) error
+	// Contracts are the contracts as the compile reads them, for
+	// compiler.CheckConnection.
+	Contracts() fs.FS
 }
 
 type embeddedCatalog struct {
-	types   []models.ContractDescriptor
-	byName  map[string]*models.ContractDescriptor
-	schemas map[string]*jsonschema.Schema
-	// claims are the compiled claim schemas (x-okdp-claim), by contract.
-	claims map[string]*jsonschema.Schema
+	fsys   fs.FS
+	types  []models.ContractDescriptor
+	byName map[string]*models.ContractDescriptor
 }
 
 // NewContractCatalog loads the contracts of a directory of contract
-// schemas (<contract>.schema.json).
+// schemas (<contract>.schema.json), as the compile reads them.
 func NewContractCatalog(contractsFS fs.FS) (ContractCatalog, error) {
-	entries, err := fs.ReadDir(contractsFS, ".")
+	contracts, err := compiler.ReadContracts(contractsFS)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the contracts: %w", err)
 	}
-
-	c := &embeddedCatalog{byName: map[string]*models.ContractDescriptor{}, schemas: map[string]*jsonschema.Schema{}, claims: map[string]*jsonschema.Schema{}}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".schema.json") {
-			continue
-		}
-		raw, err := fs.ReadFile(contractsFS, entry.Name())
-		if err != nil {
-			return nil, fmt.Errorf("failed to read contract %s: %w", entry.Name(), err)
-		}
-		ct, err := descriptorFromSchema(raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid contract %s: %w", entry.Name(), err)
-		}
-		if err := validateTypeDescriptor(ct); err != nil {
-			return nil, fmt.Errorf("invalid contract %s: %w", entry.Name(), err)
-		}
-		compiled, err := compileSchema(entry.Name(), raw)
-		if err != nil {
-			return nil, fmt.Errorf("invalid contract %s: %w", entry.Name(), err)
-		}
-		if ct.ClaimSchema != nil {
-			claim, err := compileClaimSchema(entry.Name(), ct.ClaimSchema)
-			if err != nil {
-				return nil, fmt.Errorf("invalid contract %s: x-okdp-claim: %w", entry.Name(), err)
-			}
-			c.claims[ct.Name] = claim
-		}
-		c.types = append(c.types, *ct)
-		c.schemas[ct.Name] = compiled
+	c := &embeddedCatalog{fsys: contractsFS, byName: map[string]*models.ContractDescriptor{}}
+	for i := range contracts {
+		c.types = append(c.types, formOf(&contracts[i]))
 	}
-
 	sort.Slice(c.types, func(i, j int) bool { return c.types[i].Name < c.types[j].Name })
-
 	for i := range c.types {
-		ct := &c.types[i]
-		if _, dup := c.byName[ct.Name]; dup {
-			return nil, fmt.Errorf("duplicate contract %q", ct.Name)
-		}
-		c.byName[ct.Name] = ct
+		c.byName[c.types[i].Name] = &c.types[i]
 	}
-
 	return c, nil
 }
 
-func compileSchema(name string, raw []byte) (*jsonschema.Schema, error) {
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
+// formOf maps a contract, as the compile reads it, to the form the console
+// renders (GET /api/contracts): its fields in the order of the file, each
+// with the hints of its property (title, type, enum, bounds, x-ui-*), a
+// secret one required when its x-okdp-required says so. A field of a list
+// (trino catalogs) is published by charts, never typed into a form: not
+// offered.
+func formOf(d *compiler.ContractDescriptor) models.ContractDescriptor {
+	str := func(m map[string]any, k string) string { s, _ := m[k].(string); return s }
+	ct := models.ContractDescriptor{
+		Name:        d.Name,
+		DisplayName: d.Title,
+		Description: d.Description,
+		Icon:        str(d.Schema, "x-okdp-icon"),
+		Category:    str(d.Schema, "x-okdp-category"),
+		ClaimSchema: d.Claim,
 	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(name, doc); err != nil {
-		return nil, err
-	}
-	return compiler.Compile(name)
-}
-
-// compileClaimSchema compiles a contract's claim schema, in the draft of
-// the contract.
-func compileClaimSchema(name string, claim map[string]any) (*jsonschema.Schema, error) {
-	raw, err := json.Marshal(claim)
-	if err != nil {
-		return nil, err
-	}
-	return compileSchema("https://okdp.io/schemas/contracts/"+strings.TrimSuffix(name, ".schema.json")+".claim.schema.json", raw)
-}
-
-// contractSchema is the part of a contract schema the console form needs.
-type contractSchema struct {
-	Title        string                    `json:"title"`
-	Description  string                    `json:"description"`
-	Contract     string                    `json:"x-okdp-contract"`
-	Icon         string                    `json:"x-okdp-icon"`
-	Category     string                    `json:"x-okdp-category"`
-	External     bool                      `json:"x-okdp-external"`
-	EndpointFrom []string                  `json:"x-okdp-endpoint-from"`
-	Claim        map[string]any            `json:"x-okdp-claim"`
-	Required     []string                  `json:"required"`
-	Properties   map[string]propertySchema `json:"properties"`
-}
-
-type propertySchema struct {
-	Type           string                  `json:"type"`
-	Title          string                  `json:"title"`
-	Description    string                  `json:"description"`
-	Enum           []any                   `json:"enum"`
-	Default        any                     `json:"default"`
-	Minimum        *float64                `json:"minimum"`
-	Maximum        *float64                `json:"maximum"`
-	Secret         bool                    `json:"x-okdp-secret"`
-	SecretRequired bool                    `json:"x-okdp-required"`
-	Derived        *models.FieldDerivation `json:"x-okdp-derived"`
-	Condition      *models.FieldCondition  `json:"x-ui-condition"`
-	Placeholder    string                  `json:"x-ui-placeholder"`
-	Widget         string                  `json:"x-ui-widget"`
-}
-
-// propertyOrder returns the keys of the "properties" object in document order:
-// Go maps lose it, and it is the order of the form.
-func propertyOrder(raw []byte) ([]string, error) {
-	var doc struct {
-		Properties json.RawMessage `json:"properties"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(doc.Properties))
-	if _, err := dec.Token(); err != nil { // {
-		return nil, err
-	}
-	var keys []string
-	for dec.More() {
-		tok, err := dec.Token()
-		if err != nil {
-			return nil, err
+	ct.External, _ = d.Schema["x-okdp-external"].(bool)
+	if from, ok := d.Schema["x-okdp-endpoint-from"].([]any); ok {
+		for _, f := range from {
+			if s, ok := f.(string); ok {
+				ct.EndpointFrom = append(ct.EndpointFrom, s)
+			}
 		}
-		key, _ := tok.(string)
-		keys = append(keys, key)
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return nil, err
-		}
-	}
-	return keys, nil
-}
-
-// descriptorFromSchema converts a contract schema into the descriptor the
-// console renders its form from (GET /api/contracts).
-func descriptorFromSchema(raw []byte) (*models.ContractDescriptor, error) {
-	var cs contractSchema
-	if err := json.Unmarshal(raw, &cs); err != nil {
-		return nil, err
-	}
-	order, err := propertyOrder(raw)
-	if err != nil {
-		return nil, err
 	}
 	required := map[string]bool{}
-	for _, r := range cs.Required {
-		required[r] = true
-	}
-	ct := &models.ContractDescriptor{
-		Name:         cs.Contract,
-		DisplayName:  cs.Title,
-		Description:  cs.Description,
-		Icon:         cs.Icon,
-		Category:     cs.Category,
-		External:     cs.External,
-		EndpointFrom: cs.EndpointFrom,
-		ClaimSchema:  cs.Claim,
-	}
-	for _, name := range order {
-		p := cs.Properties[name]
-		field := models.ConnectionField{
-			Name:        name,
-			Label:       p.Title,
-			Required:    required[name] || (p.Secret && p.SecretRequired),
-			Secret:      p.Secret,
-			Masked:      p.Widget == "password",
-			Default:     p.Default,
-			Placeholder: p.Placeholder,
-			Help:        p.Description,
-			Min:         p.Minimum,
-			Max:         p.Maximum,
-			ShowWhen:    p.Condition,
-			Derived:     p.Derived,
+	if list, ok := d.Schema["required"].([]any); ok {
+		for _, r := range list {
+			if s, ok := r.(string); ok {
+				required[s] = true
+			}
 		}
-		switch {
-		case len(p.Enum) > 0:
+	}
+	for _, f := range d.Fields {
+		p := f.Property
+		secretRequired, _ := p["x-okdp-required"].(bool)
+		field := models.ConnectionField{
+			Name:        f.Name,
+			Label:       str(p, "title"),
+			Required:    required[f.Name] || (f.Secret && secretRequired),
+			Secret:      f.Secret,
+			Masked:      str(p, "x-ui-widget") == "password",
+			Default:     f.Default,
+			Placeholder: str(p, "x-ui-placeholder"),
+			Help:        str(p, "description"),
+			Min:         number(p["minimum"]),
+			Max:         number(p["maximum"]),
+		}
+		if f.Condition != nil {
+			field.ShowWhen = &models.FieldCondition{Field: str(f.Condition, "field"), Value: fmt.Sprint(f.Condition["value"])}
+		}
+		if f.Derived != nil {
+			derived := &models.FieldDerivation{From: str(f.Derived, "from"), Map: map[string]string{}}
+			if m, ok := f.Derived["map"].(map[string]any); ok {
+				for k, v := range m {
+					derived.Map[k] = fmt.Sprint(v)
+				}
+			}
+			field.Derived = derived
+		}
+		enum, _ := p["enum"].([]any)
+		switch kind := str(p, "type"); {
+		case len(enum) > 0:
 			field.Type = models.FieldTypeEnum
-			for _, option := range p.Enum {
+			for _, option := range enum {
 				field.Options = append(field.Options, fmt.Sprint(option))
 			}
-		case p.Type == "integer" || p.Type == "number":
+		case kind == "integer" || kind == "number":
 			field.Type = models.FieldTypeNumber
-		case p.Type == "boolean":
+		case kind == "boolean":
 			field.Type = models.FieldTypeBoolean
-		case p.Type == "string":
+		case kind == "string":
 			field.Type = models.FieldTypeString
 		default:
-			// Lists (trino catalogs) are published by charts, never typed into
-			// a form: they are validated by the schema, not offered.
 			continue
 		}
 		ct.Fields = append(ct.Fields, field)
 	}
-	return ct, nil
+	return ct
 }
 
-func validateTypeDescriptor(ct *models.ContractDescriptor) error {
-	if ct.Name == "" {
-		return fmt.Errorf("name is required")
-	}
-	if len(ct.Fields) == 0 {
-		return fmt.Errorf("at least one field is required")
-	}
-	seen := map[string]bool{}
-	for _, f := range ct.Fields {
-		if f.Name == "" {
-			return fmt.Errorf("a field has no name")
-		}
-		if seen[f.Name] {
-			return fmt.Errorf("duplicate field %q", f.Name)
-		}
-		seen[f.Name] = true
-		switch f.Type {
-		case models.FieldTypeString, models.FieldTypeNumber, models.FieldTypeBoolean:
-		case models.FieldTypeEnum:
-			if len(f.Options) == 0 {
-				return fmt.Errorf("field %q is an enum with no options", f.Name)
-			}
-		default:
-			return fmt.Errorf("field %q has unsupported type %q", f.Name, f.Type)
-		}
-	}
-	return nil
-}
-
-func (c *embeddedCatalog) ValidatePublic(typeName string, values map[string]any) error {
-	sch, ok := c.schemas[typeName]
-	if !ok {
-		return fmt.Errorf("unknown contract %q", typeName)
-	}
-	// Through JSON, so numbers and nested values have the validator's types.
-	raw, err := json.Marshal(values)
-	if err != nil {
-		return err
-	}
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	if err := sch.Validate(doc); err != nil {
-		return fmt.Errorf("the values do not satisfy the %s contract: %v", typeName, err)
-	}
-	return nil
-}
-
-func (c *embeddedCatalog) ValidateClaimRequest(typeName string, request map[string]any) error {
-	if _, ok := c.byName[typeName]; !ok {
-		return fmt.Errorf("unknown contract %q", typeName)
-	}
-	sch, ok := c.claims[typeName]
-	if !ok {
-		if len(request) > 0 {
-			return fmt.Errorf("the %s contract declares no claim schema (x-okdp-claim): a claim requests nothing of it", typeName)
-		}
-		return nil
-	}
-	if request == nil {
-		request = map[string]any{}
-	}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	if err := sch.Validate(doc); err != nil {
-		return fmt.Errorf("the request does not meet the %s contract's claim schema (x-okdp-claim): %v", typeName, err)
+// number is a bound of a property, nil when it has none.
+func number(v any) *float64 {
+	if n, ok := toFloat(v); ok {
+		return &n
 	}
 	return nil
 }
@@ -339,16 +156,7 @@ func (c *embeddedCatalog) Get(name string) (*models.ContractDescriptor, bool) {
 	return ct, ok
 }
 
-// Validate reports the first problem found in values, phrased for the end user.
-// Unknown keys are rejected so that a renamed field surfaces as an error rather
-// than being silently persisted and ignored.
-func (c *embeddedCatalog) Validate(typeName string, values map[string]any) error {
-	return c.validate(typeName, values, true)
-}
-
-func (c *embeddedCatalog) ValidateUpdate(typeName string, values map[string]any) error {
-	return c.validate(typeName, values, false)
-}
+func (c *embeddedCatalog) Contracts() fs.FS { return c.fsys }
 
 // Normalize returns a copy of values with the derived fields computed and the
 // fields whose condition is not met removed. A MySQL connection carrying a
@@ -389,76 +197,6 @@ func (c *embeddedCatalog) Normalize(typeName string, values map[string]any) map[
 	return out
 }
 
-func (c *embeddedCatalog) validate(typeName string, values map[string]any, requireSecrets bool) error {
-	ct, ok := c.Get(typeName)
-	if !ok {
-		return fmt.Errorf("unknown contract %q", typeName)
-	}
-
-	for key := range values {
-		if _, known := ct.Field(key); !known {
-			return fmt.Errorf("unknown field %q for contract %q", key, typeName)
-		}
-	}
-
-	for i := range ct.Fields {
-		f := &ct.Fields[i]
-		// A field the submitted values put out of play is neither required nor
-		// checked: a MySQL connection is not missing a PostgreSQL TLS mode.
-		if !f.Applies(values) {
-			continue
-		}
-		value, present := values[f.Name]
-		if !present || value == nil || value == "" {
-			if f.Required && (requireSecrets || !f.Secret) {
-				return fmt.Errorf("%s is required", fieldLabel(f))
-			}
-			continue
-		}
-		if err := validateFieldValue(f, value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateFieldValue(f *models.ConnectionField, value any) error {
-	switch f.Type {
-	case models.FieldTypeString:
-		if _, ok := value.(string); !ok {
-			return fmt.Errorf("%s must be a string", fieldLabel(f))
-		}
-	case models.FieldTypeBoolean:
-		if _, ok := value.(bool); !ok {
-			return fmt.Errorf("%s must be a boolean", fieldLabel(f))
-		}
-	case models.FieldTypeNumber:
-		// JSON decoding yields float64. An int may reach us from a Go caller.
-		number, ok := toFloat(value)
-		if !ok {
-			return fmt.Errorf("%s must be a number", fieldLabel(f))
-		}
-		if f.Min != nil && number < *f.Min {
-			return fmt.Errorf("%s must be at least %g", fieldLabel(f), *f.Min)
-		}
-		if f.Max != nil && number > *f.Max {
-			return fmt.Errorf("%s must be at most %g", fieldLabel(f), *f.Max)
-		}
-	case models.FieldTypeEnum:
-		str, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("%s must be a string", fieldLabel(f))
-		}
-		for _, option := range f.Options {
-			if option == str {
-				return nil
-			}
-		}
-		return fmt.Errorf("%s must be one of: %s", fieldLabel(f), strings.Join(f.Options, ", "))
-	}
-	return nil
-}
-
 func toFloat(value any) (float64, bool) {
 	switch n := value.(type) {
 	case float64:
@@ -474,13 +212,6 @@ func toFloat(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func fieldLabel(f *models.ConnectionField) string {
-	if f.Label != "" {
-		return f.Label
-	}
-	return f.Name
 }
 
 // ContractsSource returns the contract schemas of the platform: the union
@@ -537,21 +268,10 @@ func (c *catalogContracts) List() []models.ContractDescriptor { return c.get().L
 func (c *catalogContracts) Get(name string) (*models.ContractDescriptor, bool) {
 	return c.get().Get(name)
 }
-func (c *catalogContracts) Validate(typeName string, values map[string]any) error {
-	return c.get().Validate(typeName, values)
-}
-func (c *catalogContracts) ValidateUpdate(typeName string, values map[string]any) error {
-	return c.get().ValidateUpdate(typeName, values)
-}
 func (c *catalogContracts) Normalize(typeName string, values map[string]any) map[string]any {
 	return c.get().Normalize(typeName, values)
 }
-func (c *catalogContracts) ValidatePublic(typeName string, values map[string]any) error {
-	return c.get().ValidatePublic(typeName, values)
-}
-func (c *catalogContracts) ValidateClaimRequest(typeName string, request map[string]any) error {
-	return c.get().ValidateClaimRequest(typeName, request)
-}
+func (c *catalogContracts) Contracts() fs.FS { return c.get().Contracts() }
 
 // emptyFS is a directory with nothing in it.
 type emptyFS struct{}

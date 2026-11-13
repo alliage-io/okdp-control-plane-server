@@ -17,7 +17,7 @@ func NewCapabilitiesHandler(service service.CapabilityService) *CapabilitiesHand
 
 // GetCapabilities godoc
 // @Summary      Get platform capabilities
-// @Description  Capabilities the platform is configured with (user management through Keycloak, console OIDC client, OIDC client provisioning backend), so the UI can adapt
+// @Description  Capabilities the platform is configured with (user management through Keycloak, console OIDC client, OIDC client provisioning backend, the bounds of the SQL editor), so the UI can adapt. Public: what the caller may do is GET /api/me
 // @Tags         capabilities
 // @Produce      json
 // @Success      200  {object}  models.Capabilities

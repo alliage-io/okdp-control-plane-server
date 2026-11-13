@@ -116,8 +116,10 @@ func TestRenderedValuesOfAnUnknownOrUncompiledInstance(t *testing.T) {
 	require.Empty(t, got, "no compiled values yet")
 }
 
+// The chart defaults under the compiled values, as the compiler coalesces
+// them (compiler.CoalesceValues), the server's rendering of them.
 func TestCoalesceAsHelm(t *testing.T) {
-	got := Coalesce(
+	got := compiler.CoalesceValues(
 		map[string]any{"a": map[string]any{"b": 2.0, "gone": nil}, "list": []any{"x"}, "s": nil},
 		map[string]any{"a": map[string]any{"b": 1.0, "c": 3.0, "gone": 4.0}, "list": []any{"y", "z"}, "s": "default", "n": nil, "d": true},
 	)

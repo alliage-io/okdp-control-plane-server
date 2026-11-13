@@ -45,6 +45,11 @@ data:
   KEYCLOAK_TLS_INSECURE: "true"
   {{- end }}
   {{- end }}
+  {{- with .Values.secretStores }}
+  {{- if .allowedServers }}
+  SECRET_STORE_ALLOWED_SERVERS: {{ join "," .allowedServers | quote }}
+  {{- end }}
+  {{- end }}
   {{- with .Values.sqlEditor }}
   SQL_STATEMENT_TIMEOUT: {{ .statementTimeout | quote }}
   SQL_DEFAULT_ROWS: {{ .defaultRows | quote }}

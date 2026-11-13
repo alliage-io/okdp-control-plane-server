@@ -57,6 +57,10 @@ func TestSqlRefusalsCarryTheirCode(t *testing.T) {
 		{service.ErrSqlWriteRefused, http.StatusForbidden, ErrorCodeSqlWriteRefused},
 		{fmt.Errorf("engine unreachable: %w", service.ErrSqlTLS), http.StatusBadGateway, ErrorCodeSqlTLS},
 		{fmt.Errorf("engine unreachable: %w", service.ErrSqlAuthMethod), http.StatusBadGateway, ErrorCodeSqlAuthMethod},
+		{fmt.Errorf("connection 'x' (mysql) %w", service.ErrSqlUnsupported), http.StatusBadRequest, ErrorCodeSqlUnsupported},
+		{fmt.Errorf("service 'x' %w", service.ErrSqlNoURL), http.StatusBadRequest, ErrorCodeSqlNoURL},
+		{fmt.Errorf("claim 'x': %w", service.ErrSqlNoCredentials), http.StatusBadRequest, ErrorCodeSqlNoCredentials},
+		{fmt.Errorf("%w (2m0s)", service.ErrSqlTimeout), http.StatusGatewayTimeout, ErrorCodeSqlTimeout},
 	} {
 		status, body := runSql(t, &sqlSpy{err: tc.err}, `{"query":"SELECT 1"}`)
 		if status != tc.status || body["code"] != tc.code {

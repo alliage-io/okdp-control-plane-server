@@ -258,7 +258,18 @@ instance, changing a connection, a named claim or a project. It is refused, noth
 committed, when the instance it writes does not compile, when an instance that compiled
 before does not any more (a class, a named claim or a connection of a project reaches
 every instance of it, a claim binds across projects), or when the tree no longer loads;
-the API answers `400` with the compiler's message (code `does-not-compile`). Removing an
+the API answers `400` with the compiler's message (code `does-not-compile`) and its
+problems at their fields, `fields: [{path, pointer, message}]` (`compiler.FieldErrors`:
+`catalogs[1].storage`, `/catalogs/1/storage`; `""` for the instance as a whole). The server
+re-implements none of the compiler's rules: the parameters, the connection references and
+the claims of an instance are the compile's to check, the keys the context gives
+(`global`, `connections`, `claims`) and a version that is not in the catalogs among them,
+a menu entry of `catalogs.yaml` (its service a package of the catalogs, its default one of
+its versions) the compile's check of the file (okdp-gitops `Compiler.CheckCatalogs`, a
+`400 does-not-compile` too), a connection at its declaration
+`compiler.CheckConnection`'s, the contracts `compiler.ReadContracts`', the connection
+references of a package `compiler.ConnectionRefs`', the chart defaults under the compiled
+values `compiler.CoalesceValues`'. Removing an
 instance, a connection, a named claim or a project is refused (`400`, naming them) while
 instances use it: they would not compile without it. The compiled files are not committed:
 the CI of the output compiles the commit again at its next run, the whole tree, and
@@ -303,6 +314,29 @@ uses and does not deploy, their credentials from the platform's secret store,
 offer them (`GET .../connections/selectable`, scope `platform`), and the platform's
 administrators write them in Git; a project connection may not take the name of one. An
 instance references a connection by its name, in its parameters; nothing else lists it.
+A connection the console writes is checked at its declaration as the compile checks it
+(`compiler.CheckConnection`: its contract, its fields, none unknown nor secret, its
+required ones after completion, their types, its `secretRef`), whether an instance
+references it yet or not; the credentials it requires (`x-okdp-required` of a secret field)
+are the console's to ask, the compile never sees them.
+
+### Secret stores
+
+A project's SecretStores (`/api/projects/:name/secret-stores`, External Secrets'
+`external-secrets.io/v1`) name a Vault (OpenBao) server. One of Kubernetes auth makes
+External Secrets mint a token of a ServiceAccount of the namespace and send it to that
+server, so the server pins it: the ServiceAccount is the platform's secret store's in the
+namespace, as the compile writes it (`global.okdp.secrets.serviceAccount`, `okdp-secrets`
+by default, which the compiled manifests of each project create), a request naming
+another is refused; the token's `audiences` are the platform's provider's
+(`global.okdp.secrets.provider.vault.auth.kubernetes.serviceAccountRef.audiences`, the
+sandbox's `openbao`), never the API server's; the server is the platform's store's
+(`global.okdp.secrets.provider.vault.server`) or one of `secretStores.allowedServers`
+(`SECRET_STORE_ALLOWED_SERVERS`). Without the platform's provider, or with no audiences,
+Kubernetes auth is refused (`400`). The connection test (`POST .../secret-stores/test`)
+reaches an allowed server only, through the SQL editor's guard (loopback, link-local and
+the API server refused unless `sqlEditor.allowedNetworks`), follows no redirect, and
+reports a failure to connect without its cause, which the server logs.
 
 ### SQL editor
 
@@ -341,7 +375,17 @@ caller's own token). Read-only guards against mistakes; the boundary is what the
 the connection's user. Every statement is logged with the caller, the connection and the
 start of its text, and is bounded by `SQL_STATEMENT_TIMEOUT`, a row cap, a result-size
 cap and a per-user concurrency limit (`429`, code `sql-busy`); a client that disconnects
-cancels it.
+cancels it. A result carries the row cap it ran with (`maxRows`: the request's, else
+`SQL_DEFAULT_ROWS`, at most `SQL_MAX_ROWS`) and, when `truncated`, which cap dropped
+rows (`truncatedBy`: `rows` or `bytes`); `GET /api/capabilities` gives the bounds
+(`sql: {defaultRows, maxRows, maxResultBytes, statementTimeoutSeconds,
+maxConcurrentPerUser}`). A PostgreSQL statement past the timeout answers `200` with
+`error.errorName: TIMEOUT`; a Trino one `504`, code `sql-timeout`, the query cancelled.
+`GET .../connections/selectable` and `GET .../claims` give each connection's `engine`
+and whether the editor runs on it (`sql`); any other target answers `400`, code
+`sql-unsupported`. An instance that publishes no URL yet answers `400`, code
+`sql-no-url`, a connection or a claim whose credentials Secret does not exist yet `400`,
+code `sql-no-credentials`.
 
 ### Spark applications
 
@@ -390,14 +434,15 @@ contract's `x-okdp-claim`): what a claim may request.
 | Route | |
 |---|---|
 | `GET /api/projects/:name/claims` | the project's named claims, each with the provider the compile binds it to, the instances that name it, and why it does not bind |
-| `POST /api/projects/:name/claims`, `PUT`, `DELETE .../claims/:claimName` | declare, change, remove a named claim in `project.yaml` (its comments kept): checked (the contract, the class or the provider, the request against `x-okdp-claim` and the class), then by the compile of the tree, refused when an instance that compiled stops compiling; a named claim an instance names is not removed |
+| `POST /api/projects/:name/claims`, `PUT`, `DELETE .../claims/:claimName` | declare, change, remove a named claim in `project.yaml` (its comments kept): its name and the form of its provider checked (`compiler.CheckProvider`), the rest by the compile of the tree (the contract, the class or the provider, the request against `x-okdp-claim` and the class), as the project's instances bind it: refused when an instance that compiled stops compiling; a project without instance binds none, so none of its named claims is checked until one is deployed; a named claim an instance names is not removed |
 | `GET /api/projects/:name/provisioning` | the classes of each contract's claims, the platform's and the project's, the default class, the claim schema |
 | `GET /api/projects/:name/services/:serviceName/claims` | the claims of the instance's references, each bound and what its provider granted (`okdp.info.yaml`); for a provider (its package's `provisions`), the claims bound to it, their claimers and what it granted each |
 
-Deploying or updating an instance checks the claims its parameters write or name before
-the compile does: the keys of a claim (`class`, `provider`, `request`), its class (of the
-project or the platform), its request (the package's fixed one, the instance's merged
-over it) against the contract's claim schema and what the class fixes. The deployment
+Deploying or updating an instance has the claims its parameters write or name checked by
+the compile of the write: the keys of a claim (`class`, `provider`, `request`), its class
+(of the project or the platform), its request (the package's fixed one, the instance's
+merged over it) against the contract's claim schema and what the class fixes, each problem
+at the field of its reference. The deployment
 form reads, for each connection reference (`GET .../inputs`), whether it takes a claim
 (`provision`), the package's fixed `request`, what it requires of the connection
 (`require`) and its default claim (`defaultClaim`).
@@ -717,6 +762,7 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `SQL_MAX_CONCURRENT_PER_USER` | Statements one user runs at once (`429` past it) | `2` | No |
 | `SQL_ALLOWED_NETWORKS` | CIDRs the SQL editor and the connection tests may reach although loopback, link-local or the API server (comma-separated) | | No |
 | `SQL_CA_FILE` | PEM bundle database certificates are verified against, besides the system's (chart: `sqlEditor.caBundleSecret`, the platform's `global.okdp.tls.caBundleSecret`) | | No |
+| `SECRET_STORE_ALLOWED_SERVERS` | Vault (OpenBao) server URLs a project's SecretStore and its connection test may name beside the platform's secret store's (comma-separated; chart: `secretStores.allowedServers`) ([secret stores](#secret-stores)) | | No |
 | `EXCLUDED_SIDECAR_PREFIXES` | Container name prefixes excluded from pod/metrics views (comma-separated) | `istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent` | No |
 
 The server provisions and deletes no OAuth client: with

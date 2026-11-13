@@ -61,13 +61,13 @@ func (s *DefaultSqlService) runPostgres(ctx context.Context, values connectionVa
 			return s.postgresFailure(ctx, query, err)
 		}
 		rr := conn.PgConn().ExecParams(ctx, query, nil, nil, nil, nil)
-		columns, rows, truncated := readPostgresRows(conn.TypeMap(), rr, caps)
+		columns, rows, truncatedBy := readPostgresRows(conn.TypeMap(), rr, caps)
 		tag, err := rr.Close()
 		if err != nil {
 			return s.postgresFailure(ctx, query, err)
 		}
 		_, _ = conn.PgConn().Exec(ctx, "ROLLBACK").ReadAll()
-		result.Columns, result.Rows, result.Truncated = columns, rows, truncated
+		result.Columns, result.Rows, result.TruncatedBy = columns, rows, truncatedBy
 		result.CommandTag = tag.String()
 		return result, nil
 	}
@@ -76,7 +76,7 @@ func (s *DefaultSqlService) runPostgres(ctx context.Context, values connectionVa
 	mrr := conn.PgConn().Exec(ctx, query)
 	for mrr.NextResult() {
 		rr := mrr.ResultReader()
-		columns, rows, truncated := readPostgresRows(conn.TypeMap(), rr, caps)
+		columns, rows, truncatedBy := readPostgresRows(conn.TypeMap(), rr, caps)
 		tag, err := rr.Close()
 		if err != nil {
 			_ = mrr.Close()
@@ -85,7 +85,7 @@ func (s *DefaultSqlService) runPostgres(ctx context.Context, values connectionVa
 		result.CommandTag = tag.String()
 		if len(columns) > 0 || !haveColumns {
 			haveColumns = haveColumns || len(columns) > 0
-			result.Columns, result.Rows, result.Truncated = columns, rows, truncated
+			result.Columns, result.Rows, result.TruncatedBy = columns, rows, truncatedBy
 		}
 	}
 	if err := mrr.Close(); err != nil {
@@ -95,19 +95,22 @@ func (s *DefaultSqlService) runPostgres(ctx context.Context, values connectionVa
 }
 
 // readPostgresRows reads the rows of a result, the ones past the caps (rows,
-// bytes of their values) dropped.
-func readPostgresRows(typeMap *pgtype.Map, rr *pgconn.ResultReader, caps sqlCaps) ([]models.SqlColumn, [][]any, bool) {
+// bytes of their values) dropped: which cap dropped them, "" for none.
+func readPostgresRows(typeMap *pgtype.Map, rr *pgconn.ResultReader, caps sqlCaps) ([]models.SqlColumn, [][]any, string) {
 	fields := rr.FieldDescriptions()
 	columns := make([]models.SqlColumn, len(fields))
 	for i, f := range fields {
 		columns[i] = models.SqlColumn{Name: f.Name, Type: postgresTypeName(typeMap, f.DataTypeOID)}
 	}
 	rows := [][]any{}
-	truncated := false
+	truncatedBy := ""
 	size := 0
 	for rr.NextRow() {
-		if truncated || len(rows) >= caps.rows {
-			truncated = true
+		if truncatedBy != "" {
+			continue
+		}
+		if len(rows) >= caps.rows {
+			truncatedBy = models.SqlTruncatedByRows
 			continue
 		}
 		raw := rr.Values()
@@ -115,7 +118,7 @@ func readPostgresRows(typeMap *pgtype.Map, rr *pgconn.ResultReader, caps sqlCaps
 			size += len(v)
 		}
 		if size > caps.bytes {
-			truncated = true
+			truncatedBy = models.SqlTruncatedByBytes
 			continue
 		}
 		row := make([]any, len(raw))
@@ -124,7 +127,7 @@ func readPostgresRows(typeMap *pgtype.Map, rr *pgconn.ResultReader, caps sqlCaps
 		}
 		rows = append(rows, row)
 	}
-	return columns, rows, truncated
+	return columns, rows, truncatedBy
 }
 
 // editorConfig is the driver settings of the editor's connection: the

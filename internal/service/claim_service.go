@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation"
 
 	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-compiler/treeedit"
@@ -49,10 +47,6 @@ type ClaimService interface {
 	// where each is bound; as a provider, the claims bound to it and what
 	// it granted each.
 	InstanceClaims(ctx context.Context, project, instance string) (*models.InstanceClaims, error)
-	// ValidateClaims checks the claims an instance's parameters write or
-	// name, along the references of its package's parameter schema: their
-	// keys, their class, their request against the contract's claim schema.
-	ValidateClaims(ctx context.Context, project string, parameterSchema, params map[string]any) error
 }
 
 // DefaultClaimService reads and writes the claims in the deployments
@@ -62,15 +56,12 @@ type DefaultClaimService struct {
 	contracts   ContractCatalog
 }
 
-// NewDefaultClaimService serves the claims of deployments, their requests
-// checked against contracts.
+// NewDefaultClaimService serves the claims of deployments, the claim
+// schemas of contracts shown with their classes. Every claim is checked by
+// the compile of the tree that writes it, never here.
 func NewDefaultClaimService(deployments *gitops.Deployments, contracts ContractCatalog) *DefaultClaimService {
 	return &DefaultClaimService{deployments: deployments, contracts: contracts}
 }
-
-// providerRef is the form of a provider: an instance or a release, of the
-// claimer's project or <namespace>/<instance|release>.
-var providerRef = regexp.MustCompile(`^([a-z0-9]([-a-z0-9]*[a-z0-9])?/)?[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // namedClaims returns the named claims of a project, by name.
 func (s *DefaultClaimService) namedClaims(ctx context.Context, project string) ([]models.NamedClaim, error) {
@@ -233,7 +224,7 @@ func (s *DefaultClaimService) ListNamedClaims(ctx context.Context, project strin
 func (s *DefaultClaimService) views(t *compiler.Tree, project string, claims []models.NamedClaim) []models.NamedClaimView {
 	out := make([]models.NamedClaimView, 0, len(claims))
 	for _, c := range claims {
-		v := models.NamedClaimView{NamedClaim: c, ID: project + "." + c.Name, Users: []string{}}
+		v := models.NamedClaimView{NamedClaim: c, ID: compiler.NamedClaimID(project, c.Name), Users: []string{}}
 		for _, ti := range t.Instances {
 			if ti.Namespace() == project && ti.Outcome.Err != nil && v.Error == "" &&
 				strings.Contains(ti.Outcome.Err.Error(), "claims."+c.Name+":") {
@@ -261,6 +252,13 @@ func (s *DefaultClaimService) views(t *compiler.Tree, project string, claims []m
 			}
 			if v.Binding != nil && c.Class == "" && c.Provider == "" {
 				v.Binding.Class = s.defaultClass(t, project, c.Contract)
+			}
+		}
+		if v.Binding != nil {
+			if p := t.Release(v.Binding.Namespace, v.Binding.Release); p != nil {
+				if o := p.Granted(v.ID); o != nil && o.Contract == c.Contract {
+					v.Engine, v.Sql = sqlTargetOf(c.Name, c.Contract, o.Values)
+				}
 			}
 		}
 		sort.Strings(v.Users)
@@ -305,103 +303,6 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// validateNamedClaim checks a named claim's declaration: its name, its
-// contract, its class or provider, its request.
-func (s *DefaultClaimService) validateNamedClaim(ctx context.Context, project string, c models.NamedClaim) error {
-	if errs := validation.IsDNS1123Label(c.Name); len(errs) > 0 {
-		return invalid("invalid claim name %q: %s", c.Name, errs[0])
-	}
-	if _, err := s.deployments.GetConnection(ctx, project, c.Name); err == nil {
-		return invalid("claim %q: a connection of the project has that name", c.Name)
-	} else if !errors.Is(err, treeedit.ErrNotFound) {
-		return err
-	}
-	var classes map[string]*models.ContractClasses
-	if err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
-		var err error
-		classes, err = s.classes(r, project)
-		return err
-	}); err != nil {
-		return err
-	}
-	return s.validateClaim("claims."+c.Name, c.Contract, models.ClaimTemplate{Class: c.Class, Provider: c.Provider, Request: c.Request}, nil, classes)
-}
-
-// validateClaim checks a claim of a contract: its class or provider, and
-// its request (fixed, what the package fixes of every claim of the
-// reference, the claim's merged over it) against the contract's claim
-// schema and the class.
-func (s *DefaultClaimService) validateClaim(where, contract string, c models.ClaimTemplate, fixed map[string]any, classes map[string]*models.ContractClasses) error {
-	if s.contracts != nil {
-		if _, known := s.contracts.Get(contract); !known {
-			return invalid("%s: unknown contract %q", where, contract)
-		}
-	}
-	if c.Class != "" && c.Provider != "" {
-		return invalid("%s: a claim names a class or a provider, not both", where)
-	}
-	cc := classes[contract]
-	var class *models.ProvisioningClass
-	switch {
-	case c.Provider != "":
-		if !providerRef.MatchString(c.Provider) {
-			return invalid("%s: provider %q: <instance>, <release>, <namespace>/<instance> or <namespace>/<release>", where, c.Provider)
-		}
-	case c.Class != "":
-		if cc != nil {
-			for i := range cc.Classes {
-				if cc.Classes[i].Name == c.Class {
-					class = &cc.Classes[i]
-				}
-			}
-		}
-		if class == nil {
-			return invalid("%s: class %q is not a class of %s connections (global.okdp.provisioning.%s.classes): %s", where, c.Class, contract, contract, classNames(cc))
-		}
-	default:
-		if cc == nil || cc.Default == "" {
-			return invalid("%s: the claim names no class, and %s connections have no default class (global.okdp.provisioning.%s.default): name one of %s", where, contract, contract, classNames(cc))
-		}
-		for i := range cc.Classes {
-			if cc.Classes[i].Name == cc.Default {
-				class = &cc.Classes[i]
-			}
-		}
-	}
-	request := MergePatch(fixed, c.Request)
-	if class != nil {
-		var set []string
-		for k := range class.Request {
-			if _, ok := request[k]; ok {
-				set = append(set, k)
-			}
-		}
-		sort.Strings(set)
-		if len(set) > 0 {
-			return invalid("%s: request.%s: set by the class %s (global.okdp.provisioning.%s.classes.%s): remove it, or name another class", where, set[0], class.Name, contract, class.Name)
-		}
-		request = MergePatch(class.Request, request)
-	}
-	if s.contracts != nil {
-		if err := s.contracts.ValidateClaimRequest(contract, request); err != nil {
-			return invalid("%s: %v", where, err)
-		}
-	}
-	return nil
-}
-
-// classNames lists the classes of a contract, for messages.
-func classNames(cc *models.ContractClasses) string {
-	if cc == nil || len(cc.Classes) == 0 {
-		return "none is defined"
-	}
-	names := make([]string, 0, len(cc.Classes))
-	for _, c := range cc.Classes {
-		names = append(names, c.Name)
-	}
-	return strings.Join(names, ", ")
-}
-
 // CreateNamedClaim declares a named claim.
 func (s *DefaultClaimService) CreateNamedClaim(ctx context.Context, project string, req models.NamedClaimRequest) (*models.NamedClaimView, error) {
 	return s.putNamedClaim(ctx, project, req.Name, req, true)
@@ -419,17 +320,26 @@ func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name s
 	if err := treeedit.ValidateName("project", project); err != nil {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	}
+	if err := treeedit.ValidateName("claim", name); err != nil {
+		return nil, invalid("%v", err)
+	}
 	claim := models.NamedClaim{Name: name, Contract: req.Contract, Class: req.Class, Provider: req.Provider, Request: req.Request}
 	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, treeedit.ErrNotFound) {
 		return nil, apierrors.NewNotFound(projectsResource, project)
 	} else if err != nil {
 		return nil, err
 	}
-	if err := s.validateNamedClaim(ctx, project, claim); err != nil {
-		return nil, err
+	// The form of its provider, the compile's rule (compiler.CheckProvider),
+	// checked whether or not an instance of the project binds it.
+	if claim.Provider != "" {
+		if err := compiler.CheckProvider("claims."+name+".provider", claim.Provider); err != nil {
+			return nil, rejected(err)
+		}
 	}
-	// Written in project.yaml (okdp-gitops), refused when an instance that
-	// compiled before does not after.
+	// Written in project.yaml (okdp-gitops), checked by the compile of the
+	// tree: its contract, its class or its provider, its request, as the
+	// project's instances bind it, refused when an instance that compiled
+	// before does not after (a project without instance binds none).
 	decl := compiler.ClaimSpec{Name: name, Contract: claim.Contract, Class: claim.Class, Provider: claim.Provider, Request: claim.Request}
 	if _, err := s.deployments.PutClaim(ctx, auth.ActorFrom(ctx), project, decl, create); err != nil {
 		return nil, claimGitError(err, name)
@@ -443,7 +353,7 @@ func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name s
 			return &views[i], nil
 		}
 	}
-	return &models.NamedClaimView{NamedClaim: claim, ID: project + "." + name, Users: []string{}}, nil
+	return &models.NamedClaimView{NamedClaim: claim, ID: compiler.NamedClaimID(project, name), Users: []string{}}, nil
 }
 
 // DeleteNamedClaim removes a named claim, refused while an instance names
@@ -494,7 +404,7 @@ func (s *DefaultClaimService) InstanceClaims(ctx context.Context, project, insta
 	}
 	named := map[string]string{}
 	for _, c := range claims {
-		named[project+"."+c.Name] = c.Name
+		named[compiler.NamedClaimID(project, c.Name)] = c.Name
 	}
 	t, err := s.deployments.Tree(ctx)
 	if layout, ok := errors.AsType[*compiler.LoadError](err); ok {
@@ -548,8 +458,8 @@ func provided(e *compiler.TreeInstance) []models.ProvidedClaim {
 				Claimers:  []models.ClaimUser{},
 				Granted:   granted(e, pc.ID),
 			}
-			if strings.Count(pc.ID, ".") == 1 {
-				c.Name = strings.TrimPrefix(pc.ID, c.Namespace+".")
+			if _, name, ok := namedClaimOf(pc.ID); ok {
+				c.Name = name
 			}
 			out = append(out, c)
 			i = len(out) - 1
@@ -570,10 +480,10 @@ func provided(e *compiler.TreeInstance) []models.ProvidedClaim {
 			provisions[c] = true
 		}
 		for _, o := range e.Outcome.Result.Info.Provides {
-			if _, seen := index[o.Name]; seen || !provisions[o.Contract] || strings.Count(o.Name, ".") != 1 {
+			namespace, name, named := namedClaimOf(o.Name)
+			if _, seen := index[o.Name]; seen || !provisions[o.Contract] || !named {
 				continue
 			}
-			namespace, name, _ := strings.Cut(o.Name, ".")
 			out = append(out, models.ProvidedClaim{
 				ID: o.Name, Contract: o.Contract, Namespace: namespace, Name: name,
 				Claimers: []models.ClaimUser{}, Granted: granted(e, o.Name),
@@ -598,123 +508,14 @@ func granted(e *compiler.TreeInstance, id string) *models.GrantedConnection {
 	return g
 }
 
-// ValidateClaims checks the claims of an instance's parameters, along the
-// connection references of its package's parameter schema.
-func (s *DefaultClaimService) ValidateClaims(ctx context.Context, project string, parameterSchema, params map[string]any) error {
-	type found struct {
-		path     string
-		contract string
-		marker   map[string]any
-		value    any
+// namedClaimOf splits the ID of a named claim, <project>.<name>
+// (compiler.NamedClaimID): ok false for another output, a claim of an
+// instance's field (<namespace>.<instance>.<field>) or an output named
+// after its instance.
+func namedClaimOf(id string) (project, name string, ok bool) {
+	if !compiler.IsClaimID(id) {
+		return "", "", false
 	}
-	var refs []found
-	walkRefValues(parameterSchema, params, "", func(p string, marker map[string]any, v any) {
-		contract, _ := marker["contract"].(string)
-		refs = append(refs, found{p, contract, marker, v})
-	})
-	if len(refs) == 0 {
-		return nil
-	}
-	var classes map[string]*models.ContractClasses
-	err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
-		var err error
-		classes, err = s.classes(r, project)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	claims, err := s.namedClaims(ctx, project)
-	if err != nil {
-		return err
-	}
-	for _, ref := range refs {
-		provision, _ := ref.marker["provision"].(bool)
-		switch v := ref.value.(type) {
-		case map[string]any:
-			if !provision {
-				return invalid("%s: the reference takes no claim (x-okdp-connection-ref's provision): name a connection", ref.path)
-			}
-			var c models.ClaimTemplate
-			for k, value := range v {
-				switch k {
-				case "class", "provider":
-					str, ok := value.(string)
-					if !ok {
-						return invalid("%s: claim: %s must be a string", ref.path, k)
-					}
-					if k == "class" {
-						c.Class = str
-					} else {
-						c.Provider = str
-					}
-				case "request":
-					request, ok := value.(map[string]any)
-					if !ok && value != nil {
-						return invalid("%s: claim: request must be an object", ref.path)
-					}
-					c.Request = request
-				default:
-					return invalid("%s: claim: unknown key %q: class, provider and request only", ref.path, k)
-				}
-			}
-			fixed, _ := ref.marker["request"].(map[string]any)
-			if err := s.validateClaim(ref.path, ref.contract, c, fixed, classes); err != nil {
-				return err
-			}
-		case string:
-			for _, nc := range claims {
-				if nc.Name != v {
-					continue
-				}
-				if !provision {
-					return invalid("%s: %q is a named claim of the project: the reference takes none (x-okdp-connection-ref's provision)", ref.path, v)
-				}
-				if nc.Contract != ref.contract {
-					return invalid("%s: claim %q has contract %q, %q is expected", ref.path, v, nc.Contract, ref.contract)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// walkRefValues calls fn on every connection reference of params, along
-// the parameter schema: through properties (the keys present) and items
-// (every item of a list), as okdp-compiler finds them. path is the
-// parameter path (catalogs[1].storage).
-func walkRefValues(schemaNode map[string]any, value any, p string, fn func(p string, marker map[string]any, value any)) {
-	if marker, ok := schemaNode[ConnectionRefKeyword].(map[string]any); ok {
-		fn(p, marker, value)
-		return
-	}
-	switch v := value.(type) {
-	case map[string]any:
-		props, _ := schemaNode["properties"].(map[string]any)
-		keys := make([]string, 0, len(props))
-		for k := range props {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			sub, ok := props[k].(map[string]any)
-			item, present := v[k]
-			if !ok || !present {
-				continue
-			}
-			next := k
-			if p != "" {
-				next = p + "." + k
-			}
-			walkRefValues(sub, item, next, fn)
-		}
-	case []any:
-		items, ok := schemaNode["items"].(map[string]any)
-		if !ok {
-			return
-		}
-		for i, item := range v {
-			walkRefValues(items, item, fmt.Sprintf("%s[%d]", p, i), fn)
-		}
-	}
+	project, name, _ = strings.Cut(id, ".")
+	return project, name, compiler.NamedClaimID(project, name) == id && compiler.IsName(name)
 }

@@ -4,7 +4,30 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
+
+// mustInputs are the inputs of schema, read by the compiler.
+func mustInputs(t *testing.T, schema map[string]any) []models.PackageInput {
+	t.Helper()
+	inputs, err := inputsFromMarkers(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inputs
+}
+
+// A reference the compile does not reach, under a combinator, is refused
+// as the compile refuses it.
+func TestInputsFromMarkersRefusesAReferenceUnderACombinator(t *testing.T) {
+	schema := map[string]any{"properties": map[string]any{"db": map[string]any{
+		"anyOf": []any{map[string]any{"type": "string", "x-okdp-connection-ref": map[string]any{"contract": "database-server"}}},
+	}}}
+	if _, err := inputsFromMarkers(schema); err == nil {
+		t.Error("a reference under anyOf is out of the compile's reach")
+	}
+}
 
 func TestInputsFromMarkersReadsAConnectionRef(t *testing.T) {
 	var schema map[string]any
@@ -21,7 +44,7 @@ func TestInputsFromMarkersReadsAConnectionRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inputs := inputsFromMarkers(schema)
+	inputs := mustInputs(t, schema)
 
 	if len(inputs) != 2 {
 		t.Fatalf("got %d inputs, want 2 (the KuboCD marker is gone): %+v", len(inputs), inputs)
@@ -40,7 +63,7 @@ func TestInputsFromMarkersReadsAConnectionRef(t *testing.T) {
 
 func TestInputsFromMarkersToleratesAChartWithout(t *testing.T) {
 	schema := map[string]any{"properties": map[string]any{"workers": map[string]any{"type": "integer"}}}
-	if got := inputsFromMarkers(schema); got != nil {
+	if got := mustInputs(t, schema); got != nil {
 		t.Errorf("got %v, want nil", got)
 	}
 }
@@ -95,7 +118,7 @@ func TestInputsFromMarkersWalksNestedRefs(t *testing.T) {
 		}
 	}
 
-	inputs := inputsFromMarkers(schema)
+	inputs := mustInputs(t, schema)
 	got := map[string]string{}
 	for _, in := range inputs {
 		got[in.Path] = in.Contract
@@ -133,7 +156,7 @@ func TestInputsFromMarkersReadsAClaimTemplate(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
 		t.Fatal(err)
 	}
-	inputs := inputsFromMarkers(schema)
+	inputs := mustInputs(t, schema)
 	if len(inputs) != 2 {
 		t.Fatalf("got %d inputs, want 2: %+v", len(inputs), inputs)
 	}

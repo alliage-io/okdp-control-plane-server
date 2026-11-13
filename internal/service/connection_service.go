@@ -10,7 +10,6 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/validation"
 
 	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-compiler/treeedit"
@@ -117,6 +116,10 @@ type ValidationError struct {
 	// Code tells the console what kind of refusal it is, when one is set
 	// (ErrorCodeDoesNotCompile).
 	Code string
+	// Fields are the problems of the compile at the fields they are about
+	// (compiler.FieldErrors), for a form that shows each beside its field;
+	// none for another refusal.
+	Fields []compiler.FieldError
 }
 
 func (e *ValidationError) Error() string { return e.message }
@@ -129,9 +132,26 @@ func invalid(format string, args ...any) error {
 // its message is the compiler's, one line per problem.
 const ErrorCodeDoesNotCompile = "does-not-compile"
 
-// DoesNotCompile is the refusal of a compile.
+// DoesNotCompile is the refusal of a compile, its problems at their fields.
 func DoesNotCompile(err *treeedit.CompileError) error {
-	return &ValidationError{message: err.Error(), Code: ErrorCodeDoesNotCompile}
+	return &ValidationError{message: err.Error(), Code: ErrorCodeDoesNotCompile, Fields: compiler.FieldErrors(err.Err)}
+}
+
+// rejected is a refusal of the compiler's rules out of a compile (a
+// connection at its declaration, a claim's provider), its problems at
+// their fields.
+func rejected(err error) error {
+	return &ValidationError{message: err.Error(), Fields: compiler.FieldErrors(err)}
+}
+
+// ValidationFields returns the field problems of a rejected input, none
+// when it has none.
+func ValidationFields(err error) []compiler.FieldError {
+	var validationErr *ValidationError
+	if errors.As(err, &validationErr) {
+		return validationErr.Fields
+	}
+	return nil
 }
 
 // ValidationCode returns the code of a rejected input, "" when it has none.
@@ -249,18 +269,19 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	}
 
 	public, secrets := splitValues(descriptor, values)
-	if err := s.catalog.ValidatePublic(descriptor.Name, public); err != nil {
-		return nil, invalid("%v", err)
-	}
 	secretName := ""
 	ownSecret := req.ExistingSecret == ""
-
 	if !ownSecret {
 		// Pointing at a Secret somebody else owns: nothing is written, and the
 		// credential fields of the payload are ignored on purpose.
 		secretName = req.ExistingSecret
 	} else if len(secrets) > 0 {
 		secretName = req.Name + credentialsSecretSuffix
+	}
+	if err := s.checkConnection(ctx, namespace, compiler.Connection{Name: req.Name, Contract: descriptor.Name, Values: withoutSecrets(descriptor, values), SecretRef: secretName}); err != nil {
+		return nil, err
+	}
+	if ownSecret && len(secrets) > 0 {
 		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, secretName, secrets); err != nil {
 			return nil, storeCredentialsError(err)
 		}
@@ -304,9 +325,6 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 	}
 
 	public, secrets := splitValues(descriptor, values)
-	if err := s.catalog.ValidatePublic(descriptor.Name, public); err != nil {
-		return nil, invalid("%v", err)
-	}
 	ownedName := name + credentialsSecretSuffix
 	secretName := existing.SecretRef
 
@@ -328,13 +346,18 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 		}
 		secretName = req.ExistingSecret
 	} else if len(secrets) > 0 {
+		secretName = ownedName
+	}
+	if err := s.checkConnection(ctx, namespace, compiler.Connection{Name: name, Contract: descriptor.Name, Values: withoutSecrets(descriptor, values), SecretRef: secretName}); err != nil {
+		return nil, err
+	}
+	if len(descriptor.SecretFields()) > 0 && req.ExistingSecret == "" && len(secrets) > 0 {
 		// An unchanged credential is not resubmitted by the console, so only
 		// write the Secret when new values actually arrived, otherwise an edit
 		// of, say, the port would blank out the password.
 		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, ownedName, secrets); err != nil {
 			return nil, storeCredentialsError(err)
 		}
-		secretName = ownedName
 	}
 
 	updated := compiler.Connection{
@@ -426,7 +449,11 @@ func (s *DefaultConnectionService) Test(ctx context.Context, req models.Connecti
 	// nobody was asked for. Testing the normalized values is also the point of
 	// the button, which is to try what will actually be stored.
 	values := s.catalog.Normalize(req.Type, req.Values)
-	if err := s.catalog.Validate(req.Type, values); err != nil {
+	descriptor, _ := s.catalog.Get(req.Type)
+	if err := missingCredentials(descriptor, values); err != nil {
+		return result(false, models.TestReasonInvalidConfig, err.Error())
+	}
+	if err := s.checkConnection(ctx, "", compiler.Connection{Name: "test", Contract: req.Type, Values: withoutSecrets(descriptor, values)}); err != nil {
 		return result(false, models.TestReasonInvalidConfig, err.Error())
 	}
 
@@ -536,7 +563,7 @@ func (s *DefaultConnectionService) outputToInternal(d repository.Descriptor, out
 // an output named by its package is a label, the release name by default.
 // Such a connection is its claimer's, reached through the claim: the
 // selectable outputs leave it out.
-func IsClaimID(name string) bool { return strings.Contains(name, ".") }
+func IsClaimID(name string) bool { return compiler.IsClaimID(name) }
 
 // validateRequest checks a submitted connection and returns the values as they
 // should be stored: derived fields filled, fields put out of play by the
@@ -546,8 +573,8 @@ func (s *DefaultConnectionService) validateRequest(ctx context.Context, namespac
 	if !s.available() {
 		return nil, nil, ErrConnectionsUnavailable
 	}
-	if errs := validation.IsDNS1123Label(req.Name); len(errs) > 0 {
-		return nil, nil, invalid("invalid connection name %q: %s", req.Name, errs[0])
+	if err := treeedit.ValidateName("connection", req.Name); err != nil {
+		return nil, nil, invalid("%v", err)
 	}
 
 	descriptor, known := s.catalog.Get(req.Type)
@@ -562,22 +589,89 @@ func (s *DefaultConnectionService) validateRequest(ctx context.Context, namespac
 	// client editing what it just read sends it back. No contract field
 	// declares it, and the write paths set it again from the request.
 	delete(values, valueSecretRef)
-	validateValues := s.catalog.Validate
-	if isUpdate {
-		validateValues = s.catalog.ValidateUpdate
-	}
 	if req.ExistingSecret != "" {
 		// The credentials live in a Secret we do not own, so the payload is not
-		// expected to carry them: validate as an edit, which tolerates that.
-		validateValues = s.catalog.ValidateUpdate
+		// expected to carry them.
 		if err := s.checkExistingSecret(ctx, namespace, req, descriptor); err != nil {
 			return nil, nil, err
 		}
-	}
-	if err := validateValues(req.Type, values); err != nil {
-		return nil, nil, invalid("%s", err.Error())
+	} else if !isUpdate {
+		// The console does not resend a credential that has not changed: on
+		// an edit, a missing one is left as it is.
+		if err := missingCredentials(descriptor, values); err != nil {
+			return nil, nil, err
+		}
 	}
 	return descriptor, values, nil
+}
+
+// missingCredentials refuses values that lack a credential the contract
+// requires (x-okdp-required of a secret field in play), or give one that
+// is no string: the credentials Secret is the console's to write, the
+// compile never sees it. The connection's other fields are the compiler's
+// to check (checkConnection).
+func missingCredentials(descriptor *models.ContractDescriptor, values map[string]any) error {
+	if descriptor == nil {
+		return nil
+	}
+	for i := range descriptor.Fields {
+		f := &descriptor.Fields[i]
+		if !f.Secret || !f.Applies(values) {
+			continue
+		}
+		switch v, present := values[f.Name]; {
+		case !present || v == nil || v == "":
+			if f.Required {
+				return invalid("%s is required", f.Name)
+			}
+		default:
+			if _, ok := v.(string); !ok {
+				return invalid("%s must be a string", f.Name)
+			}
+		}
+	}
+	return nil
+}
+
+// withoutSecrets is values but the contract's secret fields, the keys no
+// field of the contract declares kept: the connection as the compile
+// checks it, which refuses them.
+func withoutSecrets(descriptor *models.ContractDescriptor, values map[string]any) map[string]any {
+	out := make(map[string]any, len(values))
+	for k, v := range values {
+		if descriptor != nil {
+			if f, known := descriptor.Field(k); known && f.Secret {
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// checkConnection refuses the connection c of project ("" for a test) as
+// the compile of the tree checks it at its declaration
+// (compiler.CheckConnection): its contract, its fields, none unknown, its
+// required ones after completion, their types, its secretRef. A 400 of the
+// compiler's message, its problems at their fields.
+func (s *DefaultConnectionService) checkConnection(ctx context.Context, project string, c compiler.Connection) error {
+	platform := map[string]any{}
+	if s.deployments != nil {
+		raw, err := s.deployments.ReadPlatformValues(ctx)
+		switch {
+		case errors.Is(err, treeedit.ErrNotFound):
+		case err != nil:
+			return err
+		default:
+			if platform, err = treeedit.DecodeValues(raw); err != nil {
+				return fmt.Errorf("%s: %w", compiler.PlatformFile, err)
+			}
+		}
+	}
+	if err := compiler.CheckConnection(s.catalog.Contracts(), project, c, platform); err != nil {
+		return rejected(err)
+	}
+	return nil
 }
 
 // checkExistingSecret refuses a connection pointed at a Secret that is absent or
@@ -691,12 +785,15 @@ func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, 
 				if contract != "" && c.Contract != contract {
 					continue
 				}
+				engine, sql := sqlTargetOf(c.Name, c.Contract, c.Values)
 				result = append(result, models.SelectableConnection{
 					Name:        c.Name,
 					Scope:       scope.name,
 					Type:        c.Contract,
 					Status:      "Ready",
 					Description: c.Description,
+					Engine:      engine,
+					Sql:         sql,
 				})
 			}
 		}
@@ -711,6 +808,9 @@ func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, 
 			if (contract != "" && output.Contract != contract) || IsClaimID(output.Name) {
 				continue
 			}
+			// An output is no target of the SQL editor: a Trino instance's
+			// statements go to .../services/:s/sql.
+			engine, _ := output.Values["engine"].(string)
 			result = append(result, models.SelectableConnection{
 				Name:       output.Name,
 				Scope:      models.ConnectionScopeProject,
@@ -718,6 +818,7 @@ func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, 
 				Status:     "Ready",
 				Managed:    true,
 				ProvidedBy: d.Release,
+				Engine:     engine,
 			})
 		}
 	}

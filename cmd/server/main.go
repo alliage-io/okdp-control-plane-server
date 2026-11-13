@@ -23,6 +23,7 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/buildinfo"
 	"github.com/okdp/okdp-control-plane-server/internal/config"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
@@ -169,11 +170,22 @@ func main() {
 	// platform values). The identity capability answers on the same condition
 	// as the identity routes.
 	capabilityService := service.NewDefaultCapabilityService(contextRepo, identityRepo.Available)
+	capabilityService.Sql = models.SqlCapability{
+		DefaultRows:             cfg.SQL.DefaultRows,
+		MaxRows:                 cfg.SQL.MaxRows,
+		MaxResultBytes:          cfg.SQL.MaxResultBytes,
+		StatementTimeoutSeconds: int(cfg.SQL.StatementTimeout.Seconds()),
+		MaxConcurrentPerUser:    cfg.SQL.MaxConcurrentPerUser,
+	}
 	capabilitiesHandler := handlers.NewCapabilitiesHandler(capabilityService)
 
 	// Initialize SecretStore stack (namespace is dynamic per project)
 	secretStoreRepo := repository.NewSecretStoreRepository(k8sClient, k8sDiscoveryClient)
-	secretStoreService := service.NewDefaultSecretStoreService(secretStoreRepo)
+	// A store of kubernetes auth authenticates as the ServiceAccount of the
+	// platform's secret store in the namespace, with its audiences, to its
+	// server or one of SECRET_STORE_ALLOWED_SERVERS: the compile of the
+	// tree gives them.
+	secretStoreService := service.NewDefaultSecretStoreService(secretStoreRepo, deployments.Tree, cfg.SecretStores.AllowedServers)
 	secretStoreHandler := handlers.NewSecretStoreHandler(secretStoreService)
 
 	// Initialize ExternalSecret stack (namespace is dynamic per project)
@@ -211,7 +223,6 @@ func main() {
 		K8sClient:       k8sClient,
 		TypedClient:     k8sTypedClient,
 		SidecarPrefixes: cfg.ExcludedSidecarPrefixes,
-		Claims:          claimService,
 	})
 	serviceHandler := handlers.NewServiceHandler(serviceService, schemaService)
 	// What each chart of an instance is rendered with: its compiled values
@@ -239,6 +250,7 @@ func main() {
 	}
 	connectionService := service.NewDefaultConnectionService(deployments, connectionSecrets, descriptors, serviceService.ListServices, contractCatalog)
 	connectionService.SetNetworkGuard(guard)
+	secretStoreService.SetNetworkGuard(guard)
 	connectionHandler := handlers.NewConnectionHandler(connectionService)
 
 	// SQL editor: statements run on a deployed engine (Trino) at the URL of its

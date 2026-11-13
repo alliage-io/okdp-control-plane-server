@@ -30,6 +30,12 @@ type SqlQueryError struct {
 	ColumnNumber int    `json:"columnNumber,omitempty"`
 }
 
+// Which cap truncated a result (SqlQueryResult.TruncatedBy).
+const (
+	SqlTruncatedByRows  = "rows"
+	SqlTruncatedByBytes = "bytes"
+)
+
 // SqlQueryResult is the outcome of a SQL execution: either a result set or
 // an engine-reported error.
 type SqlQueryResult struct {
@@ -38,7 +44,13 @@ type SqlQueryResult struct {
 	Rows      [][]any     `json:"rows"`
 	RowCount  int         `json:"rowCount"`
 	Truncated bool        `json:"truncated"`
-	ElapsedMs int64       `json:"elapsedMs"`
+	// TruncatedBy says which cap dropped rows when Truncated: rows (the
+	// row cap, MaxRows) or bytes (SQL_MAX_RESULT_BYTES).
+	TruncatedBy string `json:"truncatedBy,omitempty"`
+	// MaxRows is the row cap the statement ran with: the request's
+	// maxRows, else SQL_DEFAULT_ROWS, at most SQL_MAX_ROWS.
+	MaxRows   int   `json:"maxRows"`
+	ElapsedMs int64 `json:"elapsedMs"`
 	// CommandTag is the PostgreSQL command tag of the last statement
 	// (e.g. "INSERT 0 5"). Empty for Trino.
 	CommandTag string         `json:"commandTag,omitempty"`

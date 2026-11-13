@@ -61,7 +61,7 @@ func (h *ConnectionHandler) list(c *gin.Context, namespace string) {
 
 // ListSelectable godoc
 // @Summary      Connections offered for a package input of a given contract
-// @Description  The project's connections (scope project), the platform's (scope platform: connections.<name> of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed)
+// @Description  The project's connections (scope project), the platform's (scope platform: connections.<name> of platform.yaml, which every instance may reference), and the outputs the project's instances publish (managed). Each with its engine value (database-server: postgresql, mysql) and whether the SQL editor runs on it (sql: a declared database-server connection of engine postgresql)
 // @Tags         connections
 // @Produce      json
 // @Param        name path string true "Project name"

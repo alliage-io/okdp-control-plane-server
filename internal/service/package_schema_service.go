@@ -213,7 +213,11 @@ func (s *DefaultPackageSchemaService) GetPackageInputs(ctx context.Context, serv
 	if err != nil {
 		return nil, err
 	}
-	return inputsFromMarkers(schema), nil
+	inputs, err := inputsFromMarkers(schema)
+	if err != nil {
+		return nil, fmt.Errorf("the connection references of %s %s: %w", serviceName, tag, err)
+	}
+	return inputs, nil
 }
 
 // packageSchema reads config.schema.json of a package: {"type": "object"}
@@ -281,92 +285,52 @@ func deepCopyMap(src map[string]any) map[string]any {
 	return dst
 }
 
-// ConnectionRefKeyword marks a string parameter holding the name of a
-// connection of a contract: {"x-okdp-connection-ref": {"contract": "<contract>"}}.
-const ConnectionRefKeyword = "x-okdp-connection-ref"
-
-// inputsFromMarkers reads the connection inputs a chart declares: every
-// property carrying an x-okdp-connection-ref marker, at any depth (a Trino
-// catalog list holds one per item). Path is the JSON path of the property
-// (hiveCatalogs[].metastore). A root property is also a Parameter the form can
-// offer a choice for; a nested one is reported so the console knows the
-// contract of the field it renders inside its list.
-func inputsFromMarkers(parameters map[string]any) []models.PackageInput {
+// inputsFromMarkers reads the connection inputs a package declares, its
+// connection references as the compile reads them (compiler.ConnectionRefs):
+// at any depth through properties and items (a Trino catalog list holds
+// one per item), never under a combinator or a definition, where the
+// compile refuses one. Path is the parameter path of the property
+// (hiveCatalogs[].metastore). A root property is also a Parameter the form
+// can offer a choice for; a nested one is reported so the console knows
+// the contract of the field it renders inside its list.
+func inputsFromMarkers(parameters map[string]any) ([]models.PackageInput, error) {
+	refs, err := compiler.ConnectionRefs(parameters)
+	if err != nil {
+		return nil, err
+	}
 	var inputs []models.PackageInput
-	walkConnectionRefs(parameters, "", func(p string, property map[string]any, contract string, required bool) {
-		description, _ := property["description"].(string)
-		marker, _ := property[ConnectionRefKeyword].(map[string]any)
+	for _, ref := range refs {
+		description, _ := ref.Property["description"].(string)
 		// A default lets the form say the binding is inherited instead of
 		// showing None, which reads as "nothing", the opposite of the truth.
-		defaultValue, _ := property["default"].(string)
+		defaultValue, _ := ref.Property["default"].(string)
 		input := models.PackageInput{
-			Alias:       p,
-			Path:        p,
-			Contract:    contract,
-			Optional:    !required,
+			Alias:       ref.Path,
+			Path:        ref.Path,
+			Contract:    ref.Contract,
+			Optional:    !ref.Required,
 			Default:     defaultValue,
 			Description: description,
+			Provision:   ref.Provision,
 		}
-		input.Provision, _ = marker["provision"].(bool)
-		input.Request, _ = marker["request"].(map[string]any)
-		input.Require, _ = marker["require"].(map[string]any)
-		if claim, ok := property["default"].(map[string]any); ok && input.Provision {
+		if len(ref.Request) > 0 {
+			input.Request = ref.Request
+		}
+		if len(ref.Require) > 0 {
+			input.Require = ref.Require
+		}
+		if claim, ok := ref.Property["default"].(map[string]any); ok && input.Provision {
 			template := &models.ClaimTemplate{}
 			template.Class, _ = claim["class"].(string)
 			template.Provider, _ = claim["provider"].(string)
 			template.Request, _ = claim["request"].(map[string]any)
 			input.DefaultClaim = template
 		}
-		if !strings.ContainsAny(p, ".[") {
-			input.Parameter = p
+		if !strings.ContainsAny(ref.Path, ".[") {
+			input.Parameter = ref.Path
 		}
 		inputs = append(inputs, input)
-	})
+	}
 	sort.Slice(inputs, func(i, j int) bool { return inputs[i].Path < inputs[j].Path })
-	return inputs
-}
-
-// walkConnectionRefs calls fn for every property of node marked
-// x-okdp-connection-ref. The required flag of a ref lives in its PARENT's
-// required array.
-func walkConnectionRefs(node map[string]any, prefix string, fn func(path string, property map[string]any, contract string, required bool)) {
-	required := map[string]bool{}
-	if list, ok := node["required"].([]any); ok {
-		for _, item := range list {
-			if name, ok := item.(string); ok {
-				required[name] = true
-			}
-		}
-	}
-	if properties, ok := node["properties"].(map[string]any); ok {
-		for name, raw := range properties {
-			property, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			p := name
-			if prefix != "" {
-				p = prefix + "." + name
-			}
-			if marker, ok := property[ConnectionRefKeyword].(map[string]any); ok {
-				if contract, _ := marker["contract"].(string); contract != "" {
-					fn(p, property, contract, required[name])
-				}
-				continue
-			}
-			walkConnectionRefs(property, p, fn)
-		}
-	}
-	if items, ok := node["items"].(map[string]any); ok {
-		walkConnectionRefs(items, prefix+"[]", fn)
-	}
-	for _, combinator := range []string{"allOf", "anyOf", "oneOf"} {
-		if list, ok := node[combinator].([]any); ok {
-			for _, raw := range list {
-				if sub, ok := raw.(map[string]any); ok {
-					walkConnectionRefs(sub, prefix, fn)
-				}
-			}
-		}
-	}
+	return inputs, nil
 }

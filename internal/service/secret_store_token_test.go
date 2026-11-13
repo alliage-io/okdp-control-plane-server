@@ -11,9 +11,23 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/service/mocks"
 )
+
+// loopbackTester tests the connection of a store whose server is server,
+// allowed, on the loopback of the test, which its guard lets it reach.
+func loopbackTester(t *testing.T, server string) *DefaultSecretStoreService {
+	t.Helper()
+	guard, err := netguard.New([]string{"127.0.0.0/8", "::1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := NewDefaultSecretStoreService(nil, nil, []string{server})
+	svc.SetNetworkGuard(guard)
+	return svc
+}
 
 func tokenRequest(server, token string) models.SecretStoreRequest {
 	return models.SecretStoreRequest{
@@ -49,7 +63,7 @@ func TestValidateVaultTokenUsesGet(t *testing.T) {
 	}))
 	defer vault.Close()
 
-	svc := &DefaultSecretStoreService{}
+	svc := loopbackTester(t, vault.URL)
 	if err := svc.TestConnection(context.Background(), tokenRequest(vault.URL, "app-token")); err != nil {
 		t.Fatalf("a least-privilege token was rejected: %v", err)
 	}
@@ -80,7 +94,7 @@ func TestValidateVaultTokenStillRejectsForbidden(t *testing.T) {
 	}))
 	defer vault.Close()
 
-	svc := &DefaultSecretStoreService{}
+	svc := loopbackTester(t, vault.URL)
 	err := svc.TestConnection(context.Background(), tokenRequest(vault.URL, "bad-token"))
 	if err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("a refused token was accepted: %v", err)
@@ -96,10 +110,48 @@ func TestCreateSecretStoreRefusesAForeignCredentialsSecret(t *testing.T) {
 	req := tokenRequest("https://vault.example", "s.token")
 	req.Name = "p-hive"
 
-	_, err := NewDefaultSecretStoreService(repo).CreateSecretStore(context.Background(), "demo", req)
+	_, err := NewDefaultSecretStoreService(repo, nil, nil).CreateSecretStore(context.Background(), "demo", req)
 
 	if !IsValidationError(err) {
 		t.Fatalf("expected a validation error, got %v", err)
 	}
 	repo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+}
+
+// A connection test sends the caller's token to an allowed server only,
+// through the SQL editor's guard: a server neither the platform's nor
+// allowed is refused before any request, the loopback of the pod too,
+// and a redirect is not followed.
+func TestConnectionTestReachesAnAllowedServerOnly(t *testing.T) {
+	calls := make(chan string, 4)
+	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.URL.Path
+		if r.URL.Path == "/redirect/v1/auth/token/lookup-self" {
+			http.Redirect(w, r, "/v1/auth/token/lookup-self", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer vault.Close()
+	ctx := context.Background()
+
+	if err := loopbackTester(t, "https://vault.example.com").TestConnection(ctx, tokenRequest(vault.URL, "t")); !IsValidationError(err) || !strings.Contains(err.Error(), "not an allowed Vault server") {
+		t.Errorf("a server not allowed: %v", err)
+	}
+	guarded := NewDefaultSecretStoreService(nil, nil, []string{vault.URL})
+	guarded.SetNetworkGuard(netguard.Default())
+	if err := guarded.TestConnection(ctx, tokenRequest(vault.URL, "t")); !IsValidationError(err) || !strings.Contains(err.Error(), netguard.ErrRefused.Error()) {
+		t.Errorf("the loopback: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a refused test reached the server: %s", <-calls)
+	}
+
+	redirect := vault.URL + "/redirect"
+	if err := loopbackTester(t, redirect).TestConnection(ctx, tokenRequest(redirect, "t")); err == nil || !strings.Contains(err.Error(), "status 302") {
+		t.Errorf("a redirect: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Errorf("%d requests, want the redirect not followed", len(calls))
+	}
 }

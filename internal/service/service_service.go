@@ -1,14 +1,10 @@
 package service
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +15,6 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/gitops"
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,9 +31,6 @@ var (
 	ErrCatalogServiceExists   = errors.New("service already exists in the catalog")
 	ErrCatalogServiceNotFound = errors.New("service not found in the catalog")
 )
-
-// serviceNameRe matches a DNS-style identifier (lowercase alphanumerics and dashes).
-var serviceNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
 // servicesResource names the resource in the not-found and conflict errors
 // the handlers map to 404 and 409.
@@ -103,9 +95,6 @@ type ServiceDeps struct {
 	// Changes is shared with the other writers of the deployments repository,
 	// so a live stream hears about their commits too. Created when nil.
 	Changes *ChangeNotifier
-	// Claims checks the claims the parameters write or name, before the
-	// compile does (nil: the compile only).
-	Claims ClaimService
 }
 
 type DefaultServiceService struct {
@@ -119,7 +108,6 @@ type DefaultServiceService struct {
 	typedClient     kubernetes.Interface
 	sidecarPrefixes []string
 	changes         *ChangeNotifier
-	claims          ClaimService
 }
 
 func NewDefaultServiceService(d ServiceDeps) *DefaultServiceService {
@@ -137,7 +125,6 @@ func NewDefaultServiceService(d ServiceDeps) *DefaultServiceService {
 		typedClient:     d.TypedClient,
 		sidecarPrefixes: d.SidecarPrefixes,
 		changes:         d.Changes,
-		claims:          d.Claims,
 	}
 }
 
@@ -186,12 +173,11 @@ func (s *DefaultServiceService) AddPlatformService(ctx context.Context, svc mode
 		}
 	}
 
-	if err := s.validateVersionsInRegistry(ctx, svc); err != nil {
-		return nil, err
-	}
-
+	// The service a package of the catalogs, its default one of its
+	// versions: the compile's check of catalogs.yaml (UpdateCatalog), a
+	// refusal a 400 of its problems.
 	if err := s.catalogWriter.AddPlatformService(ctx, svc); err != nil {
-		return nil, err
+		return nil, catalogWriteError(err)
 	}
 	s.platformRepo.Invalidate()
 	return &svc, nil
@@ -211,12 +197,8 @@ func (s *DefaultServiceService) UpdatePlatformService(ctx context.Context, name 
 		return nil, err
 	}
 
-	if err := s.validateVersionsInRegistry(ctx, svc); err != nil {
-		return nil, err
-	}
-
 	if err := s.catalogWriter.UpdatePlatformService(ctx, name, svc); err != nil {
-		return nil, err
+		return nil, catalogWriteError(err)
 	}
 	s.platformRepo.Invalidate()
 	return &svc, nil
@@ -251,35 +233,15 @@ func (s *DefaultServiceService) findCatalogService(ctx context.Context, name str
 	return nil, fmt.Errorf("%w: %q", ErrCatalogServiceNotFound, name)
 }
 
-// validateVersionsInRegistry checks a menu entry against the catalogs: the
-// service must have a package there, and the versions and the default it
-// names must be versions of it. Strict: if the catalogs cannot be read, the
-// service is rejected.
-func (s *DefaultServiceService) validateVersionsInRegistry(ctx context.Context, svc models.PlatformService) error {
-	if s.schemaService == nil {
-		return nil
+// catalogWriteError is a catalogs.yaml the compile refuses
+// (gitops.Compiler.CheckCatalogs, a *treeedit.CompileError), a 400 of its
+// problems; any other error as it is.
+func catalogWriteError(err error) error {
+	var compileErr *treeedit.CompileError
+	if errors.As(err, &compileErr) {
+		return DoesNotCompile(compileErr)
 	}
-	tags, err := s.schemaService.ListPackageTags(ctx, svc.Name, svc.Repository)
-	if err != nil {
-		return fmt.Errorf("%w: could not find the package %q in the catalogs (%v)", ErrCatalogValidation, svc.Name, err)
-	}
-	available := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		available[t] = true
-	}
-	var missing []string
-	for _, v := range svc.Versions {
-		if !available[v] {
-			missing = append(missing, v)
-		}
-	}
-	if svc.DefaultVersion != "" && !available[svc.DefaultVersion] {
-		missing = append(missing, svc.DefaultVersion)
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%w: version(s) %v not found in the catalogs for %q (available: %v)", ErrCatalogValidation, missing, svc.Name, tags)
-	}
-	return nil
+	return err
 }
 
 // normalizeAndValidateCatalogService enforces the catalog rules. The
@@ -291,7 +253,7 @@ func normalizeAndValidateCatalogService(svc *models.PlatformService) error {
 	if svc.Name == "" {
 		return fmt.Errorf("%w: name is required", ErrCatalogValidation)
 	}
-	if !serviceNameRe.MatchString(svc.Name) {
+	if !compiler.IsName(svc.Name) {
 		return fmt.Errorf("%w: name %q must be a lowercase DNS-style identifier", ErrCatalogValidation, svc.Name)
 	}
 	svc.Category = strings.TrimSpace(svc.Category)
@@ -380,9 +342,10 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 		return nil, invalid("%v", err)
 	}
 
-	if err := s.validateParameters(ctx, project, req.Service, deployTag, req.Parameters); err != nil {
-		return nil, err
-	}
+	// The parameters are checked by the compile of the write: its package's
+	// schema, its connection references, its claims bound to their
+	// providers, the keys the context gives (global, connections, claims),
+	// each problem at its field (a 400 does-not-compile).
 
 	values := req.Parameters
 	if values == nil {
@@ -410,68 +373,32 @@ func (s *DefaultServiceService) DeployService(ctx context.Context, project strin
 	return &instance, nil
 }
 
-// errStaleValidation reports that the declaration changed between the
-// validation of a patch and its write.
-var errStaleValidation = errors.New("the instance changed while its parameters were validated")
-
-// maxValidationReplays bounds how many times a patch is validated again
-// because the declaration kept changing under it.
-const maxValidationReplays = 3
-
 // UpdateServiceParameters applies a JSON Merge Patch to the parameters of an
-// instance (and its chart version when req.Tag is set).
-//
-// Validation reads the catalog and the chart schema, through the deployments
-// repository: it must not run inside UpdateInstance, whose callback holds the
-// store's write lock (a read there waits for itself). The patch is validated
-// against the current declaration first; the write then re-applies it to the
-// latest declaration and only proceeds when that declaration is the one that
-// was validated, otherwise the whole validation runs again.
+// instance (and its chart version when req.Tag is set), checked by the
+// compile of the write: the patched instance, its package's schema, its
+// connection references and its claims, each problem at its field.
 func (s *DefaultServiceService) UpdateServiceParameters(ctx context.Context, project, name string, req models.ServiceUpdateRequest) (*models.ServiceInstance, error) {
-	for attempt := 0; ; attempt++ {
-		current, err := s.deployments.GetInstance(ctx, project, name)
-		if err != nil {
-			return nil, gitError(err, name)
-		}
-		version := current.Version
+	state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *treeedit.Instance) error {
 		if req.Tag != "" {
-			version = req.Tag
+			st.Version = req.Tag
 		}
 		// JSON Merge Patch (RFC 7386): a submitted key replaces the stored
 		// one, null deletes it, objects merge recursively, arrays replace.
-		values := MergePatch(current.Values, req.Parameters)
-		if err := s.validateParameters(ctx, project, current.Service, version, values); err != nil {
-			return nil, err
-		}
-
-		state, revision, err := s.deployments.UpdateInstance(ctx, auth.ActorFrom(ctx), project, name, func(st *treeedit.Instance) error {
-			if st.Service != current.Service || st.Version != current.Version ||
-				!reflect.DeepEqual(st.Values, current.Values) {
-				return errStaleValidation
-			}
-			st.Version = version
-			st.Values = MergePatch(st.Values, req.Parameters)
-			return nil
-		})
-		if errors.Is(err, errStaleValidation) {
-			if attempt < maxValidationReplays {
-				continue
-			}
-			return nil, fmt.Errorf("%w: %v", gitops.ErrConflict, err)
-		}
-		if err != nil {
-			return nil, gitError(err, name)
-		}
-		s.changes.Notify(project, name, "MODIFIED")
-
-		instance, err := s.GetService(ctx, project, name)
-		if err != nil {
-			fallback := s.assemble(*state, repository.EngineStatus{}, nil, nil, nil)
-			instance = &fallback
-		}
-		instance.Revision = revision
-		return instance, nil
+		st.Values = MergePatch(st.Values, req.Parameters)
+		return nil
+	})
+	if err != nil {
+		return nil, gitError(err, name)
 	}
+	s.changes.Notify(project, name, "MODIFIED")
+
+	instance, err := s.GetService(ctx, project, name)
+	if err != nil {
+		fallback := s.assemble(*state, repository.EngineStatus{}, nil, nil, nil)
+		instance = &fallback
+	}
+	instance.Revision = revision
+	return instance, nil
 }
 
 func (s *DefaultServiceService) DeleteService(ctx context.Context, project, name string) error {
@@ -1041,89 +968,6 @@ func (s *DefaultServiceService) resolvePlatformService(ctx context.Context, name
 		}
 	}
 	return nil, invalid("service %q is not available in the platform", name)
-}
-
-// validateReserved refuses the keys the platform fills, never config.yaml.
-func validateReserved(params map[string]any) error {
-	for _, key := range PlatformKeys {
-		if _, set := params[key]; set {
-			return invalid("parameter %q is reserved: the platform fills it", key)
-		}
-	}
-	return nil
-}
-
-// validateParameters checks an instance's parameters against its package's
-// parameter schema, then the claims they write or name (a class of the
-// project, a request the contract's claim schema allows), before the
-// compile of the write checks the rest.
-func (s *DefaultServiceService) validateParameters(ctx context.Context, project, serviceName, tag string, params map[string]any) error {
-	if err := validateReserved(params); err != nil {
-		return err
-	}
-	if s.schemaService == nil {
-		return nil
-	}
-
-	schemaMap, err := s.schemaService.GetParameterSchema(ctx, serviceName, tag)
-	if IsCatalogNotFound(err) {
-		return invalid("%v", err)
-	}
-	if err != nil {
-		return fmt.Errorf("could not fetch schema for %s@%s: %w", serviceName, tag, err)
-	}
-
-	if schemaMap == nil {
-		// No schema at all: nothing to validate against. (A chart without
-		// values.schema.json already fails the fetch above.)
-		return nil
-	}
-
-	// From here on the chart has a schema: one that cannot be used fails the
-	// request (fail closed) rather than committing values nobody checked.
-	schemaJSON, err := json.Marshal(schemaMap)
-	if err != nil {
-		return fmt.Errorf("the schema of %s@%s cannot be encoded: %w", serviceName, tag, err)
-	}
-
-	compiler := jsonschema.NewCompiler()
-	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaJSON))
-	if err != nil {
-		return fmt.Errorf("the schema of %s@%s cannot be read: %w", serviceName, tag, err)
-	}
-	if err := compiler.AddResource("schema.json", schemaDoc); err != nil {
-		return fmt.Errorf("the schema of %s@%s cannot be loaded: %w", serviceName, tag, err)
-	}
-
-	sch, err := compiler.Compile("schema.json")
-	if err != nil {
-		return fmt.Errorf("the schema of %s@%s does not compile: %w", serviceName, tag, err)
-	}
-
-	if params == nil {
-		// No parameter at all is an empty values file, not a null document.
-		params = map[string]any{}
-	}
-	paramsJSON, err := json.Marshal(params)
-	if err != nil {
-		return fmt.Errorf("failed to marshal parameters: %w", err)
-	}
-
-	var paramsAny any
-	if err := json.Unmarshal(paramsJSON, &paramsAny); err != nil {
-		return fmt.Errorf("failed to unmarshal parameters: %w", err)
-	}
-
-	if err := sch.Validate(paramsAny); err != nil {
-		return invalid("parameter validation failed: invalid parameters: %v", err)
-	}
-	if s.claims != nil {
-		values, _ := paramsAny.(map[string]any)
-		if err := s.claims.ValidateClaims(ctx, project, schemaMap, values); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // --- Pod operations ---

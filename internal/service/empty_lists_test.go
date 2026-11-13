@@ -29,7 +29,7 @@ func TestNoSecretStoreListsAsEmpty(t *testing.T) {
 	repo := new(mocks.SecretStoreRepository)
 	repo.On("List", mock.Anything, "p").Return([]crd.ESOSecretStore{}, nil)
 	repo.On("Get", mock.Anything, "p", "s").Return(&crd.ESOSecretStore{}, nil)
-	svc := NewDefaultSecretStoreService(repo)
+	svc := NewDefaultSecretStoreService(repo, nil, nil)
 
 	stores, err := svc.ListSecretStores(context.Background(), "p")
 	if err != nil {

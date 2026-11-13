@@ -123,6 +123,18 @@ sqlEditor:
   # Statements one user runs at once; past it, 429.
   maxConcurrentPerUser: 2
 
+# The SecretStores the console creates in the projects' namespaces. One of
+# kubernetes auth authenticates as the ServiceAccount of the platform's
+# secret store in the namespace (global.okdp.secrets.serviceAccount, which
+# the compiled manifests create), with the audiences of its provider
+# (global.okdp.secrets.provider.vault.auth.kubernetes.serviceAccountRef.
+# audiences), and names the platform's Vault server
+# (global.okdp.secrets.provider.vault.server) or one of allowedServers; the
+# connection tests too, through the network of sqlEditor.allowedNetworks.
+secretStores:
+  # Vault (OpenBao) server URLs allowed beside the platform's.
+  allowedServers: []
+
 # The server's rights outside the projects' namespaces (chart/templates/
 # rbac.yaml): Namespaces get, create, delete; the HelmReleases of
 # gitops.releasesNamespace (flux) or the Applications of

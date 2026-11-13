@@ -167,7 +167,7 @@ func (s *DefaultSparkService) completeConf(ctx context.Context, project string, 
 	}
 	if _, ok := sparkConf["spark.ui.reverseProxyUrl"]; !ok {
 		if ingressSuffix, _ := s.contextRepo.GetIngressSuffix(ctx); ingressSuffix != "" {
-			releaseName := project + "-spark-history-server"
+			releaseName := compiler.ReleaseName(project, historyServerInstance)
 			sparkConf["spark.ui.reverseProxyUrl"] = fmt.Sprintf("https://%s.%s", releaseName, ingressSuffix)
 		}
 	}
@@ -289,7 +289,7 @@ func (s *DefaultSparkService) GetSparkUI(ctx context.Context, project, appName s
 
 	ingressSuffix, _ := s.contextRepo.GetIngressSuffix(ctx)
 
-	releaseName := project + "-spark-history-server"
+	releaseName := compiler.ReleaseName(project, historyServerInstance)
 	info := &models.SparkUIInfo{
 		ServiceName: app.Status.DriverInfo.WebUIServiceName,
 		Available:   false,
@@ -386,8 +386,12 @@ func sparkAppToInstance(app *crd.SparkApplication) models.SparkAppInstance {
 	}
 }
 
+// historyServerInstance is the instance of a project's Spark history
+// server, its release compiler.ReleaseName(project, historyServerInstance).
+const historyServerInstance = "spark-history-server"
+
 func (s *DefaultSparkService) findEventLogPVC(ctx context.Context, project string) string {
-	pvcName := project + "-spark-history-server-events"
+	pvcName := compiler.ReleaseName(project, historyServerInstance) + "-events"
 	_, err := s.typedClient.CoreV1().PersistentVolumeClaims(project).Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
 		return ""

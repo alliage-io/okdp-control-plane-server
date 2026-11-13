@@ -33,6 +33,11 @@ func validationBody(err error) gin.H {
 	if code := service.ValidationCode(err); code != "" {
 		body["code"] = code
 	}
+	// The compiler's problems at their fields (compiler.FieldErrors): path,
+	// its JSON pointer, message; "" path for the instance as a whole.
+	if fields := service.ValidationFields(err); len(fields) > 0 {
+		body["fields"] = fields
+	}
 	return body
 }
 

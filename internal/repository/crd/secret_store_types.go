@@ -59,9 +59,12 @@ type ESOKubernetesAuth struct {
 	ServiceAccountRef *ESOServiceAccountRef `json:"serviceAccountRef,omitempty"`
 }
 
-// ESOServiceAccountRef references a Kubernetes ServiceAccount
+// ESOServiceAccountRef references a Kubernetes ServiceAccount, and the
+// audiences of the token External Secrets requests for it: the Vault's, so
+// the token is no credential of the API server.
 type ESOServiceAccountRef struct {
-	Name string `json:"name"`
+	Name      string   `json:"name"`
+	Audiences []string `json:"audiences,omitempty"`
 }
 
 // ESOSecretStoreStatus holds the observed status from ESO
@@ -121,6 +124,7 @@ func (in *ESOVaultAuth) DeepCopyInto(out *ESOVaultAuth) {
 		if (*in).ServiceAccountRef != nil {
 			(*out).ServiceAccountRef = new(ESOServiceAccountRef)
 			*(*out).ServiceAccountRef = *(*in).ServiceAccountRef
+			(*out).ServiceAccountRef.Audiences = append([]string(nil), (*in).ServiceAccountRef.Audiences...)
 		}
 	}
 }

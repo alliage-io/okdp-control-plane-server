@@ -7,9 +7,21 @@ import (
 	"os"
 	"testing"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// checkValues is the check of a connection's values on its write: the
+// credentials the console writes (missingCredentials), the rest the
+// compiler's (compiler.CheckConnection).
+func checkValues(catalog ContractCatalog, contract string, values map[string]any) error {
+	descriptor, _ := catalog.Get(contract)
+	if err := missingCredentials(descriptor, values); err != nil {
+		return err
+	}
+	return compiler.CheckConnection(catalog.Contracts(), "demo", compiler.Connection{Name: "c", Contract: contract, Values: withoutSecrets(descriptor, values), SecretRef: "c-credentials"}, nil)
+}
 
 func newTestCatalog(t *testing.T) ContractCatalog {
 	t.Helper()
@@ -87,7 +99,7 @@ func TestPostgreSQLOffersThePreferSSLMode(t *testing.T) {
 func TestValidateAcceptsAWellFormedPayload(t *testing.T) {
 	catalog := newTestCatalog(t)
 
-	err := catalog.Validate("database-server", map[string]any{
+	err := checkValues(catalog, "database-server", map[string]any{
 		"engine":   "postgresql",
 		"driver":   "org.postgresql.Driver",
 		"host":     "db.example.com",
@@ -125,32 +137,32 @@ func TestValidateRejectsBadPayloads(t *testing.T) {
 		{
 			name:    "missing required field",
 			mutate:  func(v map[string]any) { delete(v, "host") },
-			message: "Host is required",
+			message: `field "host" is required`,
 		},
 		{
 			name:    "empty required field",
 			mutate:  func(v map[string]any) { v["host"] = "" },
-			message: "Host is required",
+			message: `field "host" is required`,
 		},
 		{
 			name:    "port out of range",
 			mutate:  func(v map[string]any) { v["port"] = float64(70000) },
-			message: "Port must be at most 65535",
+			message: "maximum: got 70,000, want 65,535",
 		},
 		{
 			name:    "port not a number",
 			mutate:  func(v map[string]any) { v["port"] = "5432" },
-			message: "Port must be a number",
+			message: "got string, want integer",
 		},
 		{
 			name:    "value outside the enum",
 			mutate:  func(v map[string]any) { v["sslMode"] = "maybe" },
-			message: "TLS mode must be one of",
+			message: "value must be one of",
 		},
 		{
 			name:    "unknown field",
 			mutate:  func(v map[string]any) { v["hostname"] = "db.example.com" },
-			message: `unknown field "hostname"`,
+			message: `field "hostname" is not part of the database-server contract`,
 		},
 	}
 
@@ -159,7 +171,7 @@ func TestValidateRejectsBadPayloads(t *testing.T) {
 			values := base()
 			tt.mutate(values)
 
-			err := catalog.Validate("database-server", values)
+			err := checkValues(catalog, "database-server", values)
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.message)
@@ -170,17 +182,17 @@ func TestValidateRejectsBadPayloads(t *testing.T) {
 func TestValidateRejectsUnknownType(t *testing.T) {
 	catalog := newTestCatalog(t)
 
-	err := catalog.Validate("oracle", map[string]any{})
+	err := checkValues(catalog, "oracle", map[string]any{})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `unknown contract "oracle"`)
+	assert.Contains(t, err.Error(), "the oracle contract cannot be read")
 }
 
 func TestValidateAllowsOmittingOptionalFields(t *testing.T) {
 	catalog := newTestCatalog(t)
 
 	// region and pathStyle carry defaults and must not be demanded.
-	err := catalog.Validate("s3", map[string]any{
+	err := checkValues(catalog, "s3", map[string]any{
 		"apiUrl":    "https://s3.example.com",
 		"bucket":    "warehouse",
 		"accessKey": "AKIA",
@@ -227,7 +239,7 @@ func TestNormalizeDropsTheFieldsTheEngineRulesOut(t *testing.T) {
 func TestValidateIgnoresAFieldTheEngineRulesOut(t *testing.T) {
 	catalog := newTestCatalog(t)
 
-	err := catalog.Validate("database-server", map[string]any{
+	err := checkValues(catalog, "database-server", map[string]any{
 		"engine":   "mysql",
 		"driver":   "com.mysql.cj.jdbc.Driver",
 		"host":     "db.example.com",
@@ -304,22 +316,13 @@ func TestNormalizeWritesTheDeclaredDefaults(t *testing.T) {
 	}
 }
 
-func TestValidatePublicUsesTheContractSchema(t *testing.T) {
-	catalog, err := testContractCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.ValidatePublic("hive", map[string]any{"thriftUri": "thrift://hms:9083"}); err != nil {
-		t.Errorf("valid hive values rejected: %v", err)
-	}
-	if err := catalog.ValidatePublic("hive", map[string]any{}); err == nil {
-		t.Errorf("a hive connection without thriftUri passed")
-	}
-	if err := catalog.ValidatePublic("database-server", map[string]any{
+func TestTheCompilerChecksTheConnectionAtItsDeclaration(t *testing.T) {
+	catalog := newTestCatalog(t)
+	assert.NoError(t, checkValues(catalog, "hive", map[string]any{"thriftUri": "thrift://hms:9083"}))
+	assert.Error(t, checkValues(catalog, "hive", map[string]any{}), "a hive connection without thriftUri")
+	assert.Error(t, checkValues(catalog, "database-server", map[string]any{
 		"engine": "postgresql", "driver": "org.postgresql.Driver", "host": "db", "port": 5432.5, "dbName": "x",
-	}); err == nil {
-		t.Errorf("a fractional port passed the integer type")
-	}
+	}), "a fractional port passed the integer type")
 }
 
 // testContractCatalog loads testdata/contracts, the contracts of the OKDP
@@ -360,19 +363,9 @@ func TestTheClaimSchemaIsWhatAClaimMayRequest(t *testing.T) {
 	require.NotNil(t, db.ClaimSchema, "database-server takes requests (x-okdp-claim)")
 	assert.Contains(t, db.ClaimSchema["properties"], "extensions")
 
-	assert.NoError(t, catalog.ValidateClaimRequest("database-server", map[string]any{"extensions": []any{"vector"}, "size": "5Gi"}))
-	assert.NoError(t, catalog.ValidateClaimRequest("database-server", nil))
-	err := catalog.ValidateClaimRequest("database-server", map[string]any{"extensions": []any{"postgis"}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "claim schema (x-okdp-claim)")
-	assert.Error(t, catalog.ValidateClaimRequest("database-server", map[string]any{"replicas": 2}))
-
 	// hive has no provisioner: a claim of it requests nothing.
 	hive, _ := catalog.Get("hive")
 	assert.Nil(t, hive.ClaimSchema)
-	assert.NoError(t, catalog.ValidateClaimRequest("hive", nil))
-	assert.Error(t, catalog.ValidateClaimRequest("hive", map[string]any{"size": "1Gi"}))
-	assert.Error(t, catalog.ValidateClaimRequest("nope", nil))
 }
 
 func TestAClaimIDIsNoOutputName(t *testing.T) {
@@ -380,4 +373,5 @@ func TestAClaimIDIsNoOutputName(t *testing.T) {
 	assert.True(t, IsClaimID("demo.analytics"))
 	assert.False(t, IsClaimID("demo-hive"))
 	assert.False(t, IsClaimID("demo-pg-hive"))
+	assert.False(t, IsClaimID("demo..hive"), "the compiler's form: DNS-1123 labels joined by dots")
 }

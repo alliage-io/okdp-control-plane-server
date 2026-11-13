@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -116,11 +117,59 @@ func TestSqlTruncatesAndCancels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RowCount != 3 || !res.Truncated {
+	if res.RowCount != 3 || !res.Truncated || res.TruncatedBy != models.SqlTruncatedByRows || res.MaxRows != 3 {
 		t.Fatalf("unexpected result %+v", res)
 	}
 	if trino.deletes != 1 {
 		t.Fatalf("expected the query to be cancelled once, got %d", trino.deletes)
+	}
+
+	// The size cap, the row cap told apart; the cap applied, the default
+	// one or the largest.
+	svc := sqlServiceFor(srv.URL, "trino")
+	svc.limits.MaxResultBytes = 1
+	res, err = svc.ExecuteQuery(context.Background(), "p", "t", "", models.SqlQueryRequest{Query: "SELECT n", MaxRows: 1 << 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || res.TruncatedBy != models.SqlTruncatedByBytes || res.MaxRows != 10000 {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	res, err = sqlServiceFor(srv.URL, "trino").ExecuteQuery(context.Background(), "p", "t", "", models.SqlQueryRequest{Query: "SELECT n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated || res.TruncatedBy != "" || res.MaxRows != 1000 {
+		t.Fatalf("unexpected result %+v", res)
+	}
+}
+
+// A Trino statement past the statement timeout is a coded error, not a
+// failure of the engine.
+func TestSqlTimeoutIsCoded(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	svc := NewDefaultSqlService(func(context.Context, string, string) (*models.ServiceInstance, error) {
+		return &models.ServiceInstance{Name: "t", Service: "trino", URL: srv.URL}, nil
+	}, SqlConnectionSource{}, nil, SqlOptions{Guard: loopbackAllowed(), Limits: SqlLimits{StatementTimeout: 50 * time.Millisecond}})
+	_, err := svc.ExecuteQuery(context.Background(), "p", "t", "", models.SqlQueryRequest{Query: "SELECT 1"})
+	if !errors.Is(err, ErrSqlTimeout) {
+		t.Fatalf("got %v, want ErrSqlTimeout", err)
+	}
+
+	// A client that goes away is no timeout.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = svc.ExecuteQuery(ctx, "p", "t", "", models.SqlQueryRequest{Query: "SELECT 1"})
+	if err == nil || errors.Is(err, ErrSqlTimeout) {
+		t.Fatalf("got %v, want the client's cancellation", err)
 	}
 }
 

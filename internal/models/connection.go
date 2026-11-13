@@ -299,6 +299,13 @@ type SelectableConnection struct {
 	Managed     bool   `json:"managed"`
 	// ProvidedBy names the release publishing a managed connection.
 	ProvidedBy string `json:"providedBy,omitempty"`
+	// Engine is the connection's engine value (database-server:
+	// postgresql, mysql), "" when it has none.
+	Engine string `json:"engine,omitempty"`
+	// Sql reports whether the SQL editor runs statements on it (POST
+	// .../connections/:c/sql): a declared database-server connection of
+	// engine postgresql; any other answers 400 sql-unsupported.
+	Sql bool `json:"sql"`
 }
 
 // ConnectionConsumer is one service bound to a connection. The console shows

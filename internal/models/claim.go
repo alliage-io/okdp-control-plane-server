@@ -38,6 +38,13 @@ type NamedClaimView struct {
 	Users []string `json:"users"`
 	// Error is why the claim does not bind, the compiler's message.
 	Error string `json:"error,omitempty"`
+	// Engine is the engine value of the connection its provider granted it
+	// (database-server: postgresql, mysql), "" when none is granted yet.
+	Engine string `json:"engine,omitempty"`
+	// Sql reports whether the SQL editor runs statements on it (POST
+	// .../connections/:claim/sql): a database-server connection of engine
+	// postgresql granted by its provider.
+	Sql bool `json:"sql"`
 }
 
 // ClaimBinding is the provider a claim is bound to.

@@ -4,11 +4,17 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
+
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 	"github.com/sirupsen/logrus"
@@ -31,14 +37,53 @@ type SecretStoreService interface {
 
 type DefaultSecretStoreService struct {
 	repo repository.SecretStoreRepository
+	// tree is the compile of the tree: the platform's secret store, its
+	// server, the ServiceAccount of each namespace and its audiences
+	// (platformStore); nil, none.
+	tree func(ctx context.Context) (*compiler.Tree, error)
+	// platform, when set, is the platform's secret store instead (tests).
+	platform func(ctx context.Context) *platformSecretStore
+	// allowedServers are the Vault servers a store may name beside the
+	// platform's (SECRET_STORE_ALLOWED_SERVERS).
+	allowedServers []string
+	// guard is the network a connection test reaches (netguard.Default
+	// when nil): never loopback, link-local or the API server.
+	guard *netguard.Guard
 }
 
 func (s *DefaultSecretStoreService) Available(ctx context.Context) bool {
 	return s.repo.Available(ctx)
 }
 
-func NewDefaultSecretStoreService(repo repository.SecretStoreRepository) *DefaultSecretStoreService {
-	return &DefaultSecretStoreService{repo: repo}
+// NewDefaultSecretStoreService manages the SecretStores of the projects'
+// namespaces: tree is the compile of the tree, the platform's secret
+// store read from it, allowedServers the Vault servers allowed beside its
+// own.
+func NewDefaultSecretStoreService(repo repository.SecretStoreRepository, tree func(ctx context.Context) (*compiler.Tree, error), allowedServers []string) *DefaultSecretStoreService {
+	return &DefaultSecretStoreService{repo: repo, tree: tree, allowedServers: allowedServers}
+}
+
+// SetNetworkGuard sets the network policy of the connection tests: the SQL
+// editor's.
+func (s *DefaultSecretStoreService) SetNetworkGuard(guard *netguard.Guard) { s.guard = guard }
+
+// checkKubernetesAuth pins a store of kubernetes auth to the platform's
+// secret store: its server allowed (allowedServer), its ServiceAccount
+// and audiences the platform's (kubernetesIdentity). A store of token auth
+// sends the caller's own token, to the server the caller names.
+func (s *DefaultSecretStoreService) checkKubernetesAuth(ctx context.Context, req models.SecretStoreRequest) (*platformSecretStore, error) {
+	if req.Auth.Type != "kubernetes" {
+		return nil, nil
+	}
+	platform := s.platformStore(ctx)
+	identity, err := kubernetesIdentity(req.Auth.Config.ServiceAccount, platform)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.allowedServer(req.Vault.Server, platform); err != nil {
+		return nil, err
+	}
+	return identity, nil
 }
 
 func (s *DefaultSecretStoreService) ListSecretStores(ctx context.Context, namespace string) ([]models.SecretStoreResponse, error) {
@@ -57,6 +102,10 @@ func (s *DefaultSecretStoreService) ListSecretStores(ctx context.Context, namesp
 
 func (s *DefaultSecretStoreService) CreateSecretStore(ctx context.Context, namespace string, req models.SecretStoreRequest) (*models.SecretStoreResponse, error) {
 	if err := validateRequest(req); err != nil {
+		return nil, err
+	}
+	identity, err := s.checkKubernetesAuth(ctx, req)
+	if err != nil {
 		return nil, err
 	}
 
@@ -82,7 +131,7 @@ func (s *DefaultSecretStoreService) CreateSecretStore(ctx context.Context, names
 		}
 	}
 
-	store := buildSecretStoreCRD(namespace, req, credSecretName)
+	store := buildSecretStoreCRD(namespace, req, credSecretName, identity)
 
 	if err := s.repo.Create(ctx, namespace, store); err != nil {
 		return nil, err
@@ -107,6 +156,10 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
+	identity, err := s.checkKubernetesAuth(ctx, req)
+	if err != nil {
+		return nil, err
+	}
 
 	credSecretName := name + "-credentials"
 
@@ -115,8 +168,7 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 	existingVault := existing.Spec.Provider.Vault
 	usedTokenAuth := existingVault != nil && existingVault.Auth.TokenSecretRef != nil
 
-	switch req.Auth.Type {
-	case "token":
+	if req.Auth.Type == "token" {
 		if req.Auth.Config.Token != "" {
 			secretData := map[string][]byte{"token": []byte(req.Auth.Config.Token)}
 			if err := s.repo.CreateOrUpdateSecret(ctx, namespace, credSecretName, secretData); err != nil {
@@ -127,17 +179,6 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 			// store could never sync while the API reported success.
 			return nil, invalid("auth.config.token is required when switching to token auth")
 		}
-	case "kubernetes":
-		// The CR is rebuilt from the request, so a caller that omits the
-		// account would silently repoint the store at default and break the
-		// Vault role binding. Absent means "leave it", like the token above,
-		// while an empty string is an explicit ask for the default account.
-		if req.Auth.Config.ServiceAccount == nil && existingVault != nil && existingVault.Auth.Kubernetes != nil {
-			if ref := existingVault.Auth.Kubernetes.ServiceAccountRef; ref != nil {
-				current := ref.Name
-				req.Auth.Config.ServiceAccount = &current
-			}
-		}
 	}
 
 	if req.IsDefault {
@@ -146,7 +187,7 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 		}
 	}
 
-	store := buildSecretStoreCRD(namespace, req, credSecretName)
+	store := buildSecretStoreCRD(namespace, req, credSecretName, identity)
 	store.ResourceVersion = existing.ResourceVersion
 
 	if err := s.repo.Update(ctx, namespace, store); err != nil {
@@ -188,26 +229,39 @@ func (s *DefaultSecretStoreService) DeleteSecretStore(ctx context.Context, names
 	return s.repo.Delete(ctx, namespace, name)
 }
 
+// TestConnection checks a store's settings without writing anything: its
+// server one a store may name (allowedServer), reached through the guard
+// of the SQL editor (loopback, link-local and the API server refused);
+// kubernetes auth checked as a write checks it, the caller's token of
+// token auth looked up.
 func (s *DefaultSecretStoreService) TestConnection(ctx context.Context, req models.SecretStoreRequest) error {
 	if req.Vault == nil {
-		return fmt.Errorf("vault configuration is required")
+		return invalid("vault configuration is required")
 	}
 	if req.Vault.Server == "" {
-		return fmt.Errorf("vault.server is required")
+		return invalid("vault.server is required")
 	}
 	if req.Auth == nil {
-		return fmt.Errorf("auth configuration is required")
+		return invalid("auth configuration is required")
 	}
 
 	if req.Auth.Type == "kubernetes" {
-		return nil
+		_, err := s.checkKubernetesAuth(ctx, req)
+		return err
+	}
+	if err := s.allowedServer(req.Vault.Server, s.platformStore(ctx)); err != nil {
+		return err
 	}
 
 	if req.Auth.Config.Token == "" {
-		return fmt.Errorf("auth.config.token is required for token auth")
+		return invalid("auth.config.token is required for token auth")
 	}
 
-	return validateVaultToken(ctx, req.Vault.Server, req.Auth.Config.Token, req.Vault.CABundle)
+	guard := s.guard
+	if guard == nil {
+		guard = netguard.Default()
+	}
+	return validateVaultToken(ctx, guard, req.Vault.Server, req.Auth.Config.Token, req.Vault.CABundle)
 }
 
 // validateVaultToken calls GET /v1/auth/token/lookup-self to verify that
@@ -217,7 +271,11 @@ func (s *DefaultSecretStoreService) TestConnection(ctx context.Context, req mode
 // The method matters: Vault's default policy grants "read" on this path, which
 // maps to GET. A POST needs the "update" capability, which no least-privilege
 // token carries, so only a root token would have passed.
-func validateVaultToken(ctx context.Context, server, token, caBundle string) error {
+//
+// The request dials through guard, follows no redirect (the token would
+// go to the server a redirect names) and goes through no proxy; a failure
+// to connect is reported without the cause, which is logged.
+func validateVaultToken(ctx context.Context, guard *netguard.Guard, server, token, caBundle string) error {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 
 	if caBundle != "" {
@@ -230,10 +288,13 @@ func validateVaultToken(ctx context.Context, server, token, caBundle string) err
 
 	client := &http.Client{
 		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+		Transport: &http.Transport{TLSClientConfig: tlsConfig, DialContext: guard.Dialer(10 * time.Second).DialContext},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
-	url := server + "/v1/auth/token/lookup-self"
+	url := strings.TrimRight(server, "/") + "/v1/auth/token/lookup-self"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to build request: %w", err)
@@ -241,8 +302,12 @@ func validateVaultToken(ctx context.Context, server, token, caBundle string) err
 	httpReq.Header.Set("X-Vault-Token", token)
 
 	resp, err := client.Do(httpReq)
+	if errors.Is(err, netguard.ErrRefused) {
+		return invalid("vault.server %q: %v", server, netguard.ErrRefused)
+	}
 	if err != nil {
-		return fmt.Errorf("connection failed: %w", err)
+		logrus.WithError(err).WithField("server", server).Info("A secret store's connection test failed")
+		return fmt.Errorf("connection failed: the Vault server did not answer")
 	}
 	defer resp.Body.Close()
 
@@ -331,7 +396,9 @@ func validateRequest(req models.SecretStoreRequest) error {
 	return nil
 }
 
-func buildSecretStoreCRD(namespace string, req models.SecretStoreRequest, credSecretName string) *crd.ESOSecretStore {
+// buildSecretStoreCRD is the SecretStore of a request; identity is what a
+// store of kubernetes auth authenticates as (checkKubernetesAuth).
+func buildSecretStoreCRD(namespace string, req models.SecretStoreRequest, credSecretName string, identity *platformSecretStore) *crd.ESOSecretStore {
 	store := &crd.ESOSecretStore{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: crd.SecretStoreAPIVersion,
@@ -364,18 +431,16 @@ func buildSecretStoreCRD(namespace string, req models.SecretStoreRequest, credSe
 		if mountPath == "" {
 			mountPath = "kubernetes"
 		}
-		// Vault matches the bound_service_account_names of the role against this
-		// account, so pinning it to default forced every role onto the identity
-		// the whole namespace already shares.
-		serviceAccount := "default"
-		if req.Auth.Config.ServiceAccount != nil && *req.Auth.Config.ServiceAccount != "" {
-			serviceAccount = *req.Auth.Config.ServiceAccount
-		}
+		// The ServiceAccount of the platform's secret store, which the
+		// compiled manifests create in the namespace, and the platform's
+		// audiences: External Secrets requests a token of that account for
+		// those audiences only, never one of the API server's.
 		store.Spec.Provider.Vault.Auth.Kubernetes = &crd.ESOKubernetesAuth{
 			MountPath: mountPath,
 			Role:      req.Auth.Config.Role,
 			ServiceAccountRef: &crd.ESOServiceAccountRef{
-				Name: serviceAccount,
+				Name:      identity.serviceAccount,
+				Audiences: slices.Clone(identity.audiences),
 			},
 		}
 	}

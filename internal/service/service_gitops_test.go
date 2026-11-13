@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -174,14 +176,48 @@ func assertNoOutput(t *testing.T, files map[string]string) {
 	}
 }
 
+// compiledCatalog gives d the compiler of a catalog holding trino
+// 480.0.0-p21 and 481.0.0-p01 of the parameter schema schema, and the
+// contracts of testdata/contracts: the parameters of each write are
+// checked by its compile, as the server's are.
+func compiledCatalog(t *testing.T, d *gitops.Deployments, schema map[string]any) {
+	t.Helper()
+	cat := t.TempDir()
+	raw, err := json.Marshal(schema)
+	require.NoError(t, err)
+	for _, version := range []string{"480.0.0-p21", "481.0.0-p01"} {
+		dir := filepath.Join(cat, "catalog", "trino", version)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "Chart.yaml"), []byte("apiVersion: v2\nname: trino\nversion: "+version+"\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.schema.json"), raw, 0o644))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(cat, "contracts"), 0o755))
+	hive, err := os.ReadFile("testdata/contracts/hive.schema.json")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cat, "contracts", "hive.schema.json"), hive, 0o644))
+	d.Compiler = gitops.NewCompiler(&catalog.Loader{Dirs: map[string]string{"test": cat}})
+	_, err = d.Store.Update(context.Background(), gitops.Commit{Subject: "the catalogs"}, func(tx gitops.Tx) error {
+		return tx.WriteFile(treeedit.CatalogsFile, []byte("repositories:\n  - {name: test, url: https://git.example.org/test.git}\n"))
+	})
+	require.NoError(t, err)
+}
+
 func TestDeployRefusesInvalidParametersWithoutCommitting(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	compiledCatalog(t, svc.deployments, trinoSchema())
 	before := len(store.Messages)
 
+	// The compile of the write checks the parameters, each problem at its
+	// field.
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"workers": float64(0)}})
 	assert.True(t, IsValidationError(err), "got %v", err)
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err))
+	require.NotEmpty(t, ValidationFields(err))
+	assert.Equal(t, "workers", ValidationFields(err)[0].Path, "%+v", ValidationFields(err))
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"colour": "red"}})
 	assert.True(t, IsValidationError(err), "got %v", err)
+	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"catalogs": []any{map[string]any{"name": "x", "hive": "nowhere"}}}})
+	assert.True(t, IsValidationError(err), "a reference to no connection: got %v", err)
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "unknown"})
 	assert.True(t, IsValidationError(err), "got %v", err)
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "Bad_Name"})
@@ -190,18 +226,27 @@ func TestDeployRefusesInvalidParametersWithoutCommitting(t *testing.T) {
 	assert.True(t, IsValidationError(err), "global is the platform's: got %v", err)
 
 	assert.Equal(t, before, len(store.Messages), "nothing may be committed")
+
+	// A valid one is.
+	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"workers": float64(2), "catalogs": []any{map[string]any{"name": "lake", "hive": "lake-hms"}}}})
+	require.NoError(t, err)
+	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Parameters: map[string]any{"workers": "many"}})
+	assert.True(t, IsValidationError(err), "got %v", err)
+	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Tag: "481.0.0-p01", Parameters: map[string]any{"workers": float64(3)}})
+	require.NoError(t, err)
+	assert.Contains(t, store.Files()["projects/demo/instances/trino/config.yaml"], "workers: 3")
 }
 
-// A chart schema that does not compile is not a chart without schema: the
-// parameters cannot be checked, so nothing is committed (fail closed).
+// A package's schema that does not compile fails the compile of the
+// write: nothing is committed, a 400 of the compiler's message.
 func TestDeployFailsClosedOnASchemaThatDoesNotCompile(t *testing.T) {
 	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
-	svc.schemaService = stubSchema{schema: map[string]any{"type": "not-a-type"}}
+	compiledCatalog(t, svc.deployments, map[string]any{"type": "not-a-type"})
 	before := len(store.Messages)
 
 	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"workers": float64(2)}})
 	require.Error(t, err)
-	assert.False(t, IsValidationError(err), "a broken chart is not the caller's mistake: %v", err)
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
 	assert.Contains(t, err.Error(), "does not compile")
 	assert.Equal(t, before, len(store.Messages), "nothing may be committed")
 }
@@ -228,8 +273,6 @@ func TestUpdateMergesIntoValuesAndMovesTheVersion(t *testing.T) {
 	assert.Equal(t, repository.PhaseUpdating, instance.Status, "the engine still runs the previous version")
 	assert.NotEmpty(t, instance.Revision)
 
-	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Parameters: map[string]any{"workers": "many"}})
-	assert.True(t, IsValidationError(err), "got %v", err)
 	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "nope", models.ServiceUpdateRequest{})
 	assert.True(t, apierrors.IsNotFound(err), "got %v", err)
 }
@@ -406,14 +449,21 @@ func TestPatchWithNullDeletesFromConfigYAML(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "{}\n", store.Files()["projects/demo/instances/trino/config.yaml"])
+}
 
-	// Validation runs on the merged result: removing a required key is refused.
-	svc.schemaService = stubSchema{schema: map[string]any{
+// The compile checks the merged result: removing a required key is
+// refused.
+func TestAPatchIsCheckedMerged(t *testing.T) {
+	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	compiledCatalog(t, svc.deployments, map[string]any{
 		"type": "object", "required": []any{"workers"},
 		"properties": map[string]any{"workers": map[string]any{"type": "integer"}},
-	}}
+	})
+	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{"workers": float64(2)}})
+	require.NoError(t, err)
 	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Parameters: map[string]any{"workers": nil}})
 	assert.True(t, IsValidationError(err), "got %v", err)
+	assert.Equal(t, "workers: 2\n", store.Files()["projects/demo/instances/trino/config.yaml"])
 }
 
 // The chart's defaults apply at render time; config.yaml holds only what the
@@ -532,4 +582,69 @@ func TestDeletingAnInstanceKeepsTheKeycloakClients(t *testing.T) {
 
 	require.NoError(t, svc.DeleteService(aliceContext(), "okdp", "control-plane"))
 	assert.Zero(t, calls.Load(), "Keycloak is never called on a delete")
+}
+
+// The keys the context gives (global, connections, claims) and a version
+// the catalogs do not have are refused by the compile of the write, not
+// by a rule of the server: a 400 does-not-compile of the compiler's
+// message, nothing committed.
+func TestTheCompileRefusesTheContextsKeysAndAnUnknownVersion(t *testing.T) {
+	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	compiledCatalog(t, svc.deployments, trinoSchema())
+	before := len(store.Messages)
+
+	for key, want := range map[string]string{
+		"global":      "values layer 1: global is set by the context (Inputs.Context)",
+		"connections": "values layer 1: connections are given by the context (Inputs.Context)",
+		"claims":      "values layer 1: claims are declared by the context (Inputs.Context)",
+	} {
+		_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Parameters: map[string]any{key: "x"}})
+		assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%s: %v", key, err)
+		assert.Contains(t, fmt.Sprint(err), want, key)
+	}
+	_, err := svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", Tag: "9.9.9"})
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
+	assert.Contains(t, fmt.Sprint(err), `version "9.9.9" of service "trino" is not in test/catalog/trino`)
+	assert.Len(t, store.Messages, before, "nothing may be committed")
+
+	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino"})
+	require.NoError(t, err)
+	before = len(store.Messages)
+	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Parameters: map[string]any{"global": map[string]any{"okdp": map[string]any{}}}})
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
+	assert.Contains(t, fmt.Sprint(err), "global.okdp is set by the context")
+	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "trino", models.ServiceUpdateRequest{Tag: "9.9.9"})
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
+	assert.Len(t, store.Messages, before, "nothing may be committed")
+}
+
+// A menu entry of the catalog is checked by the compile's check of
+// catalogs.yaml: a default version of no package of the service, a
+// service of no catalog, a 400 of its problems; nothing committed.
+func TestTheMenuIsCheckedByTheCompile(t *testing.T) {
+	svc, store := newGitServiceUnderTest(t, stubEngine{}, nil)
+	compiledCatalog(t, svc.deployments, trinoSchema())
+	svc.catalogWriter = repository.NewCatalogWriterRepository(svc.deployments)
+	svc.platformRepo = stubPlatformWithout{}
+	before := len(store.Messages)
+
+	_, err := svc.AddPlatformService(aliceContext(), models.PlatformService{Name: "trino", Category: "SQL", DefaultVersion: "9.9.9"})
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
+	require.NotEmpty(t, ValidationFields(err))
+	assert.Contains(t, ValidationFields(err)[0].Message, `categories[0].services[0].default: version "9.9.9" of service "trino" is not in test/catalog/trino`)
+	_, err = svc.AddPlatformService(aliceContext(), models.PlatformService{Name: "nope", Category: "SQL"})
+	assert.Equal(t, ErrorCodeDoesNotCompile, ValidationCode(err), "%v", err)
+	assert.Contains(t, fmt.Sprint(err), `service "nope" is in no catalog`)
+	assert.Len(t, store.Messages, before, "nothing may be committed")
+
+	_, err = svc.AddPlatformService(aliceContext(), models.PlatformService{Name: "trino", Category: "SQL", DefaultVersion: "481.0.0-p01"})
+	require.NoError(t, err)
+	assert.Contains(t, store.Files()[treeedit.CatalogsFile], "default: 481.0.0-p01")
+}
+
+// stubPlatformWithout is a platform of an empty menu.
+type stubPlatformWithout struct{ stubPlatform }
+
+func (stubPlatformWithout) GetPlatformServices(context.Context) ([]models.PlatformService, error) {
+	return nil, nil
 }

@@ -109,6 +109,8 @@ func TestNamedClaimsAreBoundAndNamed(t *testing.T) {
 	require.NotNil(t, c.Binding)
 	assert.Equal(t, models.ClaimBinding{Namespace: "data", Release: "data-postgresql", Instance: "postgresql", Class: "standard", Default: true}, *c.Binding)
 	assert.Equal(t, []string{"reports"}, c.Users)
+	assert.Equal(t, "postgresql", c.Engine, "the engine its provider granted")
+	assert.True(t, c.Sql, "a PostgreSQL database: the SQL editor runs on it")
 
 	_, err = svc.ListNamedClaims(context.Background(), "nope")
 	assert.True(t, apierrors.IsNotFound(err))
@@ -200,39 +202,24 @@ func TestInstanceClaimsGivesTheBindingsAndWhatAProviderGranted(t *testing.T) {
 	assert.Equal(t, "postgresql", reports.Bound[0].Binding.Instance)
 }
 
-func TestValidateClaimsChecksTheClaimsOfTheParameters(t *testing.T) {
-	svc := newClaimServiceUnderTest(t, claimsLayout(nil))
-	schema := map[string]any{"properties": map[string]any{
-		"database": map[string]any{"x-okdp-connection-ref": map[string]any{
-			"contract": "database-server", "provision": true, "request": map[string]any{"extensions": []any{"pgvector"}},
-		}},
-		"catalogs": map[string]any{"items": map[string]any{"properties": map[string]any{
-			"db": map[string]any{"x-okdp-connection-ref": map[string]any{"contract": "database-server"}},
-		}}},
-	}}
-	ok := []map[string]any{
-		{},
-		{"database": map[string]any{}},
-		{"database": map[string]any{"class": "large"}},
-		{"database": map[string]any{"provider": "data/postgresql", "request": map[string]any{"size": "2Gi"}}},
-		{"database": "analytics"},
-		{"database": "some-connection", "catalogs": []any{map[string]any{"db": "x"}}},
-	}
-	for _, params := range ok {
-		assert.NoError(t, svc.ValidateClaims(context.Background(), "demo", schema, params), "%v", params)
-	}
-	refused := map[string]map[string]any{
-		"database: claim: unknown key":           {"database": map[string]any{"size": "1Gi"}},
-		`class "huge" is not a class`:            {"database": map[string]any{"class": "huge"}},
-		"request.size: set by the class large":   {"database": map[string]any{"class": "large", "request": map[string]any{"size": "1Gi"}}},
-		"claim schema":                           {"database": map[string]any{"request": map[string]any{"extensions": []any{"nope"}}}},
-		"catalogs[0].db: the reference takes no": {"catalogs": []any{map[string]any{"db": map[string]any{}}}},
-		"provider \"a/b/c\"":                     {"database": map[string]any{"provider": "a/b/c"}},
-	}
-	for want, params := range refused {
-		err := svc.ValidateClaims(context.Background(), "demo", schema, params)
-		require.Error(t, err, want)
-		assert.Contains(t, err.Error(), want)
+// The claims of an instance's parameters are the compiler's to check, on
+// the write: each refusal at the field of its reference.
+func TestTheClaimsOfTheParametersAreRefusedAtTheirField(t *testing.T) {
+	store := claimsLayout(nil)
+	d := claimsDeployments(store)
+	for want, values := range map[string]map[string]any{
+		`class "huge" is not a class`: {"database": map[string]any{"class": "huge"}},
+		"database":                    {"database": map[string]any{"size": "1Gi"}},
+		"a/b/c":                       {"database": map[string]any{"provider": "a/b/c"}},
+	} {
+		_, err := d.CreateInstance(context.Background(), gitops.Actor{}, treeedit.Instance{Name: "x", Project: "demo", Service: "app", Version: "1.0.0", Values: values})
+		var refused *treeedit.CompileError
+		require.ErrorAs(t, err, &refused, want)
+		fields := ValidationFields(DoesNotCompile(refused))
+		require.NotEmpty(t, fields, want)
+		assert.Equal(t, "database", fields[0].Path, "%s: %+v", want, fields)
+		assert.Equal(t, "/database", fields[0].Pointer)
+		assert.Contains(t, fields[0].Message, want)
 	}
 }
 

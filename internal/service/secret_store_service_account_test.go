@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"reflect"
 	"testing"
+
+	compiler "github.com/okdp/okdp-compiler"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
@@ -23,53 +26,124 @@ func kubernetesAuth(serviceAccount *string) *models.SecretStoreAuth {
 	}
 }
 
-func kubernetesRef(t *testing.T, auth *models.SecretStoreAuth) *crd.ESOServiceAccountRef {
-	t.Helper()
-	store := buildSecretStoreCRD("demo", models.SecretStoreRequest{
+// sandboxStore is the platform's secret store as the compile gives it:
+// the sandbox's ServiceAccount okdp-secrets and audience openbao.
+var sandboxStore = &platformSecretStore{server: "https://vault.example.com", serviceAccount: "okdp-secrets", audiences: []string{"openbao"}}
+
+func storeRequest(server string, auth *models.SecretStoreAuth) models.SecretStoreRequest {
+	return models.SecretStoreRequest{
 		Name:     "store",
 		Provider: "vault",
-		Vault:    &models.VaultConfig{Server: "https://vault.example.com", Path: "secret", Version: "v2"},
+		Vault:    &models.VaultConfig{Server: server, Path: "secret", Version: "v2"},
 		Auth:     auth,
-	}, "")
-	k8s := store.Spec.Provider.Vault.Auth.Kubernetes
-	if k8s == nil {
-		t.Fatal("kubernetes auth was not built")
-	}
-	if k8s.ServiceAccountRef == nil {
-		t.Fatal("no service account reference was set")
-	}
-	return k8s.ServiceAccountRef
-}
-
-// Vault matches the role's bound_service_account_names against this account, so
-// a project must be able to give its store an identity of its own rather than
-// the default account every workload in the namespace already shares.
-func TestKubernetesAuthUsesTheChosenServiceAccount(t *testing.T) {
-	if got := kubernetesRef(t, kubernetesAuth(serviceAccountPtr("vault-reader"))).Name; got != "vault-reader" {
-		t.Fatalf("service account is %q, want vault-reader", got)
 	}
 }
 
-// Omitting it must keep the previous behaviour, so stores created before the
-// field existed keep working untouched.
-func TestKubernetesAuthFallsBackToDefault(t *testing.T) {
-	if got := kubernetesRef(t, kubernetesAuth(nil)).Name; got != "default" {
-		t.Fatalf("service account is %q, want default", got)
+// created runs a create with the platform's secret store platform and
+// returns the CR handed to the repository, nil when none was.
+func created(t *testing.T, platform *platformSecretStore, allowed []string, req models.SecretStoreRequest) (*crd.ESOSecretStore, error) {
+	t.Helper()
+	repo := &mocks.SecretStoreRepository{}
+	var sent *crd.ESOSecretStore
+	repo.On("Create", mock.Anything, "demo", mock.Anything).Run(func(args mock.Arguments) {
+		sent = args.Get(2).(*crd.ESOSecretStore)
+	}).Return(nil).Maybe()
+	repo.On("Get", mock.Anything, "demo", "store").Return(kubernetesStored("okdp-secrets"), nil).Maybe()
+	svc := &DefaultSecretStoreService{repo: repo, allowedServers: allowed, platform: func(context.Context) *platformSecretStore { return platform }}
+	_, err := svc.CreateSecretStore(context.Background(), "demo", req)
+	return sent, err
+}
+
+// External Secrets mints a token of the store's ServiceAccount and sends it
+// to the store's server: the account is the platform's store's, which the
+// compiled manifests create in the namespace, and the token's audiences
+// the platform's, never the API server's. A request naming that account,
+// or none, gets it; another is refused, nothing created.
+func TestKubernetesAuthAuthenticatesAsThePlatformsServiceAccount(t *testing.T) {
+	for _, sa := range []*string{nil, serviceAccountPtr(""), serviceAccountPtr("okdp-secrets")} {
+		sent, err := created(t, sandboxStore, nil, storeRequest("https://vault.example.com", kubernetesAuth(sa)))
+		if err != nil || sent == nil {
+			t.Fatalf("serviceAccount %v: %v", sa, err)
+		}
+		ref := sent.Spec.Provider.Vault.Auth.Kubernetes.ServiceAccountRef
+		if ref == nil || ref.Name != "okdp-secrets" || len(ref.Audiences) != 1 || ref.Audiences[0] != "openbao" {
+			t.Fatalf("serviceAccountRef %+v, want okdp-secrets of audience openbao", ref)
+		}
 	}
-	if got := kubernetesRef(t, kubernetesAuth(serviceAccountPtr(""))).Name; got != "default" {
-		t.Fatalf("an emptied account gives %q, want default", got)
+	for _, sa := range []string{"default", "vault-reader"} {
+		sent, err := created(t, sandboxStore, nil, storeRequest("https://vault.example.com", kubernetesAuth(serviceAccountPtr(sa))))
+		if !IsValidationError(err) || sent != nil {
+			t.Fatalf("serviceAccount %s: %v, created %v", sa, err, sent != nil)
+		}
 	}
 }
 
-// Reading the account back matters as much as writing it: without it the
-// console shows an empty field and the next save silently repoints the store.
+// The store's server is the platform's secret store's, or one of the
+// control plane's allowedServers, compared as URLs; any other is refused.
+func TestKubernetesAuthNamesAnAllowedServerOnly(t *testing.T) {
+	for _, server := range []string{"https://vault.example.com", "HTTPS://Vault.Example.com:443/", "https://other.example.com/v"} {
+		if _, err := created(t, sandboxStore, []string{"https://other.example.com/v/"}, storeRequest(server, kubernetesAuth(nil))); err != nil {
+			t.Errorf("%s: %v", server, err)
+		}
+	}
+	for _, server := range []string{"https://evil.example.com", "https://vault.example.com:8200", "http://vault.example.com", "https://user@vault.example.com", "https://vault.example.com/?x=1", "ftp://vault.example.com"} {
+		sent, err := created(t, sandboxStore, nil, storeRequest(server, kubernetesAuth(nil)))
+		if !IsValidationError(err) || sent != nil {
+			t.Errorf("%s: %v, created %v", server, err, sent != nil)
+		}
+	}
+}
+
+// Without the platform's secret store, or with one of no audiences, a
+// store of kubernetes auth is refused: there is no account of the
+// platform's to authenticate as, or its token would be the API server's.
+func TestKubernetesAuthNeedsThePlatformsSecretStore(t *testing.T) {
+	noAudiences := &platformSecretStore{server: "https://vault.example.com", serviceAccount: "okdp-secrets"}
+	for name, platform := range map[string]*platformSecretStore{"no store": nil, "no audiences": noAudiences} {
+		sent, err := created(t, platform, []string{"https://vault.example.com"}, storeRequest("https://vault.example.com", kubernetesAuth(nil)))
+		if !IsValidationError(err) || sent != nil {
+			t.Errorf("%s: %v, created %v", name, err, sent != nil)
+		}
+	}
+}
+
+// The platform's secret store is read off the compile: a result's
+// SecretStore, its provider the platform's text.
+func TestThePlatformsSecretStoreIsTheCompiles(t *testing.T) {
+	res := &compiler.Result{}
+	ss := reflect.New(reflect.TypeOf(res.SecretStore).Elem())
+	ss.Elem().FieldByName("Name").SetString("okdp-secrets")
+	ss.Elem().FieldByName("ServiceAccount").SetString("okdp-secrets")
+	ss.Elem().FieldByName("Provider").Set(reflect.ValueOf(map[string]any{"vault": map[string]any{
+		"server": "https://openbao.openbao.svc.cluster.local:8200",
+		"auth":   map[string]any{"kubernetes": map[string]any{"serviceAccountRef": map[string]any{"name": "okdp-secrets", "audiences": []any{"openbao"}}}},
+	}}))
+	reflect.ValueOf(res).Elem().FieldByName("SecretStore").Set(ss)
+	refused := &compiler.TreeInstance{}
+	compiled := &compiler.TreeInstance{}
+	compiled.Outcome.Result = res
+	svc := &DefaultSecretStoreService{tree: func(context.Context) (*compiler.Tree, error) {
+		return &compiler.Tree{Instances: []*compiler.TreeInstance{refused, compiled}}, nil
+	}}
+	got := svc.platformStore(context.Background())
+	if got == nil || got.server != "https://openbao.openbao.svc.cluster.local:8200" || got.serviceAccount != "okdp-secrets" || len(got.audiences) != 1 || got.audiences[0] != "openbao" {
+		t.Fatalf("platform store %+v", got)
+	}
+
+	noProvider := &compiler.TreeInstance{}
+	noProvider.Outcome.Result = &compiler.Result{}
+	svc.tree = func(context.Context) (*compiler.Tree, error) {
+		return &compiler.Tree{Instances: []*compiler.TreeInstance{noProvider, compiled}}, nil
+	}
+	if got := svc.platformStore(context.Background()); got != nil {
+		t.Fatalf("a platform of no provider: %+v", got)
+	}
+}
+
+// Reading the account back matters as much as writing it: the console
+// shows which identity the Vault role must bind.
 func TestResponseReportsTheServiceAccount(t *testing.T) {
-	store := buildSecretStoreCRD("demo", models.SecretStoreRequest{
-		Name:     "store",
-		Provider: "vault",
-		Vault:    &models.VaultConfig{Server: "https://vault.example.com", Path: "secret", Version: "v2"},
-		Auth:     kubernetesAuth(serviceAccountPtr("vault-reader")),
-	}, "")
+	store := buildSecretStoreCRD("demo", storeRequest("https://vault.example.com", kubernetesAuth(nil)), "", sandboxStore)
 
 	svc := &DefaultSecretStoreService{}
 	resp := svc.toResponse(store, "demo")
@@ -77,8 +151,8 @@ func TestResponseReportsTheServiceAccount(t *testing.T) {
 	if resp.Auth == nil || resp.Auth.Config.ServiceAccount == nil {
 		t.Fatal("the response carries no service account")
 	}
-	if got := *resp.Auth.Config.ServiceAccount; got != "vault-reader" {
-		t.Fatalf("response reports %q, want vault-reader", got)
+	if got := *resp.Auth.Config.ServiceAccount; got != "okdp-secrets" {
+		t.Fatalf("response reports %q, want okdp-secrets", got)
 	}
 }
 
@@ -137,44 +211,27 @@ func updated(t *testing.T, stored *crd.ESOSecretStore, req models.SecretStoreReq
 		arrange(repo)
 	}
 
-	svc := &DefaultSecretStoreService{repo: repo}
+	svc := &DefaultSecretStoreService{repo: repo, platform: func(context.Context) *platformSecretStore { return sandboxStore }}
 	_, err := svc.UpdateSecretStore(context.Background(), "demo", "store", req)
 	return sent, err
 }
 
-// The regression this guards: the CR is rebuilt from the request, so a caller
-// that says nothing about the account would repoint the store at default and
-// break the Vault role binding without touching the field.
-func TestUpdateKeepsTheServiceAccountWhenTheFieldIsAbsent(t *testing.T) {
-	sent, err := updated(t, kubernetesStored("vault-reader"), updateRequest(kubernetesAuth(nil)), nil)
-	if err != nil {
-		t.Fatalf("update failed: %v", err)
+// A store written before the account was pinned, of another account, is
+// repointed at the platform's on its next update; another account named
+// is refused.
+func TestUpdatePinsTheServiceAccount(t *testing.T) {
+	for _, sa := range []*string{nil, serviceAccountPtr("")} {
+		sent, err := updated(t, kubernetesStored("vault-reader"), updateRequest(kubernetesAuth(sa)), nil)
+		if err != nil {
+			t.Fatalf("update failed: %v", err)
+		}
+		if ref := sent.Spec.Provider.Vault.Auth.Kubernetes.ServiceAccountRef; ref.Name != "okdp-secrets" || len(ref.Audiences) != 1 {
+			t.Fatalf("serviceAccountRef %+v, want okdp-secrets of the platform's audience", ref)
+		}
 	}
-	if got := sent.Spec.Provider.Vault.Auth.Kubernetes.ServiceAccountRef.Name; got != "vault-reader" {
-		t.Fatalf("account became %q, want vault-reader kept", got)
-	}
-}
-
-// The other half of the same rule: keeping an absent field must not make the
-// default account unreachable, or a store given an identity could never give
-// it back.
-func TestUpdateReturnsToDefaultWhenTheFieldIsEmptied(t *testing.T) {
-	sent, err := updated(t, kubernetesStored("vault-reader"), updateRequest(kubernetesAuth(serviceAccountPtr(""))), nil)
-	if err != nil {
-		t.Fatalf("update failed: %v", err)
-	}
-	if got := sent.Spec.Provider.Vault.Auth.Kubernetes.ServiceAccountRef.Name; got != "default" {
-		t.Fatalf("account stayed %q, want default", got)
-	}
-}
-
-func TestUpdateSetsANewServiceAccount(t *testing.T) {
-	sent, err := updated(t, kubernetesStored("vault-reader"), updateRequest(kubernetesAuth(serviceAccountPtr("autre"))), nil)
-	if err != nil {
-		t.Fatalf("update failed: %v", err)
-	}
-	if got := sent.Spec.Provider.Vault.Auth.Kubernetes.ServiceAccountRef.Name; got != "autre" {
-		t.Fatalf("account is %q, want autre", got)
+	sent, err := updated(t, kubernetesStored("okdp-secrets"), updateRequest(kubernetesAuth(serviceAccountPtr("vault-reader"))), nil)
+	if !IsValidationError(err) || sent != nil {
+		t.Fatalf("another account: %v, updated %v", err, sent != nil)
 	}
 }
 
@@ -209,7 +266,7 @@ func TestUpdateKeepsTheStoredTokenWhenTheFieldIsAbsent(t *testing.T) {
 // it, nothing in the console shows it, and the token stays valid in Vault.
 func TestUpdateDropsTheTokenSecretWhenLeavingTokenAuth(t *testing.T) {
 	var deleted string
-	sent, err := updated(t, tokenStored(), updateRequest(kubernetesAuth(serviceAccountPtr("vault-reader"))),
+	sent, err := updated(t, tokenStored(), updateRequest(kubernetesAuth(nil)),
 		func(r *mocks.SecretStoreRepository) {
 			r.On("DeleteSecret", mock.Anything, "demo", mock.Anything).Run(func(args mock.Arguments) {
 				deleted = args.String(2)

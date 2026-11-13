@@ -33,6 +33,7 @@ provides:
       contract: database-server
       name: ${{ c.id }}
       values:
+        engine: postgresql
         host: ${{ release.name }}-rw.${{ release.namespace }}.svc
         dbName: ${{ c.id.replace('.', '_').replace('-', '_') }}
         size: ${{ c.request.size }}

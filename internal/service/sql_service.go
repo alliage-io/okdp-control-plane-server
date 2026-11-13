@@ -38,6 +38,9 @@ var (
 	ErrSqlBusy = errors.New("too many statements running for this user, retry when one has finished")
 	// ErrSqlWriteRefused: the caller may not run a statement in write mode.
 	ErrSqlWriteRefused = errors.New("write mode is not allowed")
+	// ErrSqlTimeout: the engine did not answer within the statement
+	// timeout (SQL_STATEMENT_TIMEOUT); the statement was cancelled.
+	ErrSqlTimeout = errors.New("the statement did not finish within the statement timeout and was cancelled")
 )
 
 // SqlLimits bounds the SQL editor; a zero field takes its default.
@@ -330,18 +333,24 @@ func (s *DefaultSqlService) timed(ctx context.Context, audit *logrus.Entry, req 
 	if caps.rows > s.limits.MaxRows {
 		caps.rows = s.limits.MaxRows
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.limits.StatementTimeout)
+	timed, cancel := context.WithTimeout(ctx, s.limits.StatementTimeout)
 	defer cancel()
 	start := time.Now()
 	audit.Info("SQL statement")
-	result, err := run(ctx, caps)
+	result, err := run(timed, caps)
 	elapsed := time.Since(start)
 	if err != nil {
 		audit.WithError(err).WithField("elapsedMs", elapsed.Milliseconds()).Warn("SQL statement failed")
+		if ctx.Err() == nil && errors.Is(timed.Err(), context.DeadlineExceeded) {
+			// The statement's timeout, not the client gone.
+			return nil, fmt.Errorf("%w (%s)", ErrSqlTimeout, s.limits.StatementTimeout)
+		}
 		return nil, err
 	}
 	result.RowCount = len(result.Rows)
 	result.ElapsedMs = elapsed.Milliseconds()
+	result.MaxRows = caps.rows
+	result.Truncated = result.TruncatedBy != ""
 	done := audit.WithFields(logrus.Fields{"elapsedMs": result.ElapsedMs, "rows": result.RowCount, "truncated": result.Truncated})
 	if result.Error != nil {
 		done = done.WithField("errorName", result.Error.ErrorName)
@@ -397,8 +406,12 @@ func (e trinoEngine) execute(ctx context.Context, client *http.Client, baseURL, 
 		// The size of a page's rows is the size of the page, near enough.
 		total += size
 		for _, row := range page.Data {
-			if len(result.Rows) >= caps.rows || total > caps.bytes {
-				result.Truncated = true
+			if len(result.Rows) >= caps.rows {
+				result.TruncatedBy = models.SqlTruncatedByRows
+				break
+			}
+			if total > caps.bytes {
+				result.TruncatedBy = models.SqlTruncatedByBytes
 				break
 			}
 			result.Rows = append(result.Rows, row)
@@ -421,7 +434,7 @@ func (e trinoEngine) execute(ctx context.Context, client *http.Client, baseURL, 
 		if err != nil {
 			return nil, err
 		}
-		if result.Truncated {
+		if result.TruncatedBy != "" {
 			// Enough rows: tell Trino to stop computing the rest.
 			e.cancel(client, next, authorization)
 			break

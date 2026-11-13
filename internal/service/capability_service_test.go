@@ -76,3 +76,16 @@ func TestUserManagementIsOffWithoutAProbe(t *testing.T) {
 	assert.False(t, capabilities.Identity.UserManagement)
 	assert.Equal(t, IdentityProviderExternal, capabilities.Identity.Provider)
 }
+
+// The bounds of the SQL editor are reported as configured.
+func TestCapabilitiesCarryTheSqlBounds(t *testing.T) {
+	svc := NewDefaultCapabilityService(stubContextRepo{}, nil)
+	svc.Sql = models.SqlCapability{DefaultRows: 1000, MaxRows: 10000, MaxResultBytes: 16 << 20, StatementTimeoutSeconds: 120, MaxConcurrentPerUser: 2}
+	caps, err := svc.GetCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if caps.Sql != svc.Sql {
+		t.Fatalf("sql = %+v, want %+v", caps.Sql, svc.Sql)
+	}
+}

@@ -30,6 +30,8 @@ type Config struct {
 	GitOps GitOpsConfig
 	// SQL bounds the SQL editor and the network the connection tests reach.
 	SQL SQLConfig
+	// SecretStores bounds the SecretStores of the projects.
+	SecretStores SecretStoresConfig
 
 	// Keycloak Admin REST API, backing user and group management
 	// (/api/v1/identity). The client is a confidential service account of the
@@ -162,6 +164,15 @@ type SQLConfig struct {
 	CAFile string
 }
 
+// SecretStoresConfig bounds the SecretStores the console creates in the
+// projects' namespaces.
+type SecretStoresConfig struct {
+	// AllowedServers are the Vault servers a store may name beside the
+	// platform's secret store's (global.okdp.secrets.provider.vault.server)
+	// (SECRET_STORE_ALLOWED_SERVERS, comma-separated URLs).
+	AllowedServers []string
+}
+
 const defaultSidecarPrefixes = "istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent"
 
 // Load returns the configuration loaded from environment variables or defaults
@@ -211,6 +222,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	cfg.SQL = sql
+
+	for _, u := range strings.Split(getEnv("SECRET_STORE_ALLOWED_SERVERS", ""), ",") {
+		if trimmed := strings.TrimSpace(u); trimmed != "" {
+			cfg.SecretStores.AllowedServers = append(cfg.SecretStores.AllowedServers, trimmed)
+		}
+	}
 
 	for _, h := range strings.Split(getEnv("INSECURE_OCI_REGISTRIES", ""), ",") {
 		if trimmed := strings.TrimSpace(h); trimmed != "" {

@@ -451,6 +451,10 @@ func TestListSelectableOffersBothKindsOfTheContract(t *testing.T) {
 	assert.Equal(t, "demo-pg", databases[0].ProvidedBy)
 	assert.Equal(t, "warehouse", databases[1].Name)
 	assert.False(t, databases[1].Managed)
+	// The SQL editor runs on a declared PostgreSQL connection only.
+	assert.Equal(t, "postgresql", databases[1].Engine)
+	assert.True(t, databases[1].Sql)
+	assert.False(t, databases[0].Sql, "an output is no target of the SQL editor")
 
 	internal, err := svc.ListInternal(context.Background(), "demo")
 	require.NoError(t, err)

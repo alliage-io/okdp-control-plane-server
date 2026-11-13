@@ -28,14 +28,11 @@ type SecretAuthConfig struct {
 	Token     string `json:"token,omitempty"`
 	MountPath string `json:"mountPath,omitempty"`
 	Role      string `json:"role,omitempty"`
-	// ServiceAccount names the account the store authenticates as under
-	// Kubernetes auth, so a project can give its store its own identity
-	// instead of the default account every workload in the namespace shares.
-	//
-	// A pointer, because on update three intents must stay apart: absent keeps
-	// the account already in use, an empty string asks for the default account
-	// back, and a name selects that account. A plain string merges the first
-	// two, which leaves no way to return to the default once a name is set.
+	// ServiceAccount is the account the store authenticates as under
+	// Kubernetes auth: the ServiceAccount of the platform's secret store in
+	// the namespace (global.okdp.secrets.serviceAccount, as the compile
+	// writes it), and no other. Absent or empty, that account; another
+	// name is refused.
 	ServiceAccount *string `json:"serviceAccount,omitempty"`
 }
 

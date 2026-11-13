@@ -21,7 +21,7 @@ func NewClaimHandler(service service.ClaimService) *ClaimHandler {
 
 // ListNamedClaims godoc
 // @Summary      List the named claims of a project
-// @Description  The named claims of the project (claims.<name> of projects/<p>/project.yaml): each a connection of its contract, declared once, that every instance of the project naming it shares; with the provider the compile of the tree binds it to (its class, or the provider it names), the instances that name it, and why it does not bind
+// @Description  The named claims of the project (claims.<name> of projects/<p>/project.yaml): each a connection of its contract, declared once, that every instance of the project naming it shares; with the provider the compile of the tree binds it to (its class, or the provider it names), the instances that name it, and why it does not bind; the engine of the connection its provider granted, and whether the SQL editor runs on it (sql)
 // @Tags         claims
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
