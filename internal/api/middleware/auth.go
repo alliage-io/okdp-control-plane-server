@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
 
 // The only routes under /api served without a token.
@@ -76,5 +77,5 @@ func bearerToken(header string) (string, error) {
 func unauthorized(c *gin.Context, message string) {
 	// Tells a non-browser client this is authentication, not a missing route.
 	c.Header("WWW-Authenticate", `Bearer realm="okdp"`)
-	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": message})
+	c.AbortWithStatusJSON(http.StatusUnauthorized, models.ErrorResponse{Error: message})
 }

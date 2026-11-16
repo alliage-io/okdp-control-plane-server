@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -37,9 +39,10 @@ const listPageSize = 1000
 
 // NewKeycloakIdentityRepository manages users and groups in the Keycloak realm
 // named by cfg (KEYCLOAK_*); issuer locates the realm when KEYCLOAK_URL or
-// KEYCLOAK_REALM is unset, and may be nil.
-func NewKeycloakIdentityRepository(cfg *config.Config, issuer KeycloakIssuerSource) IdentityRepository {
-	return &keycloakIdentityRepository{kc: newKeycloakClient(cfg, issuer)}
+// KEYCLOAK_REALM is unset, and may be nil; roots verify the certificate of
+// Keycloak (the system's and OKDP_CA_FILE; nil, the system's).
+func NewKeycloakIdentityRepository(cfg *config.Config, issuer KeycloakIssuerSource, roots *x509.CertPool) IdentityRepository {
+	return &keycloakIdentityRepository{kc: newKeycloakClient(cfg, issuer, roots)}
 }
 
 // Available reports whether the admin client has credentials and a realm.
@@ -194,6 +197,53 @@ func (r *keycloakIdentityRepository) findGroup(ctx context.Context, name string)
 	return nil, apierrors.NewNotFound(groupResource, name)
 }
 
+// putMerged GETs the representation at path, sets fields over it and lets
+// attrs change its attributes, and PUTs it back whole: Keycloak replaces
+// the attributes of a PUT, so the ones the console does not own (federated
+// from LDAP, set by an administrator) are sent as they were, and every
+// field the console does not know is sent back verbatim.
+func (r *keycloakIdentityRepository) putMerged(ctx context.Context, path string, fields map[string]interface{}, attrs func(map[string][]string)) error {
+	var rep map[string]json.RawMessage
+	if err := r.kc.doAdmin(ctx, http.MethodGet, path, nil, &rep); err != nil {
+		return err
+	}
+	if rep == nil {
+		rep = map[string]json.RawMessage{}
+	}
+	for key, value := range fields {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		rep[key] = raw
+	}
+
+	current := map[string][]string{}
+	if raw, ok := rep["attributes"]; ok && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return fmt.Errorf("failed to decode keycloak attributes of %s: %w", path, err)
+		}
+	}
+	attrs(current)
+	raw, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	rep["attributes"] = raw
+
+	return r.kc.doAdmin(ctx, http.MethodPut, path, rep, nil)
+}
+
+// setOwnedAttr sets an attribute the console owns, or removes it when the
+// console's value is empty.
+func setOwnedAttr(attrs map[string][]string, key, value string) {
+	if value == "" {
+		delete(attrs, key)
+		return
+	}
+	attrs[key] = []string{value}
+}
+
 func (r *keycloakIdentityRepository) setPassword(ctx context.Context, userID, password string) error {
 	cred := kcCredential{Type: "password", Value: password, Temporary: false}
 	return r.kc.doAdmin(ctx, http.MethodPut, fmt.Sprintf("/users/%s/reset-password", userID), cred, nil)
@@ -247,6 +297,10 @@ func (r *keycloakIdentityRepository) CreateUser(ctx context.Context, user *model
 	return nil
 }
 
+// UpdateUser writes the console's fields over the user's Keycloak
+// representation: its display name, email, enabled flag and the attributes
+// it owns (comment, uid), every other field and attribute (federated from
+// LDAP, set by an administrator) kept.
 func (r *keycloakIdentityRepository) UpdateUser(ctx context.Context, name string, user *models.User) error {
 	existing, err := r.findUser(ctx, name)
 	if err != nil {
@@ -254,8 +308,21 @@ func (r *keycloakIdentityRepository) UpdateUser(ctx context.Context, name string
 	}
 
 	kcU := toKcUser(name, user)
-	kcU.ID = existing.ID
-	if err := r.kc.doAdmin(ctx, http.MethodPut, "/users/"+existing.ID, kcU, nil); err != nil {
+	err = r.putMerged(ctx, "/users/"+url.PathEscape(existing.ID), map[string]interface{}{
+		"firstName": kcU.FirstName,
+		"lastName":  kcU.LastName,
+		"email":     kcU.Email,
+		"enabled":   kcU.Enabled,
+	}, func(attrs map[string][]string) {
+		setOwnedAttr(attrs, "comment", user.Comment)
+		if user.UID > 0 {
+			attrs["uid"] = []string{strconv.Itoa(user.UID)}
+		} else if _, err := strconv.Atoi(attr(attrs, "uid")); err == nil {
+			// The console shows a numeric uid only: another value is not its.
+			delete(attrs, "uid")
+		}
+	})
+	if err != nil {
 		return err
 	}
 
@@ -305,15 +372,18 @@ func (r *keycloakIdentityRepository) CreateGroup(ctx context.Context, group *mod
 	return r.kc.doAdmin(ctx, http.MethodPost, "/groups", toKcGroup(group.Name, group), nil)
 }
 
+// UpdateGroup writes the console's comment over the group's Keycloak
+// representation, its other fields and attributes kept.
 func (r *keycloakIdentityRepository) UpdateGroup(ctx context.Context, name string, group *models.Group) error {
 	existing, err := r.findGroup(ctx, name)
 	if err != nil {
 		return err
 	}
 
-	kcG := toKcGroup(name, group)
-	kcG.ID = existing.ID
-	return r.kc.doAdmin(ctx, http.MethodPut, "/groups/"+existing.ID, kcG, nil)
+	comment := attr(toKcGroup(name, group).Attributes, "comment")
+	return r.putMerged(ctx, "/groups/"+url.PathEscape(existing.ID), nil, func(attrs map[string][]string) {
+		setOwnedAttr(attrs, "comment", comment)
+	})
 }
 
 func (r *keycloakIdentityRepository) DeleteGroup(ctx context.Context, name string) error {

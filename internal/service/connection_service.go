@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"sort"
@@ -82,11 +83,17 @@ type DefaultConnectionService struct {
 	catalog     ContractCatalog
 	// guard is the network policy of the tests (netguard.Default when nil).
 	guard *netguard.Guard
+	// roots verify a tested server's certificate; nil, the system's.
+	roots *x509.CertPool
 }
 
 // SetNetworkGuard sets the network policy the connection tests dial
 // through, the SQL editor's.
 func (s *DefaultConnectionService) SetNetworkGuard(guard *netguard.Guard) { s.guard = guard }
+
+// SetRootCAs sets the certificates a tested server is verified with: the
+// system's and the platform's CA bundle (OKDP_CA_FILE).
+func (s *DefaultConnectionService) SetRootCAs(roots *x509.CertPool) { s.roots = roots }
 
 func NewDefaultConnectionService(
 	deployments *gitops.Deployments,
@@ -104,8 +111,8 @@ func NewDefaultConnectionService(
 	}
 }
 
-// ErrConnectionsUnavailable is returned by the write paths while no
-// deployments repository is configured. The handler turns it into a 501.
+// ErrConnectionsUnavailable is returned by the SQL editor given no source
+// of connections (SqlConnectionSource.Get).
 var ErrConnectionsUnavailable = fmt.Errorf("no deployments repository is configured, connections cannot be stored")
 
 // ValidationError is a problem with what was submitted, as opposed to a failure
@@ -119,7 +126,7 @@ type ValidationError struct {
 	// Fields are the problems of the compile at the fields they are about
 	// (compiler.FieldErrors), for a form that shows each beside its field;
 	// none for another refusal.
-	Fields []compiler.FieldError
+	Fields []models.FieldProblem
 }
 
 func (e *ValidationError) Error() string { return e.message }
@@ -132,21 +139,42 @@ func invalid(format string, args ...any) error {
 // its message is the compiler's, one line per problem.
 const ErrorCodeDoesNotCompile = "does-not-compile"
 
-// DoesNotCompile is the refusal of a compile, its problems at their fields.
+// DoesNotCompile is the refusal of a compile, its problems at their
+// fields, each of the instance the compile refused (CompileError's
+// <project>/<instance>), the one written or another the write breaks;
+// of none when the compile refused no instance (the tree, a project's
+// name).
 func DoesNotCompile(err *treeedit.CompileError) error {
-	return &ValidationError{message: err.Error(), Code: ErrorCodeDoesNotCompile, Fields: compiler.FieldErrors(err.Err)}
+	instance := ""
+	if err.Instance != "" {
+		instance = err.Project + "/" + err.Instance
+	}
+	return &ValidationError{message: err.Error(), Code: ErrorCodeDoesNotCompile, Fields: fieldProblems(compiler.FieldErrors(err.Err), instance)}
 }
 
 // rejected is a refusal of the compiler's rules out of a compile (a
 // connection at its declaration, a claim's provider), its problems at
 // their fields.
 func rejected(err error) error {
-	return &ValidationError{message: err.Error(), Fields: compiler.FieldErrors(err)}
+	return &ValidationError{message: err.Error(), Fields: fieldProblems(compiler.FieldErrors(err), "")}
+}
+
+// fieldProblems are the compiler's problems at their fields, of instance
+// ("" for none).
+func fieldProblems(fields []compiler.FieldError, instance string) []models.FieldProblem {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]models.FieldProblem, len(fields))
+	for i, f := range fields {
+		out[i] = models.FieldProblem{Path: f.Path, Pointer: f.Pointer, Message: f.Message, Instance: instance}
+	}
+	return out
 }
 
 // ValidationFields returns the field problems of a rejected input, none
 // when it has none.
-func ValidationFields(err error) []compiler.FieldError {
+func ValidationFields(err error) []models.FieldProblem {
 	var validationErr *ValidationError
 	if errors.As(err, &validationErr) {
 		return validationErr.Fields
@@ -206,23 +234,16 @@ func connectionGitError(err error, name string) error {
 	}
 }
 
-func (s *DefaultConnectionService) available() bool {
-	return s.deployments != nil
-}
-
 func (s *DefaultConnectionService) Catalog(ctx context.Context) models.ConnectionCatalogResponse {
 	return models.ConnectionCatalogResponse{
 		Types:        s.catalog.List(),
-		CRDAvailable: s.available(),
+		CRDAvailable: true,
 	}
 }
 
 // --- External connections ---
 
 func (s *DefaultConnectionService) List(ctx context.Context, namespace string) ([]models.ConnectionResponse, error) {
-	if !s.available() {
-		return []models.ConnectionResponse{}, nil
-	}
 	connections, err := s.deployments.ListConnections(ctx, namespace)
 	if err != nil {
 		return nil, err
@@ -252,9 +273,9 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	}
 
 	// The name has to be free before anything is written: the credentials Secret
-	// of a live connection follows the same naming convention, so writing it
-	// first would let a repeated create merge into it and the rollback below
-	// delete it, taking the running consumers' credentials with it.
+	// of a live connection follows the same naming convention, and a repeated
+	// create must not touch it (the commit below refuses a taken name too,
+	// before any Secret is written).
 	if _, err := s.deployments.GetConnection(ctx, namespace, req.Name); err == nil {
 		return nil, apierrors.NewAlreadyExists(connectionsResource, req.Name)
 	} else if !errors.Is(err, treeedit.ErrNotFound) {
@@ -281,12 +302,18 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	if err := s.checkConnection(ctx, namespace, compiler.Connection{Name: req.Name, Contract: descriptor.Name, Values: withoutSecrets(descriptor, values), SecretRef: secretName}); err != nil {
 		return nil, err
 	}
-	if ownSecret && len(secrets) > 0 {
-		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, secretName, secrets); err != nil {
-			return nil, storeCredentialsError(err)
+	writeSecret := ownSecret && len(secrets) > 0
+	if writeSecret {
+		if err := s.checkSecretWritable(ctx, namespace, secretName); err != nil {
+			return nil, err
 		}
 	}
 
+	// The connection is committed first, naming its Secret, and the Secret
+	// written next: a crash in between leaves a connection whose credentials
+	// are not stored yet (an update writes them), never a Secret that no
+	// connection names. A create refused by the repository (the name taken
+	// by a concurrent create, a push failure) writes no Secret at all.
 	connection := compiler.Connection{
 		Name:        req.Name,
 		Contract:    descriptor.Name,
@@ -294,17 +321,19 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 		Values:      public,
 		SecretRef:   secretName,
 	}
-	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), namespace, connection, true); err != nil {
-		// Leave no orphan Secret behind when the connection itself is refused. A
-		// Secret we do not own is never touched, and neither is the one a
-		// concurrent create under the same name has just bound to its own
-		// connection.
-		if ownSecret && len(secrets) > 0 && !errors.Is(err, treeedit.ErrExists) {
-			if cleanupErr := s.secrets.DeleteSecret(ctx, namespace, secretName); cleanupErr != nil {
-				logrus.WithError(cleanupErr).Warn("Failed to clean up the credentials secret of a rejected connection")
-			}
-		}
+	actor := auth.ActorFrom(ctx)
+	if _, err := s.deployments.PutConnection(ctx, actor, namespace, connection, true); err != nil {
 		return nil, connectionGitError(err, req.Name)
+	}
+	if writeSecret {
+		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, secretName, secrets); err != nil {
+			// A connection naming credentials that were never stored is
+			// taken back.
+			if _, rollbackErr := s.deployments.DeleteConnection(ctx, actor, namespace, req.Name); rollbackErr != nil {
+				logrus.WithError(rollbackErr).WithField("connection", req.Name).Warn("Failed to take back the connection whose credentials could not be stored")
+			}
+			return nil, storeCredentialsError(err)
+		}
 	}
 
 	response := s.toResponse(&connection, namespace)
@@ -351,15 +380,18 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 	if err := s.checkConnection(ctx, namespace, compiler.Connection{Name: name, Contract: descriptor.Name, Values: withoutSecrets(descriptor, values), SecretRef: secretName}); err != nil {
 		return nil, err
 	}
-	if len(descriptor.SecretFields()) > 0 && req.ExistingSecret == "" && len(secrets) > 0 {
-		// An unchanged credential is not resubmitted by the console, so only
-		// write the Secret when new values actually arrived, otherwise an edit
-		// of, say, the port would blank out the password.
-		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, ownedName, secrets); err != nil {
-			return nil, storeCredentialsError(err)
+	// An unchanged credential is not resubmitted by the console, so the
+	// Secret is written only when new values actually arrived, otherwise an
+	// edit of, say, the port would blank out the password.
+	writeSecret := len(descriptor.SecretFields()) > 0 && req.ExistingSecret == "" && len(secrets) > 0
+	if writeSecret {
+		if err := s.checkSecretWritable(ctx, namespace, ownedName); err != nil {
+			return nil, err
 		}
 	}
 
+	// Committed first, the Secret written next, as on a create: a crash in
+	// between leaves no Secret that no connection names.
 	updated := compiler.Connection{
 		Name:        name,
 		Contract:    descriptor.Name,
@@ -367,8 +399,18 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 		Values:      public,
 		SecretRef:   secretName,
 	}
-	if _, err := s.deployments.PutConnection(ctx, auth.ActorFrom(ctx), namespace, updated, false); err != nil {
+	actor := auth.ActorFrom(ctx)
+	if _, err := s.deployments.PutConnection(ctx, actor, namespace, updated, false); err != nil {
 		return nil, connectionGitError(err, name)
+	}
+	if writeSecret {
+		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, ownedName, secrets); err != nil {
+			// The connection as it was: its values and its Secret.
+			if _, rollbackErr := s.deployments.PutConnection(ctx, actor, namespace, *existing, false); rollbackErr != nil {
+				logrus.WithError(rollbackErr).WithField("connection", name).Warn("Failed to restore the connection whose credentials could not be stored")
+			}
+			return nil, storeCredentialsError(err)
+		}
 	}
 
 	if orphanedSecret != "" {
@@ -380,9 +422,6 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 }
 
 func (s *DefaultConnectionService) Delete(ctx context.Context, namespace, name string) error {
-	if !s.available() {
-		return ErrConnectionsUnavailable
-	}
 	existing, err := s.deployments.GetConnection(ctx, namespace, name)
 	if err != nil {
 		return connectionGitError(err, name)
@@ -403,6 +442,21 @@ func (s *DefaultConnectionService) Delete(ctx context.Context, namespace, name s
 		return nil
 	}
 	s.deleteOwnedSecret(ctx, namespace, existing.SecretRef)
+	return nil
+}
+
+// checkSecretWritable refuses, before anything is committed, a credentials
+// name a Secret the console did not write already holds: writing into it
+// would take it over (CreateOrUpdateSecret refuses it too, after the
+// commit, which is then taken back).
+func (s *DefaultConnectionService) checkSecretWritable(ctx context.Context, namespace, name string) error {
+	content, found, err := s.secrets.InspectSecret(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("failed to read the secret %q: %w", name, err)
+	}
+	if found && !content.Managed {
+		return storeCredentialsError(fmt.Errorf("%w: secret %q in namespace %q", repository.ErrForeignSecret, name, namespace))
+	}
 	return nil
 }
 
@@ -470,7 +524,7 @@ func (s *DefaultConnectionService) Test(ctx context.Context, req models.Connecti
 	if guard == nil {
 		guard = netguard.Default()
 	}
-	checks := tester(ctx, values, guard)
+	checks := tester(ctx, values, probeNetwork{guard: guard, roots: s.roots})
 	outcome := result(true, "", "Connection successful.")
 	outcome.Checks = checks
 	for _, c := range checks {
@@ -570,9 +624,6 @@ func IsClaimID(name string) bool { return compiler.IsClaimID(name) }
 // submitted engine dropped. On an edit, credentials that were not resubmitted
 // are kept as they are rather than reported as missing.
 func (s *DefaultConnectionService) validateRequest(ctx context.Context, namespace string, req models.ConnectionRequest, isUpdate bool) (*models.ContractDescriptor, map[string]any, error) {
-	if !s.available() {
-		return nil, nil, ErrConnectionsUnavailable
-	}
 	if err := treeedit.ValidateName("connection", req.Name); err != nil {
 		return nil, nil, invalid("%v", err)
 	}
@@ -773,29 +824,27 @@ func (s *DefaultConnectionService) toResponse(connection *compiler.Connection, n
 
 func (s *DefaultConnectionService) ListSelectable(ctx context.Context, project, contract string) ([]models.SelectableConnection, error) {
 	result := []models.SelectableConnection{}
-	if s.available() {
-		// The project's, then the platform's (platform.yaml), which every
-		// instance may reference.
-		for _, scope := range []struct{ project, name string }{{project, models.ConnectionScopeProject}, {"", models.ConnectionScopePlatform}} {
-			connections, err := s.deployments.ListConnections(ctx, scope.project)
-			if err != nil {
-				return nil, err
+	// The project's, then the platform's (platform.yaml), which every
+	// instance may reference.
+	for _, scope := range []struct{ project, name string }{{project, models.ConnectionScopeProject}, {"", models.ConnectionScopePlatform}} {
+		connections, err := s.deployments.ListConnections(ctx, scope.project)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range connections {
+			if contract != "" && c.Contract != contract {
+				continue
 			}
-			for _, c := range connections {
-				if contract != "" && c.Contract != contract {
-					continue
-				}
-				engine, sql := sqlTargetOf(c.Name, c.Contract, c.Values)
-				result = append(result, models.SelectableConnection{
-					Name:        c.Name,
-					Scope:       scope.name,
-					Type:        c.Contract,
-					Status:      "Ready",
-					Description: c.Description,
-					Engine:      engine,
-					Sql:         sql,
-				})
-			}
+			engine, sql := sqlTargetOf(c.Name, c.Contract, c.Values)
+			result = append(result, models.SelectableConnection{
+				Name:        c.Name,
+				Scope:       scope.name,
+				Type:        c.Contract,
+				Status:      "Ready",
+				Description: c.Description,
+				Engine:      engine,
+				Sql:         sql,
+			})
 		}
 	}
 

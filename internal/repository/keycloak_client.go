@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,9 +71,13 @@ func (e *kcAPIError) Error() string {
 // already: the API answers 409, Keycloak's body stays in the log.
 func (e *kcAPIError) Conflict() bool { return e.Status == http.StatusConflict }
 
-func newKeycloakClient(cfg *config.Config, issuer KeycloakIssuerSource) *keycloakClient {
+// newKeycloakClient is the client of the Keycloak Admin API; roots verify
+// its certificate (the system's and OKDP_CA_FILE; nil, the system's).
+func newKeycloakClient(cfg *config.Config, issuer KeycloakIssuerSource, roots *x509.CertPool) *keycloakClient {
 	// Cloned, not built from scratch: a bare Transport has no Proxy, and the
 	// chart passes the egress proxy the pod must go through.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	insecureTransport := http.DefaultTransport.(*http.Transport).Clone()
 	insecureTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- opt-in, sandboxes
 
@@ -83,7 +88,7 @@ func newKeycloakClient(cfg *config.Config, issuer KeycloakIssuerSource) *keycloa
 		clientSecret:       cfg.KeycloakClientSecret,
 		tlsInsecure:        cfg.KeycloakTLSInsecure,
 		issuer:             issuer,
-		httpClient:         &http.Client{Timeout: 30 * time.Second},
+		httpClient:         &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		insecureHTTPClient: &http.Client{Timeout: 30 * time.Second, Transport: insecureTransport},
 	}
 }

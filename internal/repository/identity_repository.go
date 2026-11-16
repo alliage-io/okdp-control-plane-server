@@ -20,8 +20,9 @@ type IdentityRepository interface {
 	// CreateUser creates the user; user.Password, when set, is the initial
 	// credential (managed by the backend, never stored by this server).
 	CreateUser(ctx context.Context, user *models.User) error
-	// UpdateUser replaces the user profile; an empty user.Password leaves
-	// the current credential untouched.
+	// UpdateUser sets the fields and attributes the console owns, the
+	// backend's others kept; an empty user.Password leaves the current
+	// credential untouched.
 	UpdateUser(ctx context.Context, name string, user *models.User) error
 	DeleteUser(ctx context.Context, name string) error
 

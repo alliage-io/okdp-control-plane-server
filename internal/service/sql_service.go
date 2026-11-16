@@ -247,7 +247,9 @@ func (s *DefaultSqlService) authorizeWrite(ctx context.Context, project string) 
 		return nil
 	}
 	if err := s.authorize(ctx, project); err != nil {
-		return fmt.Errorf("%w: %v", ErrSqlWriteRefused, err)
+		// Both kept: the refusal's code, and the permission refused
+		// (an *authz.ForbiddenError) for its 403.
+		return fmt.Errorf("%w: %w", ErrSqlWriteRefused, err)
 	}
 	return nil
 }

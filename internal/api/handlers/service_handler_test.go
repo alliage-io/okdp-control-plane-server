@@ -28,7 +28,7 @@ func (s *deploySpy) DeployService(context.Context, string, models.ServiceRequest
 	return nil, s.err
 }
 
-func deploy(t *testing.T, err error) (int, map[string]string) {
+func deploy(t *testing.T, err error) (int, map[string]any) {
 	t.Helper()
 	engine := gin.New()
 	engine.POST("/api/projects/:name/services", NewServiceHandler(&deploySpy{err: err}, nil).DeployService)
@@ -36,7 +36,7 @@ func deploy(t *testing.T, err error) (int, map[string]string) {
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/a/services", strings.NewReader(`{"service":"trino","instanceName":"b-c"}`))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(recorder, req)
-	body := map[string]string{}
+	body := map[string]any{}
 	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
 	return recorder.Code, body
 }
@@ -101,5 +101,10 @@ func TestDeployThatDoesNotCompileCarriesItsCode(t *testing.T) {
 	if code != http.StatusBadRequest || body["code"] != ErrorCodeDoesNotCompile ||
 		body["error"] != "instance a/b-c does not compile: values don't meet the schema:\n- replicas: must be >= 1" {
 		t.Fatalf("compile refusal: %d %v", code, body)
+	}
+	// Its problems name the instance the compile refused.
+	fields, _ := body["fields"].([]any)
+	if len(fields) != 1 || fields[0].(map[string]any)["instance"] != "a/b-c" {
+		t.Fatalf("fields: %v", body["fields"])
 	}
 }

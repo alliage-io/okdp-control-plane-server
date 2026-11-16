@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/okdp/okdp-compiler/treeedit"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -37,14 +38,14 @@ func ValidatePathNames() gin.HandlerFunc {
 		for _, p := range c.Params {
 			if kind, ok := gitNameParams[p.Key]; ok {
 				if err := treeedit.ValidateName(kind, p.Value); err != nil {
-					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					c.AbortWithStatusJSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 					return
 				}
 			}
 			if kind, ok := objectNameParams[p.Key]; ok {
 				if msgs := validation.IsDNS1123Subdomain(p.Value); len(msgs) > 0 {
-					c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
-						"error": fmt.Sprintf("invalid %s name %q: it must be a lowercase DNS subdomain", kind, p.Value),
+					c.AbortWithStatusJSON(http.StatusBadRequest, models.ErrorResponse{
+						Error: fmt.Sprintf("invalid %s name %q: it must be a lowercase DNS subdomain", kind, p.Value),
 					})
 					return
 				}

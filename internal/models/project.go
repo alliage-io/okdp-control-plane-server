@@ -11,7 +11,8 @@ type Project struct {
 // global.okdp.access.admins) and its role in each project it has one in
 // (project.yaml access, okdp-project-<p> an editor by default; admin in
 // every project for a platform admin). The server refuses the rest with
-// 403 {"error", "code": "forbidden"} all the same.
+// 403 {"error", "code": "forbidden", "permission", "project"} all the
+// same.
 type CallerAccess struct {
 	// Username is the caller's, from its token.
 	Username string `json:"username"`
@@ -23,4 +24,7 @@ type CallerAccess struct {
 	// editor or admin. A project absent has none: the caller does not see
 	// it.
 	Projects map[string]string `json:"projects"`
+	// Sql are the bounds of the SQL editor (SQL_*), for an authenticated
+	// caller only: GET /api/capabilities, public, no longer carries them.
+	Sql SqlCapability `json:"sql"`
 }

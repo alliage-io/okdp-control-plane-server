@@ -26,8 +26,10 @@ func NewClaimHandler(service service.ClaimService) *ClaimHandler {
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Success      200  {array}   models.NamedClaimView
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/claims [get]
 func (h *ClaimHandler) ListNamedClaims(c *gin.Context) {
 	claims, err := h.service.ListNamedClaims(c.Request.Context(), projectNamespace(c))
@@ -47,15 +49,18 @@ func (h *ClaimHandler) ListNamedClaims(c *gin.Context) {
 // @Param        name  path string                   true "Project name"
 // @Param        claim body models.NamedClaimRequest true "The claim, its name included"
 // @Success      201  {object}  models.NamedClaimView
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string "Project not found"
-// @Failure      409  {object}  map[string]string "A named claim of that name exists"
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse "Project not found"
+// @Failure      409  {object}  models.ErrorResponse "A named claim of that name exists"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/claims [post]
 func (h *ClaimHandler) CreateNamedClaim(c *gin.Context) {
 	var req models.NamedClaimRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	claim, err := h.service.CreateNamedClaim(c.Request.Context(), projectNamespace(c), req)
@@ -76,14 +81,17 @@ func (h *ClaimHandler) CreateNamedClaim(c *gin.Context) {
 // @Param        claimName path string                   true "Claim name"
 // @Param        claim     body models.NamedClaimRequest true "The claim"
 // @Success      200  {object}  models.NamedClaimView
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/claims/{claimName} [put]
 func (h *ClaimHandler) UpdateNamedClaim(c *gin.Context) {
 	var req models.NamedClaimRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	claim, err := h.service.UpdateNamedClaim(c.Request.Context(), projectNamespace(c), c.Param("claimName"), req)
@@ -101,9 +109,11 @@ func (h *ClaimHandler) UpdateNamedClaim(c *gin.Context) {
 // @Param        name      path string true "Project name"
 // @Param        claimName path string true "Claim name"
 // @Success      204
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/claims/{claimName} [delete]
 func (h *ClaimHandler) DeleteNamedClaim(c *gin.Context) {
 	if err := h.service.DeleteNamedClaim(c.Request.Context(), projectNamespace(c), c.Param("claimName")); err != nil {
@@ -120,8 +130,10 @@ func (h *ClaimHandler) DeleteNamedClaim(c *gin.Context) {
 // @Produce      json
 // @Param        name path string true "Project name"
 // @Success      200  {object}  models.ProvisioningResponse
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/provisioning [get]
 func (h *ClaimHandler) GetProvisioning(c *gin.Context) {
 	out, err := h.service.Provisioning(c.Request.Context(), projectNamespace(c))
@@ -140,8 +152,11 @@ func (h *ClaimHandler) GetProvisioning(c *gin.Context) {
 // @Param        name        path string true "Project name"
 // @Param        serviceName path string true "Instance name"
 // @Success      200  {object}  models.InstanceClaims
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/claims [get]
 func (h *ClaimHandler) GetInstanceClaims(c *gin.Context) {
 	out, err := h.service.InstanceClaims(c.Request.Context(), projectNamespace(c), c.Param("serviceName"))

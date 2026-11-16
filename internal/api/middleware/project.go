@@ -25,7 +25,7 @@ func RequireProject(get func(c *gin.Context, name string) (*models.Project, erro
 	return func(c *gin.Context) {
 		name := c.Param("name")
 		if name == "" {
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "a project name is required"})
+			c.AbortWithStatusJSON(http.StatusBadRequest, models.ErrorResponse{Error: "a project name is required"})
 			return
 		}
 
@@ -36,13 +36,13 @@ func RequireProject(get func(c *gin.Context, name string) (*models.Project, erro
 			// answering 404 on a timeout tells the console the project was
 			// deleted, and loses the cause on the way.
 			_ = c.Error(err)
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "could not resolve project '" + name + "'"})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, models.ErrorResponse{Error: "could not resolve project '" + name + "'"})
 			return
 		case err != nil || project == nil:
 			// Deliberately the same answer whether the namespace is absent or
 			// simply not a project: the caller learns nothing about what exists
 			// outside the projects.
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "project '" + name + "' not found"})
+			c.AbortWithStatusJSON(http.StatusNotFound, models.ErrorResponse{Error: "project '" + name + "' not found"})
 			return
 		}
 

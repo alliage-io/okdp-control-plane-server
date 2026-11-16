@@ -7,6 +7,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
 
 // ErrorCodeForbidden is the code of a 403: the caller lacks the right
@@ -23,8 +24,8 @@ func RouteKey(method, path string) string { return method + " " + path }
 
 // Authorize refuses, deny by default, a request whose caller lacks the
 // permission the table gives its route: 403, {"error", "code":
-// "forbidden"}. A route missing from the table is refused whoever calls
-// it. A project permission is of the project of the route's :name; a
+// "forbidden", "permission", "project"} (ForbiddenBody). A route missing
+// from the table is refused whoever calls it. A project permission is of the project of the route's :name; a
 // platform admin holds every project role. The caller, kept in the
 // request's context (authz.CallerFrom), is the verified token's groups
 // read against the authority; with authentication off (a nil authority,
@@ -50,21 +51,30 @@ func Authorize(table Permissions, authority *authz.Authority, authenticationOff 
 		if err != nil {
 			id := RequestIDOf(c)
 			logrus.WithError(err).WithField("requestId", id).WithField("path", c.Request.URL.Path).Error("Could not read the platform's authority")
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Request failed", "requestId": id})
+			c.AbortWithStatusJSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Request failed", RequestID: id})
 			return
 		}
 		if !allowed {
-			message := "this needs the role " + perm.String()
-			if perm.ProjectRole() != "" {
-				message += " of project '" + project + "'"
-			}
-			forbidden(c, message)
+			refused := authz.Forbidden(perm, project)
+			c.AbortWithStatusJSON(http.StatusForbidden, ForbiddenBody(refused.Error(), refused))
 			return
 		}
 		c.Next()
 	}
 }
 
+// ForbiddenBody is the body of a 403 code forbidden: message, and the
+// permission refused (permission, its project for a project role) when
+// there is one.
+func ForbiddenBody(message string, refused *authz.ForbiddenError) models.ErrorResponse {
+	body := models.ErrorResponse{Error: message, Code: ErrorCodeForbidden}
+	if refused != nil {
+		body.Permission = refused.Permission.Name()
+		body.Project = refused.Project
+	}
+	return body
+}
+
 func forbidden(c *gin.Context, message string) {
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": message, "code": ErrorCodeForbidden})
+	c.AbortWithStatusJSON(http.StatusForbidden, ForbiddenBody(message, nil))
 }

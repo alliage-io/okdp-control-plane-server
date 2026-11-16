@@ -15,7 +15,6 @@ import (
 // Config holds the application configuration
 type Config struct {
 	ServerPort              string
-	PlatformNamespace       string
 	AllowedOrigins          string
 	LogLevel                string
 	ExcludedSidecarPrefixes []string
@@ -23,6 +22,11 @@ type Config struct {
 	// (the upstream charts of the chart cache): a development-sandbox
 	// affordance for local registries without TLS.
 	InsecureOCIRegistries []string
+	// PrivateChartHosts lists the chart hosts the chart cache may reach at a
+	// private address (GITOPS_PRIVATE_CHART_HOSTS: host, host:port or
+	// *.domain): an in-cluster registry; any other host at a private,
+	// loopback or link-local address is refused.
+	PrivateChartHosts []string
 	// OIDC configures the verification of the console's bearer token.
 	OIDC OIDCConfig
 	// GitOps configures the deployments repositories, the only desired-state
@@ -32,6 +36,13 @@ type Config struct {
 	SQL SQLConfig
 	// SecretStores bounds the SecretStores of the projects.
 	SecretStores SecretStoresConfig
+	// CAFile is a PEM bundle of the CAs every outbound TLS connection of
+	// the server trusts beside the system's (OKDP_CA_FILE): the platform's
+	// CA bundle, global.okdp.tls.caBundleSecret, mounted by the chart
+	// (tls.caBundleSecret). The OIDC issuer, the Keycloak Admin API, the
+	// Git repositories, the catalogs, the Forgejo API, Trino, the
+	// databases of the SQL editor, the connection and secret store tests.
+	CAFile string
 
 	// Keycloak Admin REST API, backing user and group management
 	// (/api/v1/identity). The client is a confidential service account of the
@@ -119,6 +130,27 @@ func (g GitOpsConfig) Topology() (*gitops.Topology, error) {
 	return gitops.LoadTopology(g.ConfigFile)
 }
 
+// InsecureSettings names each setting of the environment that weakens a
+// connection of the server, with what it lets through: still honoured, for
+// sandboxes, and logged as a warning at startup. global.okdp.oidc
+// .insecureSkipVerify is the platform's, read from platform.yaml.
+func (c *Config) InsecureSettings() []string {
+	var settings []string
+	if c.KeycloakTLSInsecure {
+		settings = append(settings, "KEYCLOAK_TLS_INSECURE=true (chart keycloak.tlsInsecure): the Keycloak Admin API's certificate is not checked; give the server the platform's CA bundle instead (OKDP_CA_FILE, chart tls.caBundleSecret)")
+	}
+	if c.GitOps.InsecureIgnoreHostKey {
+		settings = append(settings, "GITOPS_SSH_INSECURE_IGNORE_HOST_KEY=true (chart gitops.sshInsecureIgnoreHostKey): any SSH host key of the Git repositories is accepted")
+	}
+	if len(c.GitOps.InsecureHTTPHosts) > 0 {
+		settings = append(settings, fmt.Sprintf("GITOPS_INSECURE_HTTP_HOSTS=%s (chart gitops.insecureHTTPHosts): the Git and Forgejo credentials are sent to these hosts over http://, in clear", strings.Join(c.GitOps.InsecureHTTPHosts, ",")))
+	}
+	if len(c.InsecureOCIRegistries) > 0 {
+		settings = append(settings, fmt.Sprintf("INSECURE_OCI_REGISTRIES=%s (chart configuration.insecureOciRegistries): the upstream charts of these registries are pulled over plain HTTP", strings.Join(c.InsecureOCIRegistries, ",")))
+	}
+	return settings
+}
+
 type OIDCConfig struct {
 	// It overrides the issuer the platform values declare. Empty is the
 	// normal case: the platform values are where that setting lives.
@@ -158,10 +190,6 @@ type SQLConfig struct {
 	// the Kubernetes API server (SQL_ALLOWED_NETWORKS, comma-separated):
 	// the platform's allow-list, empty by default.
 	AllowedNetworks []string
-	// CAFile is a PEM bundle of the CAs a database certificate is verified
-	// against, besides the system's (SQL_CA_FILE): the platform's CA bundle,
-	// global.okdp.tls.caBundleSecret, mounted by the chart.
-	CAFile string
 }
 
 // SecretStoresConfig bounds the SecretStores the console creates in the
@@ -178,10 +206,9 @@ const defaultSidecarPrefixes = "istio-proxy,istio-init,dynatrace-,linkerd-proxy,
 // Load returns the configuration loaded from environment variables or defaults
 func Load() (*Config, error) {
 	cfg := &Config{
-		ServerPort:        getEnv("PORT", "8093"),
-		PlatformNamespace: getEnv("PLATFORM_NAMESPACE", "okdp-system"),
-		AllowedOrigins:    getEnv("ALLOWED_ORIGINS", "http://localhost:4200"),
-		LogLevel:          getEnv("LOG_LEVEL", "info"),
+		ServerPort:     getEnv("PORT", "8093"),
+		AllowedOrigins: getEnv("ALLOWED_ORIGINS", "http://localhost:4200"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
 		OIDC: OIDCConfig{
 			Issuer:      strings.TrimSpace(getEnv("OIDC_ISSUER", "")),
 			ClientID:    strings.TrimSpace(getEnv("OIDC_CLIENT_ID", "")),
@@ -207,6 +234,7 @@ func Load() (*Config, error) {
 		KeycloakClientID:     strings.TrimSpace(getEnv("KEYCLOAK_CLIENT_ID", "okdp-control-plane")),
 		KeycloakClientSecret: getEnv("KEYCLOAK_CLIENT_SECRET", ""),
 		KeycloakTLSInsecure:  getEnv("KEYCLOAK_TLS_INSECURE", "") == "true",
+		CAFile:               strings.TrimSpace(getEnv("OKDP_CA_FILE", "")),
 	}
 
 	if cfg.GitOps.ChartCacheDir == "" {
@@ -234,6 +262,11 @@ func Load() (*Config, error) {
 			cfg.InsecureOCIRegistries = append(cfg.InsecureOCIRegistries, trimmed)
 		}
 	}
+	for _, h := range strings.Split(getEnv("GITOPS_PRIVATE_CHART_HOSTS", ""), ",") {
+		if trimmed := strings.TrimSpace(h); trimmed != "" {
+			cfg.PrivateChartHosts = append(cfg.PrivateChartHosts, trimmed)
+		}
+	}
 
 	raw := getEnv("EXCLUDED_SIDECAR_PREFIXES", defaultSidecarPrefixes)
 	for _, p := range strings.Split(raw, ",") {
@@ -247,7 +280,10 @@ func Load() (*Config, error) {
 
 // loadSQL reads the SQL_* settings, each with its default.
 func loadSQL() (SQLConfig, error) {
-	sql := SQLConfig{CAFile: strings.TrimSpace(getEnv("SQL_CA_FILE", ""))}
+	if os.Getenv("SQL_CA_FILE") != "" {
+		return SQLConfig{}, errors.New("SQL_CA_FILE is no longer read: every TLS client of the server trusts OKDP_CA_FILE (chart: tls.caBundleSecret, tls.caBundleKey), the SQL editor's among them")
+	}
+	sql := SQLConfig{}
 	timeout, err := time.ParseDuration(getEnv("SQL_STATEMENT_TIMEOUT", "2m"))
 	if err != nil || timeout <= 0 {
 		return sql, fmt.Errorf("SQL_STATEMENT_TIMEOUT: a positive duration, got %q", os.Getenv("SQL_STATEMENT_TIMEOUT"))

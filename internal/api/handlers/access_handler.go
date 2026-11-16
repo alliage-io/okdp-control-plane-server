@@ -13,11 +13,13 @@ import (
 
 // GetCallerAccess godoc
 // @Summary      What the caller may do
-// @Description  The caller's rights, read as every route reads them: whether it is a platform admin (a group of platform.yaml global.okdp.access.admins: identity, catalog writes, project creation and deletion) and its role in each project (project.yaml access, okdp-project-<p> an editor by default; a viewer reads, an editor writes, an admin edits project.yaml; a platform admin is admin everywhere). A project absent from projects is one the caller may not see. A route the caller may not use answers 403 {"error", "code": "forbidden"}
+// @Description  The caller's rights, read as every route reads them: whether it is a platform admin (a group of platform.yaml global.okdp.access.admins: identity, catalog writes, project creation and deletion) and its role in each project (project.yaml access, okdp-project-<p> an editor by default; a viewer reads, an editor writes, an admin edits project.yaml; a platform admin is admin everywhere). A project absent from projects is one the caller may not see. sql: the bounds of the SQL editor (once in GET /api/capabilities, public). A route the caller may not use answers 403 {"error", "code": "forbidden", "permission": platform-admin, viewer, editor or admin, "project" for a project role}. Read it again on any event of GET /api/projects/stream: a change of a project's access is one
 // @Tags         access
 // @Produce      json
 // @Success      200  {object}  models.CallerAccess
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/me [get]
 func (h *ProjectHandler) GetCallerAccess(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -47,7 +49,7 @@ func (h *ProjectHandler) GetCallerAccess(c *gin.Context) {
 	if groups == nil {
 		groups = []string{}
 	}
-	c.JSON(http.StatusOK, models.CallerAccess{Username: auth.ActorName(ctx), Groups: groups, PlatformAdmin: admin, Projects: roles})
+	c.JSON(http.StatusOK, models.CallerAccess{Username: auth.ActorName(ctx), Groups: groups, PlatformAdmin: admin, Projects: roles, Sql: h.Sql})
 }
 
 // canView reports whether the caller of ctx may see project: a viewer of

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -220,7 +221,22 @@ func TestTheClaimsOfTheParametersAreRefusedAtTheirField(t *testing.T) {
 		assert.Equal(t, "database", fields[0].Path, "%s: %+v", want, fields)
 		assert.Equal(t, "/database", fields[0].Pointer)
 		assert.Contains(t, fields[0].Message, want)
+		assert.Equal(t, "demo/x", fields[0].Instance, "the instance the compile refused")
 	}
+}
+
+// Each problem of a refused compile names the instance it is of, the
+// CompileError's: another than the one written when the write breaks it;
+// none for a tree that does not compile as a whole.
+func TestTheProblemsOfARefusedCompileNameTheirInstance(t *testing.T) {
+	other := ValidationFields(DoesNotCompile(&treeedit.CompileError{Project: "sales", Instance: "spark", Err: errors.New("connection warehouse: no such connection")}))
+	require.Len(t, other, 1)
+	assert.Equal(t, "sales/spark", other[0].Instance)
+	assert.Equal(t, "", other[0].Path)
+
+	tree := ValidationFields(DoesNotCompile(&treeedit.CompileError{Err: errors.New("catalogs.yaml: bad")}))
+	require.Len(t, tree, 1)
+	assert.Equal(t, "", tree[0].Instance)
 }
 
 // The write check compiles the tree together: an instance that claims its

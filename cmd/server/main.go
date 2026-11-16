@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -29,6 +27,7 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
+	"github.com/okdp/okdp-control-plane-server/internal/trust"
 )
 
 // @title           OKDP Server New API
@@ -69,6 +68,9 @@ func main() {
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
+	for _, setting := range cfg.InsecureSettings() {
+		logrus.Warnf("WARNING: insecure setting %s. Never outside a sandbox.", setting)
+	}
 
 	// Initialize Kubernetes Clients
 	k8sClient, err := repository.InitK8sClient()
@@ -93,6 +95,12 @@ func main() {
 	// a schedule, writes the output, in a repository of its own. The
 	// commits a user authors name the server in their co-author trailer.
 	gitops.Program = buildinfo.Program
+	// What every outbound TLS connection trusts: the system's certificates
+	// and the platform's CA bundle (OKDP_CA_FILE, chart tls.caBundleSecret).
+	roots, err := trust.Load(cfg.CAFile)
+	if err != nil {
+		logrus.Fatalf("Invalid OKDP_CA_FILE: %v", err)
+	}
 	if err := cfg.GitOps.Validate(); err != nil {
 		logrus.Fatalf("Invalid GitOps configuration: %v", err)
 	}
@@ -102,11 +110,13 @@ func main() {
 	}
 	// One Credentials for every credential the server sends: the
 	// repositories', the catalogs' and the Forgejo API token, refused over
-	// http:// to a host GITOPS_INSECURE_HTTP_HOSTS does not name.
+	// http:// to a host GITOPS_INSECURE_HTTP_HOSTS does not name; their
+	// TLS connections trusting the platform's CA bundle too.
 	creds, err := gitops.NewCredentials(gitops.CredentialsConfig{
 		Dir:                   cfg.GitOps.CredentialsDir,
 		InsecureIgnoreHostKey: cfg.GitOps.InsecureIgnoreHostKey,
 		InsecureHTTPHosts:     cfg.GitOps.InsecureHTTPHosts,
+		CABundle:              roots.PEM,
 	})
 	if err != nil {
 		logrus.Fatalf("Invalid GitOps credentials configuration: %v", err)
@@ -121,8 +131,15 @@ func main() {
 	// of the whole tree with okdp-compiler (okdp-gitops: each claim bound to
 	// its provider, of any namespace), against the upstream charts (the
 	// chart cache); the read paths get the same compile (deployments.Tree).
-	catalogs := &catalog.Loader{Auth: creds.Catalogs(topology.Platform.URL)}
-	chartCache := chartcache.NewCache(cfg.GitOps.ChartCacheDir, chartcache.NewRepositoryPuller(cfg.InsecureOCIRegistries))
+	catalogs := &catalog.Loader{Auth: creds.Catalogs(topology.Platform.URL), CABundle: creds.CABundle()}
+	// The puller trusts the platform's CA bundle (OKDP_CA_FILE) beside the
+	// system CAs, and reaches a private address only for the hosts of
+	// GITOPS_PRIVATE_CHART_HOSTS.
+	puller, err := gitops.NewChartPuller(creds, cfg.InsecureOCIRegistries, cfg.PrivateChartHosts)
+	if err != nil {
+		logrus.Fatalf("GITOPS_PRIVATE_CHART_HOSTS / INSECURE_OCI_REGISTRIES: %v", err)
+	}
+	chartCache := chartcache.NewCache(cfg.GitOps.ChartCacheDir, puller)
 	deployments.Compiler = gitops.NewCompiler(catalogs)
 	deployments.Compiler.Charts = chartCache
 	catalogSource := deployments.Catalogs
@@ -153,7 +170,7 @@ func main() {
 	// realm, through the Admin REST API (KEYCLOAK_*). The realm is located by
 	// KEYCLOAK_URL/KEYCLOAK_REALM, else by the issuer the API verifies tokens
 	// against.
-	identityRepo := repository.NewKeycloakIdentityRepository(cfg, keycloakIssuerSource(cfg, contextRepo))
+	identityRepo := repository.NewKeycloakIdentityRepository(cfg, keycloakIssuerSource(cfg, contextRepo), roots.Pool)
 	identityService := service.NewDefaultIdentityService(identityRepo)
 	identityHandler := handlers.NewIdentityHandler(identityService)
 	if cfg.KeycloakClientSecret == "" {
@@ -170,7 +187,8 @@ func main() {
 	// platform values). The identity capability answers on the same condition
 	// as the identity routes.
 	capabilityService := service.NewDefaultCapabilityService(contextRepo, identityRepo.Available)
-	capabilityService.Sql = models.SqlCapability{
+	// The bounds of the SQL editor, an authenticated caller's: GET /api/me.
+	projectHandler.Sql = models.SqlCapability{
 		DefaultRows:             cfg.SQL.DefaultRows,
 		MaxRows:                 cfg.SQL.MaxRows,
 		MaxResultBytes:          cfg.SQL.MaxResultBytes,
@@ -250,7 +268,9 @@ func main() {
 	}
 	connectionService := service.NewDefaultConnectionService(deployments, connectionSecrets, descriptors, serviceService.ListServices, contractCatalog)
 	connectionService.SetNetworkGuard(guard)
+	connectionService.SetRootCAs(roots.Pool)
 	secretStoreService.SetNetworkGuard(guard)
+	secretStoreService.SetRootCAs(roots.Pool)
 	connectionHandler := handlers.NewConnectionHandler(connectionService)
 
 	// SQL editor: statements run on a deployed engine (Trino) at the URL of its
@@ -258,12 +278,8 @@ func main() {
 	// connection declared in the tree (the project's, the platform's, a named
 	// claim's) with the credentials of an allowed Secret. Certificates are
 	// verified against the system's CAs and the platform's bundle
-	// (SQL_CA_FILE); Trino's are taken on trust when the platform does so
-	// for its issuer.
-	rootCAs, err := sqlRootCAs(cfg.SQL.CAFile)
-	if err != nil {
-		logrus.Fatalf("Invalid SQL_CA_FILE: %v", err)
-	}
+	// (OKDP_CA_FILE); Trino's are taken on trust when the platform does so
+	// for its issuer (discouraged).
 	sqlConnections := service.SqlConnectionSource{
 		Get:     deployments.GetConnection,
 		Claims:  deployments.ListClaims,
@@ -288,7 +304,7 @@ func main() {
 			MaxConcurrentPerUser: cfg.SQL.MaxConcurrentPerUser,
 		},
 		Guard:   guard,
-		RootCAs: rootCAs,
+		RootCAs: roots.Pool,
 		// Write mode is a project editor's, as every write of a project.
 		AuthorizeWrite: func(ctx context.Context, project string) error {
 			return authz.Require(ctx, authz.ProjectEditor, project)
@@ -298,8 +314,9 @@ func main() {
 
 	// The identity block is checked once, at startup.
 	checkIdentityConfiguration(context.Background(), contextRepo)
+	warnInsecurePlatformSettings(context.Background(), contextRepo)
 
-	verifier := buildTokenVerifier(context.Background(), cfg, contextRepo)
+	verifier := buildTokenVerifier(context.Background(), cfg, contextRepo, roots)
 
 	// Release mode unless asked otherwise: debug mode prints every route and
 	// warns on each start, which is noise in a pod. GIN_MODE=debug brings it back.
@@ -334,26 +351,6 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		logrus.Fatalf("Failed to start server: %v", err)
 	}
-}
-
-// sqlRootCAs is the system's CA pool, with the PEM bundle of file when set
-// (the platform's CA bundle).
-func sqlRootCAs(file string) (*x509.CertPool, error) {
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if file == "" {
-		return pool, nil
-	}
-	pem, err := os.ReadFile(file) // #nosec G304 -- the operator's setting
-	if err != nil {
-		return nil, err
-	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%s holds no PEM certificate", file)
-	}
-	return pool, nil
 }
 
 // checkIdentityConfiguration fails fast on an identity block that cannot
@@ -393,6 +390,17 @@ func checkIdentityConfiguration(ctx context.Context, contextRepo repository.Plat
 	logrus.WithField("provisioningProvider", provider).Info("Identity configuration accepted")
 }
 
+// warnInsecurePlatformSettings logs, at startup, the settings of the
+// platform values that weaken a connection of the server: still honoured,
+// read again on each use.
+func warnInsecurePlatformSettings(ctx context.Context, contextRepo repository.PlatformRepository) {
+	insecure, err := contextRepo.GetOidcInsecureSkipVerify(ctx)
+	if err != nil || !insecure {
+		return
+	}
+	logrus.Warn("WARNING: insecure setting global.okdp.oidc.insecureSkipVerify=true (platform.yaml): the certificates of the OIDC issuer, of Keycloak when located from the issuer, and of Trino are not checked; give the server the platform's CA bundle instead (OKDP_CA_FILE, chart tls.caBundleSecret). Never outside a sandbox.")
+}
+
 // keycloakIssuerSource locates the Keycloak realm when KEYCLOAK_URL or
 // KEYCLOAK_REALM is unset: it is the issuer the API trusts (OIDC_ISSUER, else
 // the platform values), with the platform's oidc.insecureSkipVerify.
@@ -412,7 +420,7 @@ func keycloakIssuerSource(cfg *config.Config, contextRepo repository.PlatformRep
 
 // buildTokenVerifier resolves the issuer the API will trust, or returns nil
 // when the deployment asked to run without verification.
-func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo repository.PlatformRepository) auth.Verifier {
+func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo repository.PlatformRepository, roots *trust.Roots) auth.Verifier {
 	if cfg.OIDC.Disabled {
 		logrus.Warn("AUTH_DISABLED is set: the API accepts unauthenticated requests, every caller holding every right. Never do this outside local development.")
 		return nil
@@ -432,13 +440,11 @@ func buildTokenVerifier(ctx context.Context, cfg *config.Config, contextRepo rep
 	if err != nil {
 		logrus.WithError(err).Warn("Could not read oidc.insecureSkipVerify, verifying the issuer certificate")
 	}
-	if insecure {
-		logrus.Warn("oidc.insecureSkipVerify is set: the issuer's certificate is not checked. Trust its CA in the pod instead, anywhere that is not a sandbox.")
-	}
 
 	verifier, err := auth.NewVerifier(ctx, auth.Config{
 		Issuer:             issuer,
 		InsecureSkipVerify: insecure,
+		RootCAs:            roots.Pool,
 		ClientID:           clientID,
 		GroupsClaim:        cfg.OIDC.GroupsClaim,
 	})
@@ -470,6 +476,7 @@ func buildDeployments(cfg config.GitOpsConfig, topology *gitops.Topology, creds 
 			AuthorName:  cfg.AuthorName,
 			AuthorEmail: cfg.AuthorEmail,
 			CloneDir:    cloneDir,
+			CABundle:    creds.CABundle(),
 		})
 	}
 	d := gitops.NewDeployments(gitops.NewRepositories(topology, open))

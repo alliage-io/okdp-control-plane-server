@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -80,6 +83,10 @@ func projectError(err error, name string) error {
 		return apierrors.NewNotFound(projectsResource, name)
 	case errors.Is(err, treeedit.ErrExists):
 		return apierrors.NewAlreadyExists(projectsResource, name)
+	case errors.Is(err, gitops.ErrRepositoryNotEmpty):
+		// The project's repository exists with content: a 409 that says
+		// so, adopting it is a commit by hand to projects.yaml.
+		return apierrors.NewConflict(projectsResource, name, err)
 	default:
 		return err
 	}
@@ -201,8 +208,10 @@ func (s *DefaultProjectService) subscribe() (<-chan struct{}, func()) {
 }
 
 // WatchProjects reads the projects from Git every PollInterval, and at once
-// after the console's own changes, and streams the differences. A read that
-// fails is retried on the next tick.
+// after the console's own changes, and streams the differences: a project
+// whose description or access (project.yaml access, as the compile reads
+// it) changed is MODIFIED, so a console reads the caller's rights (GET
+// /api/me) again. A read that fails is retried on the next tick.
 func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan ProjectEvent, error) {
 	current, err := s.ListProjects(ctx)
 	if err != nil {
@@ -222,6 +231,7 @@ func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan Proje
 		defer ticker.Stop()
 
 		known := map[string]models.Project{}
+		access := s.accessOf(ctx, current)
 		send := func(eventType string, p models.Project) bool {
 			select {
 			case out <- ProjectEvent{Type: eventType, Object: p}:
@@ -248,17 +258,28 @@ func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan Proje
 				logrus.WithError(err).Warn("Could not read the projects for a project stream")
 				continue
 			}
+			// nil when it cannot be read: the access compared next time.
+			nowAccess := s.accessOf(ctx, projects)
 			seen := map[string]bool{}
 			for _, p := range projects {
 				seen[p.Name] = true
 				previous, existed := known[p.Name]
 				known[p.Name] = p
+				accessChanged := false
+				if a, ok := nowAccess[p.Name]; ok {
+					before, had := access[p.Name]
+					accessChanged = had && before != a
+					if access == nil {
+						access = map[string]string{}
+					}
+					access[p.Name] = a
+				}
 				switch {
 				case !existed:
 					if !send("ADDED", p) {
 						return
 					}
-				case previous != p:
+				case previous != p, accessChanged:
 					if !send("MODIFIED", p) {
 						return
 					}
@@ -267,6 +288,7 @@ func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan Proje
 			for name, p := range known {
 				if !seen[name] {
 					delete(known, name)
+					delete(access, name)
 					if !send("DELETED", p) {
 						return
 					}
@@ -275,4 +297,37 @@ func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan Proje
 		}
 	}()
 	return out, nil
+}
+
+// accessOf is the access of each project as the compile reads it
+// (compiler.ProjectAccess of its project.yaml), a fingerprint a project
+// for WatchProjects to compare: its groups and their roles, or the
+// compile's error of a file it refuses. Nil when the tree cannot be read.
+func (s *DefaultProjectService) accessOf(ctx context.Context, projects []models.Project) map[string]string {
+	out := make(map[string]string, len(projects))
+	err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
+		for _, p := range projects {
+			raw, err := r.ReadFile(treeedit.ProjectFilePath(p.Name))
+			if err != nil && !errors.Is(err, treeedit.ErrNotFound) {
+				return err
+			}
+			roles, err := compiler.ProjectAccess(raw, p.Name)
+			if err != nil {
+				out[p.Name] = "error: " + err.Error()
+				continue
+			}
+			groups := make([]string, 0, len(roles))
+			for g, r := range roles {
+				groups = append(groups, g+"="+string(r))
+			}
+			sort.Strings(groups)
+			out[p.Name] = strings.Join(groups, ",")
+		}
+		return nil
+	})
+	if err != nil {
+		logrus.WithError(err).Warn("Could not read the access of the projects for a project stream")
+		return nil
+	}
+	return out
 }

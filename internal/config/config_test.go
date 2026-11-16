@@ -119,3 +119,39 @@ func TestSQLDefaultsAndValidation(t *testing.T) {
 	_, err = Load()
 	assert.ErrorContains(t, err, "SQL_STATEMENT_TIMEOUT")
 }
+
+// OKDP_CA_FILE is the CA bundle of every TLS client; SQL_CA_FILE, which
+// the SQL editor alone read, is refused rather than ignored.
+func TestTheCABundleIsOKDPCAFile(t *testing.T) {
+	t.Setenv("GITOPS_CONFIG", "/etc/okdp/gitops/topology.yaml")
+	t.Setenv("OKDP_CA_FILE", " /etc/okdp/ca/ca.crt ")
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "/etc/okdp/ca/ca.crt", cfg.CAFile)
+
+	t.Setenv("SQL_CA_FILE", "/etc/okdp/sql-ca/ca.crt")
+	_, err = Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OKDP_CA_FILE")
+}
+
+// Each insecure setting of the environment is named, for the startup
+// warning; none by default.
+func TestInsecureSettingsAreNamed(t *testing.T) {
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.InsecureSettings())
+
+	t.Setenv("KEYCLOAK_TLS_INSECURE", "true")
+	t.Setenv("GITOPS_SSH_INSECURE_IGNORE_HOST_KEY", "true")
+	t.Setenv("GITOPS_INSECURE_HTTP_HOSTS", "forgejo-http.forgejo")
+	t.Setenv("INSECURE_OCI_REGISTRIES", "registry.local:5000")
+	cfg, err = Load()
+	require.NoError(t, err)
+	settings := cfg.InsecureSettings()
+	require.Len(t, settings, 4)
+	assert.Contains(t, settings[0], "KEYCLOAK_TLS_INSECURE=true")
+	assert.Contains(t, settings[1], "GITOPS_SSH_INSECURE_IGNORE_HOST_KEY=true")
+	assert.Contains(t, settings[2], "GITOPS_INSECURE_HTTP_HOSTS=forgejo-http.forgejo")
+	assert.Contains(t, settings[3], "INSECURE_OCI_REGISTRIES=registry.local:5000")
+}

@@ -29,8 +29,6 @@ type DefaultCapabilityService struct {
 	// and realm). The identity routes rest on the same answer, so the section
 	// is never advertised while every call would come back 501.
 	userManagement func(ctx context.Context) bool
-	// Sql are the bounds of the SQL editor, reported as they are.
-	Sql models.SqlCapability
 }
 
 func NewDefaultCapabilityService(contextRepo repository.PlatformRepository, userManagement func(ctx context.Context) bool) *DefaultCapabilityService {
@@ -66,6 +64,6 @@ func (s *DefaultCapabilityService) GetCapabilities(ctx context.Context) (*models
 		OidcProvisioning: models.OidcProvisioningCapability{
 			Provider: provisioningProvider,
 		},
-		Sql: s.Sql,
+		// No SQL bounds: they are an authenticated caller's (GET /api/me).
 	}, nil
 }

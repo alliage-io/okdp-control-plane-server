@@ -103,11 +103,10 @@ spec:
               mountPath: /etc/okdp/forgejo
               readOnly: true
             {{- end }}
-            {{- if .Values.sqlEditor.caBundleSecret }}
-            # The platform's CA bundle: database certificates are verified
-            # against it.
-            - name: sql-ca
-              mountPath: /etc/okdp/sql-ca
+            {{- if .Values.tls.caBundleSecret }}
+            # The platform's CA bundle, which every TLS client trusts.
+            - name: ca-bundle
+              mountPath: /etc/okdp/ca
               readOnly: true
             {{- end }}
           resources:
@@ -137,13 +136,13 @@ spec:
               - key: token
                 path: token
         {{- end }}
-        {{- with .Values.sqlEditor }}
+        {{- with .Values.tls }}
         {{- if .caBundleSecret }}
-        - name: sql-ca
+        - name: ca-bundle
           secret:
             secretName: {{ .caBundleSecret }}
             items:
               - key: {{ .caBundleKey | default "ca.crt" }}
-                path: ca.crt
+                path: {{ .caBundleKey | default "ca.crt" }}
         {{- end }}
         {{- end }}

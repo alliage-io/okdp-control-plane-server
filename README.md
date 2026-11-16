@@ -38,7 +38,8 @@ and business logic stay on the server side, keeping the console a stateless brow
 ## What the project does
 
 - **Docker image** `quay.io/okdp/images/okdp-control-plane-server`: runs the Go control-plane API
-  server on a minimal Alpine base, listening on port `8093`.
+  server on a minimal Alpine base (`alpine:3.24`, built with `golang:1.27.3`, both pinned
+  by digest in the `Dockerfile` and bumped by Dependabot), listening on port `8093`.
 - **Helm chart** (`chart/`): deploys the server in-cluster with its Git settings and its
   RBAC outside the projects' namespaces; in each project's namespace, its rights are the
   compiled output's ([RBAC](#rbac)).
@@ -148,11 +149,17 @@ from it answers `403` to everyone.
 | project admin | `PUT /api/projects/:name` (its `project.yaml`) |
 
 A platform admin has every project role. A caller without the permission gets `403`
-`{"error": "<what it needs>", "code": "forbidden"}`; `GET /api/me` answers what it may do,
-so the console hides the rest:
+`{"error": "<what it needs>", "code": "forbidden", "permission": "<permission>",
+"project": "<project>"}`: `permission` is `platform-admin`, `viewer`, `editor` or `admin`,
+`project` the project of a project role (absent for `platform-admin`). The write mode of
+the SQL editor refused is a `403` code `sql-write-refused` with the same `permission` and
+`project`. `GET /api/me` answers what the caller may do, so the console hides the rest,
+and the bounds of the SQL editor (`sql`, an authenticated caller's: the public
+`GET /api/capabilities` no longer carries them):
 
 ```json
-{"username": "alice", "groups": ["okdp-project-demo"], "platformAdmin": false, "projects": {"demo": "editor"}}
+{"username": "alice", "groups": ["okdp-project-demo"], "platformAdmin": false, "projects": {"demo": "editor"},
+ "sql": {"defaultRows": 1000, "maxRows": 10000, "maxResultBytes": 16777216, "statementTimeoutSeconds": 120, "maxConcurrentPerUser": 2}}
 ```
 
 The authority is read from the deployments repositories, kept 5 seconds: a group added to
@@ -205,7 +212,10 @@ Projects are the `projects/<project>/project.yaml` files (the namespace is the p
 name), whoever wrote them: a project declared by hand in Git is listed, served and edited
 by the console like one the console created (in a split topology, the projects of
 `projects.yaml`), and `/api/projects/stream` reports the files as they change (read every
-few seconds). A project's description is the key `description` of its `project.yaml`,
+few seconds): a change of a project's `access` alone, as the compile reads it, is a
+`MODIFIED` too, the caller's role in it read anew, a project it starts seeing `ADDED` and
+one it stops seeing `DELETED`; the console reads `GET /api/me` again on any event. A
+project's description is the key `description` of its `project.yaml`,
 the project's own (okdp-compiler leaves it out of the context of the project's instances);
 an update rewrites that key and keeps the rest of the file. Creating a project from the
 console refuses first, 400 with the compiler's message and nothing created, a name the
@@ -247,7 +257,12 @@ email (the claim is missing or not an address, or authentication is disabled) th
 identity authors the commit too, the user is named in the subject only, the message has
 no trailer, and the server logs a warning once per user. CR, LF, `<` and `>` are stripped
 from the name and email. Writes are serialised and
-replayed on top of the new revision when someone else pushed in between.
+replayed on top of the new revision when someone else pushed in between. Reads are not:
+each reads a snapshot of the last commit of each repository it reaches, one revision of
+each for the whole read, immutable, taken without a lock (okdp-gitops); no read waits on
+another, on a compile or on a write, and a stale snapshot (5 s) is fetched again by one
+read while the others read the one it replaces. A request of several reads may see a
+newer revision in a later one.
 
 ### Checking a write
 
@@ -259,8 +274,10 @@ committed, when the instance it writes does not compile, when an instance that c
 before does not any more (a class, a named claim or a connection of a project reaches
 every instance of it, a claim binds across projects), or when the tree no longer loads;
 the API answers `400` with the compiler's message (code `does-not-compile`) and its
-problems at their fields, `fields: [{path, pointer, message}]` (`compiler.FieldErrors`:
-`catalogs[1].storage`, `/catalogs/1/storage`; `""` for the instance as a whole). The server
+problems at their fields, `fields: [{path, pointer, message, instance}]`
+(`compiler.FieldErrors`: `catalogs[1].storage`, `/catalogs/1/storage`; `""` for the
+instance as a whole), `instance` the `<project>/<instance>` the compile refused, the one
+written or another one the write breaks (absent when the tree as a whole is refused). The server
 re-implements none of the compiler's rules: the parameters, the connection references and
 the claims of an instance are the compile's to check, the keys the context gives
 (`global`, `connections`, `claims`) and a version that is not in the catalogs among them,
@@ -297,7 +314,8 @@ cache (`GITOPS_CHART_CACHE_DIR`, laid out as okdp-compiler reads it,
 `<repository>/<chart>-<version>/<chart>/`), and compiles again with it (the chart's
 `values.schema.json`, the lists an instance appends to). A chart that cannot be fetched is
 logged and the tree compiled without the checks: never a failure. The compile of the same
-tree and catalog revisions is kept, for the reads that follow. The same cache gives the
+tree and catalog revisions is kept, for the reads that follow; the reads that ask for it
+at once share one compile. The same cache gives the
 chart defaults of the rendered values view (`GET .../services/:serviceName/values`: each
 chart's defaults coalesced under its compiled values, the lines set by OKDP or the
 instance marked).
@@ -319,6 +337,17 @@ A connection the console writes is checked at its declaration as the compile che
 required ones after completion, their types, its `secretRef`), whether an instance
 references it yet or not; the credentials it requires (`x-okdp-required` of a secret field)
 are the console's to ask, the compile never sees them.
+
+A write of a connection and its Secret is not atomic, so the commit comes first: a create or
+an update commits the connection naming its Secret, then writes the Secret (refused before
+the commit when a Secret the console did not write holds the name); credentials it cannot
+store take the commit back (the connection deleted, or restored as it was). A crash in
+between leaves a connection whose credentials are not stored yet (an update writes them),
+never a Secret that no connection names. A delete, or an update off the console's Secret,
+commits first and removes the Secret next: a crash in between leaves the Secret, labelled
+`app.kubernetes.io/managed-by: okdp-control-plane`, which a new connection of that name
+takes over (the server's Role in a project namespace cannot list Secrets, so no sweep finds
+it).
 
 ### Secret stores
 
@@ -358,7 +387,7 @@ and the credentials come from four sources only:
 Any other Secret is refused (`400`, code `sql-credentials-refused`): naming an operator's
 superuser Secret in a connection is not a way to hand it to every member of the project.
 The connection verifies TLS against the system's CAs and the platform's CA bundle
-(`sqlEditor.caBundleSecret`: `sslMode: verify-ca` checks the chain only, any other mode the
+(`tls.caBundleSecret`, [TLS](#tls): `sslMode: verify-ca` checks the chain only, any other mode the
 host name too, `disable` and `prefer` are not honored), accepts SCRAM-SHA-256 only (a
 server asking for a clear-text or MD5 password gets nothing), and dials through a guard
 refusing loopback, link-local (`169.254.0.0/16`, `fe80::/10`) and the Kubernetes API
@@ -377,7 +406,7 @@ start of its text, and is bounded by `SQL_STATEMENT_TIMEOUT`, a row cap, a resul
 cap and a per-user concurrency limit (`429`, code `sql-busy`); a client that disconnects
 cancels it. A result carries the row cap it ran with (`maxRows`: the request's, else
 `SQL_DEFAULT_ROWS`, at most `SQL_MAX_ROWS`) and, when `truncated`, which cap dropped
-rows (`truncatedBy`: `rows` or `bytes`); `GET /api/capabilities` gives the bounds
+rows (`truncatedBy`: `rows` or `bytes`); `GET /api/me` gives the bounds
 (`sql: {defaultRows, maxRows, maxResultBytes, statementTimeoutSeconds,
 maxConcurrentPerUser}`). A PostgreSQL statement past the timeout answers `200` with
 `error.errorName: TIMEOUT`; a Trino one `504`, code `sql-timeout`, the query cancelled.
@@ -622,6 +651,9 @@ curl -s http://localhost:8093/health
 The API is described by [`docs/swagger.yaml`](docs/swagger.yaml) (`make swagger`); the
 server does not serve it. Every answer carries an `X-Request-Id` header; an internal error
 answers a generic message with that `requestId`, its cause in the server's log under it.
+Every error answer is a `models.ErrorResponse`, `{error, code?, fields?, requestId?,
+permission?, project?}` (a `501` of a feature not installed `{error, reason, feature}`),
+so a client types it from the spec.
 
 ### RBAC
 
@@ -734,7 +766,6 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | Parameter | Description | Default | Required |
 |-----------|-------------|---------|:--------:|
 | `PORT` | HTTP port the server listens on | `8093` | No |
-| `PLATFORM_NAMESPACE` | Namespace where the OKDP platform runs | `okdp-system` | No |
 | `ALLOWED_ORIGINS` | Single CORS origin, set verbatim in `Access-Control-Allow-Origin` (the console URL) | `http://localhost:4200` | No |
 | `LOG_LEVEL` | Log verbosity (`debug`, `info`, `warn`, `error`) | `info` | No |
 | `GIN_MODE` | HTTP framework mode (`debug` prints every route) | `release` | No |
@@ -752,16 +783,17 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `GITOPS_RELEASES_NAMESPACE` | Flux HelmReleases and their values ConfigMaps | `okdp-releases` | No |
 | `ARGOCD_NAMESPACE` | Argo CD Applications | `argocd` | No |
 | `INSECURE_OCI_REGISTRIES` | Registry hosts reached over plain HTTP to pull the upstream charts into the chart cache (sandboxes) | | No |
+| `GITOPS_PRIVATE_CHART_HOSTS` | Chart hosts the chart cache may reach at a private address, an in-cluster registry (chart: `configuration.privateChartHosts`); the cache trusts `OKDP_CA_FILE` beside the system CAs | | No |
 | `KEYCLOAK_CLIENT_ID` | Keycloak service-account client of the platform realm (chart: `keycloak.credentialsSecret`, key `client_id`) | `okdp-control-plane` | No |
 | `KEYCLOAK_CLIENT_SECRET` | Its secret (chart: `keycloak.credentialsSecret`, key `client_secret`). Unset: user and group management is off | | No |
 | `KEYCLOAK_URL` / `KEYCLOAK_REALM` | Keycloak base URL and realm of the Admin API | from the platform OIDC issuer `<url>/realms/<realm>` | No |
-| `KEYCLOAK_TLS_INSECURE` | Skip the Keycloak certificate check (sandboxes only) | `false` | No |
+| `KEYCLOAK_TLS_INSECURE` | Skip the Keycloak certificate check (discouraged: `OKDP_CA_FILE` instead) | `false` | No |
 | `SQL_STATEMENT_TIMEOUT` | One SQL editor statement's timeout, PostgreSQL's `statement_timeout` too (chart: `sqlEditor.statementTimeout`) | `2m` | No |
 | `SQL_DEFAULT_ROWS` / `SQL_MAX_ROWS` | Row cap of a request that names none / the largest it may ask | `1000` / `10000` | No |
 | `SQL_MAX_RESULT_BYTES` | Size of a result's rows past which the rest is dropped | `16777216` | No |
 | `SQL_MAX_CONCURRENT_PER_USER` | Statements one user runs at once (`429` past it) | `2` | No |
 | `SQL_ALLOWED_NETWORKS` | CIDRs the SQL editor and the connection tests may reach although loopback, link-local or the API server (comma-separated) | | No |
-| `SQL_CA_FILE` | PEM bundle database certificates are verified against, besides the system's (chart: `sqlEditor.caBundleSecret`, the platform's `global.okdp.tls.caBundleSecret`) | | No |
+| `OKDP_CA_FILE` | PEM bundle every outbound TLS connection trusts beside the system's CAs ([TLS](#tls); chart: `tls.caBundleSecret` and `tls.caBundleKey`, mounted at `/etc/okdp/ca/<caBundleKey>`). Replaces `SQL_CA_FILE`, refused at startup when still set | | No |
 | `SECRET_STORE_ALLOWED_SERVERS` | Vault (OpenBao) server URLs a project's SecretStore and its connection test may name beside the platform's secret store's (comma-separated; chart: `secretStores.allowedServers`) ([secret stores](#secret-stores)) | | No |
 | `EXCLUDED_SIDECAR_PREFIXES` | Container name prefixes excluded from pod/metrics views (comma-separated) | `istio-proxy,istio-init,dynatrace-,linkerd-proxy,envoy,vault-agent` | No |
 
@@ -782,10 +814,35 @@ management client: `realm-management` in a regular realm, but `master-realm` in 
 Without `KEYCLOAK_CLIENT_SECRET` the identity routes answer `501` and `/api/capabilities`
 reports `identity.userManagement: false`. The `comment` and `uid` of a user are Keycloak
 user attributes: on Keycloak 24+ the realm user profile must allow them (unmanaged
-attributes enabled, or both attributes declared), otherwise Keycloak drops them.
+attributes enabled, or both attributes declared), otherwise Keycloak drops them. An update
+reads the user's or group's representation, writes the console's fields over it (a user's
+name, email, enabled flag, `comment` and numeric `uid`; a group's `comment`) and puts it
+back whole: the other attributes (federated from LDAP, set by an administrator) and fields
+are kept.
 
 > For the full chart values (image, service, resources, RBAC), see
 > [`chart/values.yaml`](chart/values.yaml).
+
+### TLS
+
+Every outbound TLS connection of the server verifies the certificate it is
+shown against the system's CAs and the platform's CA bundle, `OKDP_CA_FILE`: the
+chart mounts the key `tls.caBundleKey` (`ca.crt`) of the Secret `tls.caBundleSecret`
+of the release namespace at `/etc/okdp/ca/<caBundleKey>` (the platform's
+`global.okdp.tls.caBundleSecret`, `certs-bundle` in the sandbox, which trust-manager
+writes to every namespace). It covers the OIDC issuer's discovery and keys, the Keycloak
+Admin API, the Git repositories (go-git's fetches, pushes and listings, okdp-gitops'
+`Credentials.CABundle`), the catalogs, the Forgejo API, Trino, the databases of the SQL
+editor, the S3, PostgreSQL and MySQL connection tests (MySQL's `tls: true` verified
+with them; `preferred` and `skip-verify` verify nothing) and the secret store test (a
+store's `caBundle` beside them). A file that cannot be read or holds no certificate stops the
+server at startup. `global.okdp.oidc.insecureSkipVerify` (the OIDC issuer, Keycloak and
+Trino) and `KEYCLOAK_TLS_INSECURE` are still honoured, and discouraged: they take any
+certificate on trust; give the server the platform's CA instead. The server logs a
+`WARNING: insecure setting …` at startup for each one set, naming it, and for
+`GITOPS_SSH_INSECURE_IGNORE_HOST_KEY`, `GITOPS_INSECURE_HTTP_HOSTS` and
+`INSECURE_OCI_REGISTRIES` too. The upstream charts of
+the chart cache are pulled with the system's CAs (okdp-compiler's `chartcache`).
 
 ---
 

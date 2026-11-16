@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
@@ -66,6 +67,15 @@ func TestSqlRefusalsCarryTheirCode(t *testing.T) {
 		if status != tc.status || body["code"] != tc.code {
 			t.Errorf("%v: got %d %v, want %d %s", tc.err, status, body, tc.status, tc.code)
 		}
+	}
+}
+
+// A write mode refused names the permission it needs, of its project.
+func TestSqlWriteRefusedNamesThePermission(t *testing.T) {
+	err := fmt.Errorf("%w: %w", service.ErrSqlWriteRefused, authz.Forbidden(authz.ProjectEditor, "a"))
+	status, body := runSql(t, &sqlSpy{err: err}, `{"query":"SELECT 1","write":true}`)
+	if status != http.StatusForbidden || body["code"] != ErrorCodeSqlWriteRefused || body["permission"] != "editor" || body["project"] != "a" {
+		t.Errorf("got %d %v, want 403 sql-write-refused, permission editor of project a", status, body)
 	}
 }
 

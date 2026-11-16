@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	compiler "github.com/okdp/okdp-compiler"
@@ -64,8 +65,20 @@ func authorizedRouter(t *testing.T, verifier auth.Verifier) *gin.Engine {
 		"projects/demo/project.yaml":  "access:\n  analysts: viewer\n  okdp-project-demo: editor\n  demo-admins: admin\n",
 		"projects/other/project.yaml": "description: another team's\n",
 	})
+	return routerOver(store, service.DefaultProjectPollInterval, verifier)
+}
+
+// sqlBounds are the bounds of the SQL editor of the routers of the tests.
+var sqlBounds = models.SqlCapability{DefaultRows: 100, MaxRows: 1000, MaxResultBytes: 1 << 20, StatementTimeoutSeconds: 60, MaxConcurrentPerUser: 2}
+
+// routerOver serves the API over store, its project streams reading it
+// every poll.
+func routerOver(store gitops.Store, poll time.Duration, verifier auth.Verifier) *gin.Engine {
 	deployments := gitops.NewDeployments(store)
-	projects := handlers.NewProjectHandler(service.NewDefaultProjectService(nil, deployments))
+	projectService := service.NewDefaultProjectService(nil, deployments)
+	projectService.PollInterval = poll
+	projects := handlers.NewProjectHandler(projectService)
+	projects.Sql = sqlBounds
 	authority := authz.NewAuthority(authz.DeploymentsSource(deployments))
 	return SetupRouter(&config.Config{}, verifier, authority, nil, projects, nil, nil, nil, nil, nil, nil, nil, nil)
 }
@@ -217,8 +230,69 @@ func TestAUserCannotMakeItselfPlatformAdmin(t *testing.T) {
 	for _, who := range []string{"plain", "viewer", "editor", "admin"} {
 		w := serve(r, http.MethodPut, "/api/v1/identity/users/"+who, who, `{"username":"`+who+`","groups":["platform_admin"]}`)
 		require.Equal(t, http.StatusForbidden, w.Code, who)
-		assert.JSONEq(t, `{"error":"this needs the role platform admin","code":"forbidden"}`, w.Body.String())
+		assert.JSONEq(t, `{"error":"this needs the role platform admin","code":"forbidden","permission":"platform-admin"}`, w.Body.String())
 	}
+}
+
+// A 403 names the permission refused, and the project of a project role,
+// for a client to read rather than its message.
+func TestAForbiddenAnswerNamesThePermission(t *testing.T) {
+	r := authorizedRouter(t, callers)
+	w := serve(r, http.MethodPost, "/api/projects/demo/services", "viewer", `{}`)
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error":"this needs the role project editor of project 'demo'","code":"forbidden","permission":"editor","project":"demo"}`, w.Body.String())
+
+	w = serve(r, http.MethodPut, "/api/projects/demo", "editor", `{"name":"demo"}`)
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error":"this needs the role project admin of project 'demo'","code":"forbidden","permission":"admin","project":"demo"}`, w.Body.String())
+
+	w = serve(r, http.MethodGet, "/api/projects/other", "viewer", "")
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error":"this needs the role project viewer of project 'other'","code":"forbidden","permission":"viewer","project":"other"}`, w.Body.String())
+}
+
+// A project stream follows the access of project.yaml written by hand:
+// a project the caller starts seeing is ADDED to its stream at once, one
+// it stops seeing DELETED, its role read anew and not as kept.
+func TestTheProjectStreamFollowsAChangeOfTheAccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := gitops.MustMemoryStore(map[string]string{
+		"projects/demo/project.yaml":  "access:\n  analysts: viewer\n",
+		"projects/other/project.yaml": "description: another team's\n",
+	})
+	r := routerOver(store, 20*time.Millisecond, callers)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/stream", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer viewer")
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ServeHTTP(w, req)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	_, err := store.Update(context.Background(), gitops.Commit{Subject: "access"}, func(tx gitops.Tx) error {
+		if err := tx.WriteFile("projects/demo/project.yaml", []byte("access:\n  okdp-project-demo: editor\n")); err != nil {
+			return err
+		}
+		return tx.WriteFile("projects/other/project.yaml", []byte("description: another team's\naccess:\n  analysts: viewer\n"))
+	})
+	require.NoError(t, err)
+	<-done
+
+	var events []string
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if data, ok := strings.CutPrefix(line, "data:"); ok {
+			var e service.ProjectEvent
+			require.NoError(t, json.Unmarshal([]byte(data), &e), line)
+			events = append(events, e.Type+" "+e.Object.Name)
+		}
+	}
+	assert.ElementsMatch(t, []string{"ADDED demo", "DELETED demo", "ADDED other"}, events)
+	assert.Equal(t, "ADDED demo", events[0])
 }
 
 // The lists of projects show the caller's only, every one to a platform
@@ -244,9 +318,9 @@ func TestTheCallerSeesItsProjectsAndItsRights(t *testing.T) {
 	}
 
 	for who, want := range map[string]models.CallerAccess{
-		"plain":    {Username: "plain", Groups: []string{"somebody-else"}, Projects: map[string]string{}},
-		"editor":   {Username: "editor", Groups: []string{"okdp-project-demo"}, Projects: map[string]string{"demo": "editor"}},
-		"platform": {Username: "platform", Groups: []string{"platform_admin"}, PlatformAdmin: true, Projects: map[string]string{"demo": "admin", "other": "admin"}},
+		"plain":    {Username: "plain", Groups: []string{"somebody-else"}, Projects: map[string]string{}, Sql: sqlBounds},
+		"editor":   {Username: "editor", Groups: []string{"okdp-project-demo"}, Projects: map[string]string{"demo": "editor"}, Sql: sqlBounds},
+		"platform": {Username: "platform", Groups: []string{"platform_admin"}, PlatformAdmin: true, Projects: map[string]string{"demo": "admin", "other": "admin"}, Sql: sqlBounds},
 	} {
 		w := serve(r, http.MethodGet, "/api/me", who, "")
 		require.Equal(t, http.StatusOK, w.Code, who)

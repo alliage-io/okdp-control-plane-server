@@ -49,6 +49,9 @@ type DefaultSecretStoreService struct {
 	// guard is the network a connection test reaches (netguard.Default
 	// when nil): never loopback, link-local or the API server.
 	guard *netguard.Guard
+	// roots verify the certificate of a tested server: the system's and
+	// the platform's CA bundle (OKDP_CA_FILE); nil, the system's.
+	roots *x509.CertPool
 }
 
 func (s *DefaultSecretStoreService) Available(ctx context.Context) bool {
@@ -66,6 +69,10 @@ func NewDefaultSecretStoreService(repo repository.SecretStoreRepository, tree fu
 // SetNetworkGuard sets the network policy of the connection tests: the SQL
 // editor's.
 func (s *DefaultSecretStoreService) SetNetworkGuard(guard *netguard.Guard) { s.guard = guard }
+
+// SetRootCAs sets the certificates a tested server is verified with, the
+// system's and the platform's CA bundle, and the request's caBundle.
+func (s *DefaultSecretStoreService) SetRootCAs(roots *x509.CertPool) { s.roots = roots }
 
 // checkKubernetesAuth pins a store of kubernetes auth to the platform's
 // secret store: its server allowed (allowedServer), its ServiceAccount
@@ -261,7 +268,7 @@ func (s *DefaultSecretStoreService) TestConnection(ctx context.Context, req mode
 	if guard == nil {
 		guard = netguard.Default()
 	}
-	return validateVaultToken(ctx, guard, req.Vault.Server, req.Auth.Config.Token, req.Vault.CABundle)
+	return validateVaultToken(ctx, guard, s.roots, req.Vault.Server, req.Auth.Config.Token, req.Vault.CABundle)
 }
 
 // validateVaultToken calls GET /v1/auth/token/lookup-self to verify that
@@ -275,13 +282,17 @@ func (s *DefaultSecretStoreService) TestConnection(ctx context.Context, req mode
 // The request dials through guard, follows no redirect (the token would
 // go to the server a redirect names) and goes through no proxy; a failure
 // to connect is reported without the cause, which is logged.
-func validateVaultToken(ctx context.Context, guard *netguard.Guard, server, token, caBundle string) error {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+func validateVaultToken(ctx context.Context, guard *netguard.Guard, roots *x509.CertPool, server, token, caBundle string) error {
+	tlsConfig := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 
 	if caBundle != "" {
+		// The store's caBundle, beside what the server trusts.
 		pool := x509.NewCertPool()
+		if roots != nil {
+			pool = roots.Clone()
+		}
 		if !pool.AppendCertsFromPEM([]byte(caBundle)) {
-			return fmt.Errorf("invalid CA bundle")
+			return invalid("vault.caBundle: invalid CA bundle")
 		}
 		tlsConfig.RootCAs = pool
 	}

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
 
 // DefaultMaxBodyBytes bounds every request body. The API takes forms,
@@ -18,7 +19,7 @@ const DefaultMaxBodyBytes = 1 << 20
 func LimitRequestBody(limit int64) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.ContentLength > limit {
-			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "the request body is too large"})
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, models.ErrorResponse{Error: "the request body is too large"})
 			return
 		}
 		if c.Request.Body != nil {

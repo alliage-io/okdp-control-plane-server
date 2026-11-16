@@ -6,6 +6,7 @@ package auth
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
@@ -46,8 +47,13 @@ const DefaultGroupsClaim = "groups"
 // Config describes the identity provider to trust.
 type Config struct {
 	Issuer string
-	// InsecureSkipVerify takes the issuer's certificate on trust.
+	// InsecureSkipVerify takes the issuer's certificate on trust
+	// (global.okdp.oidc.insecureSkipVerify): discouraged, RootCAs given the
+	// platform's CA instead.
 	InsecureSkipVerify bool
+	// RootCAs verify the issuer's certificate: the system's and the
+	// platform's CA bundle (OKDP_CA_FILE); nil, the system's.
+	RootCAs *x509.CertPool
 	ClientID           string
 	// GroupsClaim is the claim holding the caller's groups, a list of
 	// strings (a single string is one group); a dotted name is a claim
@@ -80,11 +86,14 @@ func NewVerifier(ctx context.Context, cfg Config) (Verifier, error) {
 
 	// go-oidc otherwise falls back to http.DefaultClient, which has no timeout.
 	client := &http.Client{Timeout: issuerTimeout}
-	if cfg.InsecureSkipVerify {
+	if cfg.InsecureSkipVerify || cfg.RootCAs != nil {
 		// Cloned, not built from scratch: a bare Transport has no Proxy, and
 		// the chart passes the egress proxy the pod must go through.
 		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		transport.TLSClientConfig = &tls.Config{RootCAs: cfg.RootCAs, MinVersion: tls.VersionTLS12}
+		if cfg.InsecureSkipVerify {
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- opt-in, discouraged
+		}
 		client.Transport = transport
 	}
 

@@ -6,7 +6,6 @@ metadata:
     {{- include "okdp-control-plane-server.labels" . | nindent 4 }}
 data:
   PORT: {{ .Values.service.port | quote }}
-  PLATFORM_NAMESPACE: {{ .Values.configuration.platformNamespace | quote }}
   ALLOWED_ORIGINS: {{ .Values.configuration.allowedOrigins | quote }}
   LOG_LEVEL: {{ .Values.configuration.logLevel | quote }}
   # The claim of the caller's groups, which every permission is read with.
@@ -33,6 +32,10 @@ data:
   # Development sandboxes only: registry hosts reached over plain HTTP.
   INSECURE_OCI_REGISTRIES: {{ .Values.configuration.insecureOciRegistries | quote }}
   {{- end }}
+  {{- with .Values.configuration.privateChartHosts }}
+  # The chart hosts the chart cache may reach at a private address.
+  GITOPS_PRIVATE_CHART_HOSTS: {{ join "," . | quote }}
+  {{- end }}
   {{- with .Values.keycloak }}
   {{- if .url }}
   KEYCLOAK_URL: {{ .url | quote }}
@@ -43,6 +46,12 @@ data:
   {{- if .tlsInsecure }}
   # Sandboxes only: the Keycloak certificate is not checked.
   KEYCLOAK_TLS_INSECURE: "true"
+  {{- end }}
+  {{- end }}
+  {{- with .Values.tls }}
+  {{- if .caBundleSecret }}
+  # The platform's CA bundle (tls.caBundleSecret), trusted by every TLS client.
+  OKDP_CA_FILE: {{ printf "/etc/okdp/ca/%s" (.caBundleKey | default "ca.crt") | quote }}
   {{- end }}
   {{- end }}
   {{- with .Values.secretStores }}
@@ -58,9 +67,5 @@ data:
   SQL_MAX_CONCURRENT_PER_USER: {{ .maxConcurrentPerUser | quote }}
   {{- if .allowedNetworks }}
   SQL_ALLOWED_NETWORKS: {{ join "," .allowedNetworks | quote }}
-  {{- end }}
-  {{- if .caBundleSecret }}
-  # The platform's CA bundle (sqlEditor.caBundleSecret).
-  SQL_CA_FILE: /etc/okdp/sql-ca/ca.crt
   {{- end }}
   {{- end }}

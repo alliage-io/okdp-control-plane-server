@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -53,7 +54,16 @@ func failure(reason, format string, args ...any) *testFailure {
 // generic categories of models.TestReason* with a message of its own, never
 // the remote server's text: a probe must not read a service it has no
 // credentials for.
-type connectionTester func(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck
+type connectionTester func(ctx context.Context, values connectionValues, network probeNetwork) []models.ConnectionTestCheck
+
+// probeNetwork is what a probe reaches and trusts: the addresses the
+// guard lets it dial, the certificates a server is verified with (the
+// system's and the platform's CA bundle, OKDP_CA_FILE; nil, the
+// system's).
+type probeNetwork struct {
+	guard *netguard.Guard
+	roots *x509.CertPool
+}
 
 // check turns the error of a single probe into a reportable verdict.
 func check(label, target string, decisive bool, err error) models.ConnectionTestCheck {
@@ -84,14 +94,14 @@ var connectionTesters = map[string]connectionTester{
 // testDatabaseServer picks the driver from the engine field. One type means one
 // contract, so the entry form is shared and only the probe differs. A database
 // publishes a single address, so there is a single check.
-func testDatabaseServer(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck {
+func testDatabaseServer(ctx context.Context, values connectionValues, network probeNetwork) []models.ConnectionTestCheck {
 	target := net.JoinHostPort(values.String("host"), fmt.Sprint(values.Int("port", 0)))
 	var err error
 	switch engine := values.String("engine"); engine {
 	case "postgresql":
-		err = testPostgreSQLAt(ctx, values, guard)
+		err = testPostgreSQLAt(ctx, values, network)
 	case "mysql":
-		err = testMySQLAt(ctx, values, guard)
+		err = testMySQLAt(ctx, values, network)
 	default:
 		err = failure(models.TestReasonInvalidConfig, "Unknown database engine %q", engine)
 	}
@@ -166,12 +176,15 @@ func postgresConfig(values connectionValues) (*pgx.ConnConfig, error) {
 	return config, nil
 }
 
-func testPostgreSQLAt(ctx context.Context, values connectionValues, guard *netguard.Guard) error {
+func testPostgreSQLAt(ctx context.Context, values connectionValues, network probeNetwork) error {
 	config, err := postgresConfig(values)
 	if err != nil {
 		return err
 	}
-	config.DialFunc = guard.Dialer(testTimeout).DialContext
+	if config.TLSConfig != nil && !config.TLSConfig.InsecureSkipVerify {
+		config.TLSConfig.RootCAs = network.roots
+	}
+	config.DialFunc = network.guard.Dialer(testTimeout).DialContext
 
 	ctx, cancel := context.WithTimeout(ctx, testTimeout)
 	defer cancel()
@@ -224,7 +237,11 @@ func mysqlConfig(values connectionValues) (*mysqldriver.Config, error) {
 	switch tlsMode := values.String("tls"); tlsMode {
 	case "", "false":
 		config.TLSConfig = "false"
-	case "preferred", "true", "skip-verify":
+	case "true":
+		// Verified: the probe gives the trust pool (testMySQLAt), the
+		// driver the server name of the address.
+		config.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
+	case "preferred", "skip-verify":
 		config.TLSConfig = tlsMode
 	default:
 		return nil, failure(models.TestReasonInvalidConfig, "Unsupported TLS mode %q.", tlsMode)
@@ -233,12 +250,15 @@ func mysqlConfig(values connectionValues) (*mysqldriver.Config, error) {
 	return config, nil
 }
 
-func testMySQLAt(ctx context.Context, values connectionValues, guard *netguard.Guard) error {
+func testMySQLAt(ctx context.Context, values connectionValues, network probeNetwork) error {
 	config, err := mysqlConfig(values)
 	if err != nil {
 		return err
 	}
-	config.DialFunc = guard.Dialer(testTimeout).DialContext
+	if config.TLS != nil {
+		config.TLS.RootCAs = network.roots
+	}
+	config.DialFunc = network.guard.Dialer(testTimeout).DialContext
 
 	connector, err := mysqldriver.NewConnector(config)
 	if err != nil {
@@ -276,18 +296,18 @@ func classifyMySQLError(ctx context.Context, err error) error {
 // one a workload will use, so it is the decisive verdict. Testing only the
 // public one, as this did, reported success for a store the deployed service
 // could not reach.
-func testS3(ctx context.Context, values connectionValues, guard *netguard.Guard) []models.ConnectionTestCheck {
+func testS3(ctx context.Context, values connectionValues, network probeNetwork) []models.ConnectionTestCheck {
 	internal := values.String("internalUrl")
 	public := values.String("apiUrl")
 
 	var checks []models.ConnectionTestCheck
 	if internal != "" {
-		checks = append(checks, check("In-cluster URL", internal, true, testS3At(ctx, values, internal, guard)))
+		checks = append(checks, check("In-cluster URL", internal, true, testS3At(ctx, values, internal, network)))
 	}
 	if public != "" {
 		// Decisive only when no in-cluster address exists, in which case this is
 		// the path the workload takes.
-		checks = append(checks, check("Public URL", public, internal == "", testS3At(ctx, values, public, guard)))
+		checks = append(checks, check("Public URL", public, internal == "", testS3At(ctx, values, public, network)))
 	}
 	if len(checks) == 0 {
 		checks = append(checks, check("S3 endpoint", "", true,
@@ -296,7 +316,7 @@ func testS3(ctx context.Context, values connectionValues, guard *netguard.Guard)
 	return checks
 }
 
-func testS3At(ctx context.Context, values connectionValues, endpoint string, guard *netguard.Guard) error {
+func testS3At(ctx context.Context, values connectionValues, endpoint string, network probeNetwork) error {
 	host, secure, err := parseS3Endpoint(endpoint)
 	if err != nil {
 		return err
@@ -309,7 +329,8 @@ func testS3At(ctx context.Context, values connectionValues, endpoint string, gua
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = guard.Dialer(testTimeout).DialContext
+	transport.DialContext = network.guard.Dialer(testTimeout).DialContext
+	transport.TLSClientConfig = &tls.Config{RootCAs: network.roots, MinVersion: tls.VersionTLS12}
 	client, err := minio.New(host, &minio.Options{
 		Creds:        credentials.NewStaticV4(values.String("accessKey"), values.String("secretKey"), ""),
 		Secure:       secure,

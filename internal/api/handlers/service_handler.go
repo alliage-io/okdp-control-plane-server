@@ -26,19 +26,13 @@ const (
 	ErrorCodeDoesNotCompile = service.ErrorCodeDoesNotCompile
 )
 
-// validationBody is the body of a 400: the message, and its code when the
-// refusal has one.
-func validationBody(err error) gin.H {
-	body := gin.H{"error": err.Error()}
-	if code := service.ValidationCode(err); code != "" {
-		body["code"] = code
-	}
-	// The compiler's problems at their fields (compiler.FieldErrors): path,
-	// its JSON pointer, message; "" path for the instance as a whole.
-	if fields := service.ValidationFields(err); len(fields) > 0 {
-		body["fields"] = fields
-	}
-	return body
+// validationBody is the body of a 400: the message, its code when the
+// refusal has one, and the compiler's problems at their fields
+// (compiler.FieldErrors): path, its JSON pointer, message, "" path for
+// the instance as a whole, and the instance each is of when a compile of
+// the tree refused the write.
+func validationBody(err error) models.ErrorResponse {
+	return models.ErrorResponse{Error: err.Error(), Code: service.ValidationCode(err), Fields: service.ValidationFields(err)}
 }
 
 // ServiceHandler handles platform service and catalog requests
@@ -66,7 +60,9 @@ func (h *ServiceHandler) SetRenderedValuesService(svc service.RenderedValuesServ
 // @Tags         platform-services
 // @Produce      json
 // @Success      200  {array}   models.PlatformService
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services [get]
 func (h *ServiceHandler) GetPlatformServices(c *gin.Context) {
 	services, err := h.service.GetPlatformServices(c.Request.Context())
@@ -83,7 +79,9 @@ func (h *ServiceHandler) GetPlatformServices(c *gin.Context) {
 // @Tags         platform-services
 // @Produce      json
 // @Success      200  {array}   models.MenuCategory
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-categories [get]
 func (h *ServiceHandler) GetMenuCategories(c *gin.Context) {
 	categories, err := h.service.GetMenuCategories(c.Request.Context())
@@ -102,14 +100,17 @@ func (h *ServiceHandler) GetMenuCategories(c *gin.Context) {
 // @Produce      json
 // @Param        request body models.PlatformService true "Catalog service"
 // @Success      201  {object}  models.PlatformService
-// @Failure      400  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services [post]
 func (h *ServiceHandler) CreatePlatformService(c *gin.Context) {
 	var req models.PlatformService
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	svc, err := h.service.AddPlatformService(c.Request.Context(), req)
@@ -129,15 +130,18 @@ func (h *ServiceHandler) CreatePlatformService(c *gin.Context) {
 // @Param        serviceName path string true "Service name"
 // @Param        request body models.PlatformService true "Catalog service"
 // @Success      200  {object}  models.PlatformService
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services/{serviceName} [put]
 func (h *ServiceHandler) UpdatePlatformService(c *gin.Context) {
 	serviceName := c.Param("serviceName")
 	var req models.PlatformService
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	svc, err := h.service.UpdatePlatformService(c.Request.Context(), serviceName, req)
@@ -155,8 +159,11 @@ func (h *ServiceHandler) UpdatePlatformService(c *gin.Context) {
 // @Produce      json
 // @Param        serviceName path string true "Service name"
 // @Success      204
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services/{serviceName} [delete]
 func (h *ServiceHandler) DeletePlatformService(c *gin.Context) {
 	serviceName := c.Param("serviceName")
@@ -171,11 +178,11 @@ func (h *ServiceHandler) DeletePlatformService(c *gin.Context) {
 func (h *ServiceHandler) writeCatalogError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, service.ErrCatalogValidation):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 	case errors.Is(err, service.ErrCatalogServiceExists):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
 	case errors.Is(err, service.ErrCatalogServiceNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 	default:
 		writeError(c, err, "Catalog operation failed")
 	}
@@ -188,7 +195,10 @@ func (h *ServiceHandler) writeCatalogError(c *gin.Context, err error) {
 // @Produce      json
 // @Param        name path string true "Project name"
 // @Success      200  {array}   models.ServiceInstance
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services [get]
 func (h *ServiceHandler) ListServices(c *gin.Context) {
 	project := c.Param("name")
@@ -210,23 +220,27 @@ func (h *ServiceHandler) ListServices(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        request body models.ServiceRequest true "Service Deploy Request"
 // @Success      201  {object}  models.ServiceInstance
-// @Failure      400  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services [post]
 func (h *ServiceHandler) DeployService(c *gin.Context) {
 	project := c.Param("name")
 
 	var req models.ServiceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	instance, err := h.service.DeployService(c.Request.Context(), project, req)
 	if err != nil {
 		if service.IsReleaseNameTaken(err) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": ErrorCodeReleaseNameTaken})
+			c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error(), Code: ErrorCodeReleaseNameTaken})
 			return
 		}
 		if apierrors.IsAlreadyExists(err) {
@@ -234,9 +248,9 @@ func (h *ServiceHandler) DeployService(c *gin.Context) {
 			if instanceName == "" {
 				instanceName = req.Service
 			}
-			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("Instance '%s' already exists in project '%s'", instanceName, project),
-				"code":  ErrorCodeInstanceExists,
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: fmt.Sprintf("Instance '%s' already exists in project '%s'", instanceName, project),
+				Code:  ErrorCodeInstanceExists,
 			})
 			return
 		}
@@ -258,8 +272,11 @@ func (h *ServiceHandler) DeployService(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        serviceName path string true "Service name"
 // @Success      200  {object}  models.ServiceInstance
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName} [get]
 func (h *ServiceHandler) GetService(c *gin.Context) {
 	project := c.Param("name")
@@ -268,8 +285,8 @@ func (h *ServiceHandler) GetService(c *gin.Context) {
 	instance, err := h.service.GetService(c.Request.Context(), project, serviceName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
 			return
 		}
@@ -287,9 +304,11 @@ func (h *ServiceHandler) GetService(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        serviceName path string true "Service name"
 // @Success      204
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName} [delete]
 func (h *ServiceHandler) DeleteService(c *gin.Context) {
 	project := c.Param("name")
@@ -297,8 +316,8 @@ func (h *ServiceHandler) DeleteService(c *gin.Context) {
 
 	if err := h.service.DeleteService(c.Request.Context(), project, serviceName); err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
 			return
 		}
@@ -319,7 +338,10 @@ func (h *ServiceHandler) DeleteService(c *gin.Context) {
 // @Produce      text/event-stream
 // @Param        name path string true "Project name"
 // @Success      200  {string}  string  "stream"
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/stream [get]
 func (h *ServiceHandler) StreamServices(c *gin.Context) {
 	project := c.Param("name")
@@ -370,7 +392,10 @@ func (h *ServiceHandler) StreamServices(c *gin.Context) {
 // @Produce      json
 // @Param        serviceName path string true "Service name"
 // @Success      200  {object}  service.ServiceVersionsResponse
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services/{serviceName}/versions [get]
 func (h *ServiceHandler) GetServiceVersions(c *gin.Context) {
 	serviceName := c.Param("serviceName")
@@ -391,6 +416,10 @@ func (h *ServiceHandler) GetServiceVersions(c *gin.Context) {
 // @Param        serviceName path string true "Service name"
 // @Param        tag query string false "Package version tag (defaults to the catalog default version)"
 // @Success      200  {array}  models.PackageInput
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
 // @Router       /api/platform-services/{serviceName}/inputs [get]
 func (h *ServiceHandler) GetServiceInputs(c *gin.Context) {
 	serviceName := c.Param("serviceName")
@@ -418,8 +447,11 @@ func (h *ServiceHandler) GetServiceInputs(c *gin.Context) {
 // @Param        serviceName path string true "Service name"
 // @Param        tag query string false "Package version tag (defaults to the catalog default version)"
 // @Success      200  {object}  map[string]interface{}
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/platform-services/{serviceName}/schema [get]
 func (h *ServiceHandler) GetServiceSchema(c *gin.Context) {
 	serviceName := c.Param("serviceName")
@@ -442,7 +474,9 @@ func (h *ServiceHandler) GetServiceSchema(c *gin.Context) {
 // @Tags         platform-services
 // @Produce      json
 // @Success      200  {object}  map[string][]models.ProfileImage
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/profile-images [get]
 func (h *ServiceHandler) GetProfileImages(c *gin.Context) {
 	images, err := h.service.GetProfileImages(c.Request.Context())
@@ -463,9 +497,12 @@ func (h *ServiceHandler) GetProfileImages(c *gin.Context) {
 // @Param        serviceName path string true "Service instance name"
 // @Param        request body models.ServiceUpdateRequest true "Update request (tag and/or parameters)"
 // @Success      200  {object}  models.ServiceInstance
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/parameters [patch]
 func (h *ServiceHandler) UpdateServiceParameters(c *gin.Context) {
 	project := c.Param("name")
@@ -473,15 +510,15 @@ func (h *ServiceHandler) UpdateServiceParameters(c *gin.Context) {
 
 	var req models.ServiceUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	instance, err := h.service.UpdateServiceParameters(c.Request.Context(), project, serviceName, req)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
 			return
 		}
@@ -503,21 +540,24 @@ func (h *ServiceHandler) UpdateServiceParameters(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        serviceName path string true "Service instance name"
 // @Success      200  {array}   models.RenderedValues
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/values [get]
 func (h *ServiceHandler) GetRenderedValues(c *gin.Context) {
 	project := c.Param("name")
 	serviceName := c.Param("serviceName")
 	if h.renderedValues == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "rendered values are not available"})
+		c.JSON(http.StatusNotImplemented, models.ErrorResponse{Error: "rendered values are not available"})
 		return
 	}
 	values, err := h.renderedValues.GetRenderedValues(c.Request.Context(), project, serviceName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
 			return
 		}
@@ -537,7 +577,11 @@ func (h *ServiceHandler) GetRenderedValues(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        serviceName path string true "Service instance name"
 // @Success      200  {array}   models.Pod
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/pods [get]
 func (h *ServiceHandler) ListPods(c *gin.Context) {
 	project := c.Param("name")
@@ -558,7 +602,10 @@ func (h *ServiceHandler) ListPods(c *gin.Context) {
 // @Produce      json
 // @Param        name path string true "Project name"
 // @Success      200  {object}  map[string]models.ServiceMetrics
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/metrics [get]
 func (h *ServiceHandler) GetProjectMetrics(c *gin.Context) {
 	project := c.Param("name")
@@ -578,7 +625,11 @@ func (h *ServiceHandler) GetProjectMetrics(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        serviceName path string true "Service instance name"
 // @Success      200  {object}  models.ServiceMetrics
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/metrics [get]
 func (h *ServiceHandler) GetServiceMetrics(c *gin.Context) {
 	project := c.Param("name")
@@ -604,8 +655,11 @@ func (h *ServiceHandler) GetServiceMetrics(c *gin.Context) {
 // @Param        tailLines query int false "Number of lines from the end (default 100, at most 10000)"
 // @Param        follow query bool false "Stream logs in real-time (default false)"
 // @Success      200  {string}  string  "log output"
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/pods/{podName}/logs [get]
 func (h *ServiceHandler) GetPodLogs(c *gin.Context) {
 	project := c.Param("name")
@@ -619,8 +673,8 @@ func (h *ServiceHandler) GetPodLogs(c *gin.Context) {
 	stream, err := h.service.GetPodLogs(c.Request.Context(), project, serviceName, podName, container, tailLines, follow)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("Pod '%s' of service '%s' not found in project '%s'", podName, serviceName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("Pod '%s' of service '%s' not found in project '%s'", podName, serviceName, project),
 			})
 			return
 		}

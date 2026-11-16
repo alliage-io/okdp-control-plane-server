@@ -32,6 +32,9 @@ func projectNamespace(c *gin.Context) string {
 // @Tags         connections
 // @Produce      json
 // @Success      200  {object}  models.ConnectionCatalogResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
 // @Router       /api/contracts [get]
 func (h *ConnectionHandler) GetContracts(c *gin.Context) {
 	c.JSON(http.StatusOK, h.service.Catalog(c.Request.Context()))
@@ -44,7 +47,10 @@ func (h *ConnectionHandler) GetContracts(c *gin.Context) {
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Success      200  {array}   models.ConnectionResponse
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections [get]
 func (h *ConnectionHandler) ListConnections(c *gin.Context) {
 	h.list(c, projectNamespace(c))
@@ -67,6 +73,10 @@ func (h *ConnectionHandler) list(c *gin.Context, namespace string) {
 // @Param        name path string true "Project name"
 // @Param        contract query string false "Contract the connections must satisfy"
 // @Success      200 {array} models.SelectableConnection
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
 // @Router       /api/projects/{name}/connections/selectable [get]
 func (h *ConnectionHandler) ListSelectable(c *gin.Context) {
 	project := c.Param("name")
@@ -87,6 +97,11 @@ func (h *ConnectionHandler) ListSelectable(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        connName path string true "Connection name"
 // @Success      200 {array} models.ConnectionConsumer
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
 // @Router       /api/projects/{name}/connections/{connName}/consumers [get]
 func (h *ConnectionHandler) ListConsumers(c *gin.Context) {
 	project := c.Param("name")
@@ -107,7 +122,10 @@ func (h *ConnectionHandler) ListConsumers(c *gin.Context) {
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Success      200  {array}   models.InternalConnection
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections/internal [get]
 func (h *ConnectionHandler) ListInternalConnections(c *gin.Context) {
 	connections, err := h.service.ListInternal(c.Request.Context(), projectNamespace(c))
@@ -127,9 +145,14 @@ func (h *ConnectionHandler) ListInternalConnections(c *gin.Context) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        request body models.ConnectionRequest true "Connection"
 // @Success      201  {object}  models.ConnectionResponse
-// @Failure      400  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      501  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections [post]
 func (h *ConnectionHandler) CreateConnection(c *gin.Context) {
 	h.create(c, projectNamespace(c))
@@ -138,15 +161,15 @@ func (h *ConnectionHandler) CreateConnection(c *gin.Context) {
 func (h *ConnectionHandler) create(c *gin.Context, namespace string) {
 	var req models.ConnectionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	connection, err := h.service.Create(c.Request.Context(), namespace, req)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("Connection '%s' already exists", req.Name),
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: fmt.Sprintf("Connection '%s' already exists", req.Name),
 			})
 			return
 		}
@@ -166,9 +189,13 @@ func (h *ConnectionHandler) create(c *gin.Context, namespace string) {
 // @Param        connName path string true "Connection name"
 // @Param        request body models.ConnectionRequest true "Connection"
 // @Success      200  {object}  models.ConnectionResponse
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      501  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections/{connName} [put]
 func (h *ConnectionHandler) UpdateConnection(c *gin.Context) {
 	h.update(c, projectNamespace(c))
@@ -177,7 +204,7 @@ func (h *ConnectionHandler) UpdateConnection(c *gin.Context) {
 func (h *ConnectionHandler) update(c *gin.Context, namespace string) {
 	var req models.ConnectionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -197,8 +224,12 @@ func (h *ConnectionHandler) update(c *gin.Context, namespace string) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        connName path string true "Connection name"
 // @Success      204
-// @Failure      404  {object}  map[string]string
-// @Failure      501  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections/{connName} [delete]
 func (h *ConnectionHandler) DeleteConnection(c *gin.Context) {
 	h.delete(c, projectNamespace(c))
@@ -221,7 +252,12 @@ func (h *ConnectionHandler) delete(c *gin.Context, namespace string) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        request body models.ConnectionTestRequest true "Connection settings to probe"
 // @Success      200  {object}  models.ConnectionTestResult
-// @Failure      400  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
 // @Router       /api/projects/{name}/connections/test [post]
 func (h *ConnectionHandler) TestConnection(c *gin.Context) {
 	h.test(c)
@@ -232,7 +268,7 @@ func (h *ConnectionHandler) TestConnection(c *gin.Context) {
 func (h *ConnectionHandler) test(c *gin.Context) {
 	var req models.ConnectionTestRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, h.service.Test(c.Request.Context(), req))

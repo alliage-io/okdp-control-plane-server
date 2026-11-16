@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -211,4 +212,57 @@ func TestWatchProjectsStreamsTheGitChanges(t *testing.T) {
 	cancel()
 	for range events {
 	}
+}
+
+// A change of a project's access alone, by hand in Git, is MODIFIED: the
+// console reads the caller's rights (GET /api/me) again on it.
+func TestWatchProjectsStreamsAChangeOfTheAccessAlone(t *testing.T) {
+	svc, _, store := newProjectServiceUnderTest(map[string]string{"projects/demo/project.yaml": handWritten})
+	svc.PollInterval = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := svc.WatchProjects(ctx)
+	require.NoError(t, err)
+	next := func() ProjectEvent {
+		t.Helper()
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(5 * time.Second):
+			t.Fatal("no event")
+			return ProjectEvent{}
+		}
+	}
+	demo := models.Project{Name: "demo", Description: "Demo project"}
+	assert.Equal(t, ProjectEvent{Type: "ADDED", Object: demo}, next())
+
+	write := func(content string) {
+		t.Helper()
+		_, err := store.Update(ctx, gitops.Commit{Subject: "access"}, func(tx gitops.Tx) error {
+			return tx.WriteFile("projects/demo/project.yaml", []byte(content))
+		})
+		require.NoError(t, err)
+	}
+	write(handWritten + "access:\n  analysts: viewer\n")
+	assert.Equal(t, ProjectEvent{Type: "MODIFIED", Object: demo}, next())
+
+	// A change of another key of project.yaml is no change of the project.
+	write(handWritten + "access:\n  analysts: viewer\n# a comment\n")
+	select {
+	case e := <-events:
+		t.Fatalf("unexpected event %+v", e)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	for range events {
+	}
+}
+
+func TestProjectErrorMapsAnExistingRepositoryToAConflict(t *testing.T) {
+	err := projectError(fmt.Errorf("owner/demo: %w", gitops.ErrRepositoryNotEmpty), "demo")
+	assert.True(t, apierrors.IsConflict(err), "got %v", err)
+	assert.False(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.Contains(t, err.Error(), "not empty")
 }

@@ -9,6 +9,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/okdp/okdp-control-plane-server/internal/api/middleware"
+	"github.com/okdp/okdp-control-plane-server/internal/authz"
+	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
 )
 
@@ -18,23 +20,27 @@ const internalErrorMessage = "internal error: the server could not complete the 
 
 // writeError answers err with the status of what it is: a missing feature
 // (501), a missing resource (404), one that exists or changed meanwhile
-// (409), a rejected input (400, with its code). Anything else is the
+// (409), a rejected input (400, with its code), a refused right (403,
+// code forbidden, the permission). Anything else is the
 // server's own failure: 500 with a generic message and the request id, the
 // cause logged with that id (logMessage, when given, says what failed).
 func writeError(c *gin.Context, err error, logMessage ...string) {
+	var refused *authz.ForbiddenError
 	switch {
 	case errors.Is(err, service.ErrConnectionsUnavailable):
-		c.JSON(http.StatusNotImplemented, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotImplemented, models.ErrorResponse{Error: err.Error()})
 	case apierrors.IsNotFound(err):
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 	case apierrors.IsAlreadyExists(err), apierrors.IsConflict(err):
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
 	case service.IsValidationError(err):
 		c.JSON(http.StatusBadRequest, validationBody(err))
 	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+	case errors.As(err, &refused):
+		c.JSON(http.StatusForbidden, middleware.ForbiddenBody(refused.Error(), refused))
 	case isConflict(err):
-		c.JSON(http.StatusConflict, gin.H{"error": "it exists already", "requestId": middleware.RequestIDOf(c)})
+		c.JSON(http.StatusConflict, models.ErrorResponse{Error: "it exists already", RequestID: middleware.RequestIDOf(c)})
 	default:
 		writeInternal(c, http.StatusInternalServerError, err, logMessage...)
 	}
@@ -56,5 +62,5 @@ func writeInternal(c *gin.Context, status int, err error, logMessage ...string) 
 		message = logMessage[0]
 	}
 	logrus.WithError(err).WithFields(logrus.Fields{"requestId": id, "path": c.Request.URL.Path}).Error(message)
-	c.JSON(status, gin.H{"error": internalErrorMessage, "requestId": id})
+	c.JSON(status, models.ErrorResponse{Error: internalErrorMessage, RequestID: id})
 }

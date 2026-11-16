@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -153,5 +154,23 @@ func TestConnectionTestReachesAnAllowedServerOnly(t *testing.T) {
 	}
 	if len(calls) != 1 {
 		t.Errorf("%d requests, want the redirect not followed", len(calls))
+	}
+}
+
+// A Vault over https, its certificate of a CA the system does not trust:
+// tested with the platform's CA bundle (OKDP_CA_FILE), refused without.
+func TestConnectionTestVerifiesTheVaultWithThePlatformsCA(t *testing.T) {
+	vault := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer vault.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(vault.Certificate())
+
+	svc := loopbackTester(t, vault.URL)
+	if err := svc.TestConnection(context.Background(), tokenRequest(vault.URL, "t")); err == nil || !strings.Contains(err.Error(), "connection failed") {
+		t.Fatalf("without the CA: %v", err)
+	}
+	svc.SetRootCAs(roots)
+	if err := svc.TestConnection(context.Background(), tokenRequest(vault.URL, "t")); err != nil {
+		t.Fatalf("with the CA: %v", err)
 	}
 }

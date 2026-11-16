@@ -49,6 +49,10 @@ func (h *IdentityHandler) RequireAPI() gin.HandlerFunc {
 // @Accept       json
 // @Produce      json
 // @Success      200  {array}   models.User
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/users [get]
 func (h *IdentityHandler) ListUsers(c *gin.Context) {
 	users, err := h.service.ListUsers(c.Request.Context())
@@ -67,13 +71,17 @@ func (h *IdentityHandler) ListUsers(c *gin.Context) {
 // @Produce      json
 // @Param        name   path      string  true  "User Name"
 // @Success      200  {object}  models.User
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/users/{name} [get]
 func (h *IdentityHandler) GetUser(c *gin.Context) {
 	name := c.Param("name")
 	user, err := h.service.GetUser(c.Request.Context(), name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "User not found"})
 			return
 		}
 		writeError(c, err, "Failed to get user")
@@ -90,11 +98,17 @@ func (h *IdentityHandler) GetUser(c *gin.Context) {
 // @Produce      json
 // @Param        user   body      models.User  true  "User"
 // @Success      201  {object}  models.User
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/users [post]
 func (h *IdentityHandler) CreateUser(c *gin.Context) {
 	var user models.User
 	if err := c.ShouldBindJSON(&user); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -117,12 +131,18 @@ func (h *IdentityHandler) CreateUser(c *gin.Context) {
 // @Param        name   path      string  true  "User Name"
 // @Param        user   body      models.User  true  "User"
 // @Success      200  {object}  models.User
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/users/{name} [put]
 func (h *IdentityHandler) UpdateUser(c *gin.Context) {
 	name := c.Param("name")
 	var user models.User
 	if err := c.ShouldBindJSON(&user); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -145,6 +165,10 @@ func (h *IdentityHandler) UpdateUser(c *gin.Context) {
 // @Produce      json
 // @Param        name   path      string  true  "User Name"
 // @Success      204
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/users/{name} [delete]
 func (h *IdentityHandler) DeleteUser(c *gin.Context) {
 	name := c.Param("name")
@@ -164,6 +188,10 @@ func (h *IdentityHandler) DeleteUser(c *gin.Context) {
 // @Accept       json
 // @Produce      json
 // @Success      200  {array}   models.Group
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/groups [get]
 func (h *IdentityHandler) ListGroups(c *gin.Context) {
 	groups, err := h.service.ListGroups(c.Request.Context())
@@ -182,11 +210,17 @@ func (h *IdentityHandler) ListGroups(c *gin.Context) {
 // @Produce      json
 // @Param        group   body      models.Group  true  "Group"
 // @Success      201  {object}  models.Group
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/groups [post]
 func (h *IdentityHandler) CreateGroup(c *gin.Context) {
 	var group models.Group
 	if err := c.ShouldBindJSON(&group); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -206,12 +240,18 @@ func (h *IdentityHandler) CreateGroup(c *gin.Context) {
 // @Param        name   path      string  true  "Group Name"
 // @Param        group   body      models.Group  true  "Group"
 // @Success      200  {object}  models.Group
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/groups/{name} [put]
 func (h *IdentityHandler) UpdateGroup(c *gin.Context) {
 	name := c.Param("name")
 	var group models.Group
 	if err := c.ShouldBindJSON(&group); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -230,6 +270,10 @@ func (h *IdentityHandler) UpdateGroup(c *gin.Context) {
 // @Produce      json
 // @Param        name   path      string  true  "Group Name"
 // @Success      204
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/v1/identity/groups/{name} [delete]
 func (h *IdentityHandler) DeleteGroup(c *gin.Context) {
 	name := c.Param("name")

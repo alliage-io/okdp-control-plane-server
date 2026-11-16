@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,12 +67,19 @@ type fakeIDP struct {
 
 func newFakeIDP(t *testing.T) *fakeIDP {
 	t.Helper()
+	return newFakeIDPOn(t, httptest.NewServer)
+}
+
+// newFakeIDPOn is a fake identity provider served by start: over https,
+// httptest.NewTLSServer, its certificate trusted by no system.
+func newFakeIDPOn(t *testing.T, start func(http.Handler) *httptest.Server) *fakeIDP {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	idp := &fakeIDP{key: key}
 
 	mux := http.NewServeMux()
-	idp.server = httptest.NewServer(mux)
+	idp.server = start(mux)
 	t.Cleanup(idp.server.Close)
 
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
@@ -259,4 +268,25 @@ func TestVerifyReturnsTheGroupsOfTheClaim(t *testing.T) {
 			assert.Equal(t, tc.want, identity.Groups)
 		})
 	}
+}
+
+// The issuer over https, its certificate of a CA the system does not
+// trust: reached with the platform's CA bundle (OKDP_CA_FILE), refused
+// without it; insecureSkipVerify, discouraged, still reaches it.
+func TestTheIssuerIsVerifiedWithThePlatformsCA(t *testing.T) {
+	idp := newFakeIDPOn(t, httptest.NewTLSServer)
+	roots := x509.NewCertPool()
+	roots.AddCert(idp.server.Certificate())
+
+	if _, err := NewVerifier(context.Background(), Config{Issuer: idp.server.URL, ClientID: "okdp-ui"}); err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("without the CA: %v", err)
+	}
+	verifier, err := NewVerifier(context.Background(), Config{Issuer: idp.server.URL, ClientID: "okdp-ui", RootCAs: roots})
+	require.NoError(t, err)
+	claims := idp.claims()
+	claims["azp"] = "okdp-ui"
+	_, err = verifier.Verify(context.Background(), idp.mint(t, claims))
+	require.NoError(t, err, "the keys fetched with the CA")
+	_, err = NewVerifier(context.Background(), Config{Issuer: idp.server.URL, ClientID: "okdp-ui", InsecureSkipVerify: true})
+	require.NoError(t, err)
 }

@@ -30,29 +30,33 @@ func NewSparkHandler(svc service.SparkService) *SparkHandler {
 // @Param        name path string true "Project name"
 // @Param        request body models.SparkAppRequest true "Spark Application Request"
 // @Success      201  {object}  models.SparkAppInstance
-// @Failure      400  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps [post]
 func (h *SparkHandler) SubmitSparkApp(c *gin.Context) {
 	project := c.Param("name")
 
 	var req models.SparkAppRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	instance, err := h.service.SubmitApp(c.Request.Context(), project, req)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' already exists in project '%s'", req.Name, project),
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' already exists in project '%s'", req.Name, project),
 			})
 			return
 		}
 		if service.IsValidationError(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		writeError(c, err, "Failed to submit Spark application")
@@ -70,29 +74,33 @@ func (h *SparkHandler) SubmitSparkApp(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        request body models.SparkAppYAMLRequest true "Spark Application YAML"
 // @Success      201  {object}  models.SparkAppInstance
-// @Failure      400  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/yaml [post]
 func (h *SparkHandler) SubmitSparkAppYAML(c *gin.Context) {
 	project := c.Param("name")
 
 	var req models.SparkAppYAMLRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	instance, err := h.service.SubmitAppYAML(c.Request.Context(), project, req)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("SparkApplication already exists in project '%s'", project),
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication already exists in project '%s'", project),
 			})
 			return
 		}
 		if service.IsValidationError(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		writeError(c, err, "Failed to submit Spark application from YAML")
@@ -108,7 +116,10 @@ func (h *SparkHandler) SubmitSparkAppYAML(c *gin.Context) {
 // @Produce      json
 // @Param        name path string true "Project name"
 // @Success      200  {array}   models.SparkAppInstance
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps [get]
 func (h *SparkHandler) ListSparkApps(c *gin.Context) {
 	project := c.Param("name")
@@ -128,7 +139,10 @@ func (h *SparkHandler) ListSparkApps(c *gin.Context) {
 // @Produce      text/event-stream
 // @Param        name path string true "Project name"
 // @Success      200  {string}  string  "stream"
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/stream [get]
 func (h *SparkHandler) StreamSparkApps(c *gin.Context) {
 	project := c.Param("name")
@@ -187,8 +201,10 @@ func (h *SparkHandler) StreamSparkApps(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        appName path string true "Spark application name"
 // @Success      200  {object}  models.SparkAppInstance
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/{appName} [get]
 func (h *SparkHandler) GetSparkApp(c *gin.Context) {
 	project := c.Param("name")
@@ -197,8 +213,8 @@ func (h *SparkHandler) GetSparkApp(c *gin.Context) {
 	instance, err := h.service.GetApp(c.Request.Context(), project, appName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
 			return
 		}
@@ -216,8 +232,10 @@ func (h *SparkHandler) GetSparkApp(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        appName path string true "Spark application name"
 // @Success      204
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/{appName} [delete]
 func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 	project := c.Param("name")
@@ -225,8 +243,8 @@ func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 
 	if err := h.service.DeleteApp(c.Request.Context(), project, appName); err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
 			return
 		}
@@ -246,9 +264,12 @@ func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 // @Param        appName path string true "Spark application name"
 // @Param        request body models.SparkAppUpdateRequest true "Spark Application Update"
 // @Success      200  {object}  models.SparkAppInstance
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/{appName} [put]
 func (h *SparkHandler) UpdateSparkApp(c *gin.Context) {
 	project := c.Param("name")
@@ -256,20 +277,20 @@ func (h *SparkHandler) UpdateSparkApp(c *gin.Context) {
 
 	var req models.SparkAppUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	instance, err := h.service.UpdateApp(c.Request.Context(), project, appName, req)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
 			return
 		}
 		if service.IsValidationError(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		writeError(c, err, "Failed to update Spark application")
@@ -286,8 +307,10 @@ func (h *SparkHandler) UpdateSparkApp(c *gin.Context) {
 // @Param        name path string true "Project name"
 // @Param        appName path string true "Spark application name"
 // @Success      200  {object}  models.SparkUIInfo
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/{appName}/ui [get]
 func (h *SparkHandler) GetSparkUI(c *gin.Context) {
 	project := c.Param("name")
@@ -296,8 +319,8 @@ func (h *SparkHandler) GetSparkUI(c *gin.Context) {
 	info, err := h.service.GetSparkUI(c.Request.Context(), project, appName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
 			return
 		}
@@ -318,8 +341,10 @@ func (h *SparkHandler) GetSparkUI(c *gin.Context) {
 // @Param        tailLines query int false "Number of lines from the end (default 100, at most 10000)"
 // @Param        follow query bool false "Stream logs in real-time (default false)"
 // @Success      200  {string}  string  "log output"
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/{appName}/logs [get]
 func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 	project := c.Param("name")
@@ -332,8 +357,8 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 	stream, err := h.service.GetDriverLogs(c.Request.Context(), project, appName, container, tailLines, follow)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
 			return
 		}
@@ -412,7 +437,9 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 // @Tags         spark-apps
 // @Produce      json
 // @Success      200  {object}  models.SparkConfig
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/spark-config [get]
 func (h *SparkHandler) GetSparkConfig(c *gin.Context) {
 	cfg, err := h.service.GetSparkConfig(c.Request.Context())
@@ -429,14 +456,16 @@ func (h *SparkHandler) GetSparkConfig(c *gin.Context) {
 // @Tags         spark-apps
 // @Produce      json
 // @Success      200  {object}  map[string]interface{}
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/spark-app-schema [get]
 func (h *SparkHandler) GetSparkAppSchema(c *gin.Context) {
 	schema, err := h.service.GetAppSchema(c.Request.Context())
 	if err != nil {
 		logrus.WithError(err).Warn("Failed to get SparkApplication CRD schema")
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, schema)

@@ -1,8 +1,10 @@
-ARG GO_VERSION=1.27
+# Base images by tag and digest (the multi-arch index): the digest is what
+# is pulled, the tag says which it is; Dependabot (docker) bumps both. The
+# Go toolchain is go.mod's go version.
 
 # Cross-compile on the native build platform (no QEMU emulation): the Go
 # toolchain runs natively and emits a static binary for the target arch.
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS go-build
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -34,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -ldflags="-s -w -X github.com/okdp/okdp-control-plane-server/internal/buildinfo.Version=${VERSION}" \
       -o /okdp-server ./cmd/server
 
-FROM alpine:3.21
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN apk --no-cache add ca-certificates && update-ca-certificates
 

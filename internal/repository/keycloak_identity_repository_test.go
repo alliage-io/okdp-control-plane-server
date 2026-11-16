@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,14 @@ import (
 // pointing at it. tokenCalls counts token requests (for 401-retry tests).
 func newFakeKeycloak(t *testing.T, register func(mux *http.ServeMux)) (*config.Config, *int) {
 	t.Helper()
+	cfg, calls, _ := newFakeKeycloakOn(t, httptest.NewServer, register)
+	return cfg, calls
+}
+
+// newFakeKeycloakOn is a fake Keycloak served by start, and its server:
+// over https, httptest.NewTLSServer, its certificate trusted by no system.
+func newFakeKeycloakOn(t *testing.T, start func(http.Handler) *httptest.Server, register func(mux *http.ServeMux)) (*config.Config, *int, *httptest.Server) {
+	t.Helper()
 
 	tokenCalls := 0
 	mux := http.NewServeMux()
@@ -34,7 +43,7 @@ func newFakeKeycloak(t *testing.T, register func(mux *http.ServeMux)) (*config.C
 		register(mux)
 	}
 
-	srv := httptest.NewServer(mux)
+	srv := start(mux)
 	t.Cleanup(srv.Close)
 
 	return &config.Config{
@@ -42,7 +51,26 @@ func newFakeKeycloak(t *testing.T, register func(mux *http.ServeMux)) (*config.C
 		KeycloakRealm:        "okdp",
 		KeycloakClientID:     "okdp-control-plane",
 		KeycloakClientSecret: "secret",
-	}, &tokenCalls
+	}, &tokenCalls, srv
+}
+
+// Keycloak over https, its certificate of a CA the system does not trust:
+// reached with the platform's CA bundle (OKDP_CA_FILE), refused without.
+func TestKeycloakIsVerifiedWithThePlatformsCA(t *testing.T) {
+	cfg, _, srv := newFakeKeycloakOn(t, httptest.NewTLSServer, func(mux *http.ServeMux) {
+		mux.HandleFunc("/admin/realms/okdp/groups", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]kcGroup{{ID: "g1", Name: "team-a"}})
+		})
+	})
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+
+	_, err := NewKeycloakIdentityRepository(cfg, nil, nil).ListGroups(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "certificate")
+	groups, err := NewKeycloakIdentityRepository(cfg, nil, roots).ListGroups(context.Background())
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
 }
 
 func TestKeycloakGetUserMapsAttributes(t *testing.T) {
@@ -64,7 +92,7 @@ func TestKeycloakGetUserMapsAttributes(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	user, err := repo.GetUser(context.Background(), "jdoe")
 
 	require.NoError(t, err)
@@ -83,7 +111,7 @@ func TestKeycloakGetUserNotFound(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	_, err := repo.GetUser(context.Background(), "ghost")
 
 	require.Error(t, err)
@@ -111,7 +139,7 @@ func TestKeycloakCreateUserSetsPassword(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	err := repo.CreateUser(context.Background(), &models.User{
 		Username: "jdoe",
 		Name:     "John Doe",
@@ -140,7 +168,7 @@ func TestKeycloakListGroupBindingsForUser(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	bindings, err := repo.ListGroupBindings(context.Background(), "jdoe")
 
 	require.NoError(t, err)
@@ -148,6 +176,101 @@ func TestKeycloakListGroupBindingsForUser(t *testing.T) {
 	assert.Equal(t, "jdoe", bindings[0].User)
 	assert.Equal(t, "team-a", bindings[0].Group)
 	assert.Equal(t, "team-b", bindings[1].Group)
+}
+
+// UpdateUser GETs the representation, writes the console's fields and
+// owned attributes over it and PUTs it whole: the attributes and fields of
+// LDAP or an administrator survive.
+func TestKeycloakUpdateUserKeepsAttributesItDoesNotOwn(t *testing.T) {
+	var put map[string]json.RawMessage
+	cfg, _ := newFakeKeycloak(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/admin/realms/okdp/users", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]kcUser{{ID: "u1", Username: "jdoe"}})
+		})
+		mux.HandleFunc("/admin/realms/okdp/users/u1", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":               "u1",
+					"username":         "jdoe",
+					"firstName":        "Old",
+					"lastName":         "Name",
+					"email":            "old@example.com",
+					"enabled":          true,
+					"emailVerified":    true,
+					"federationLink":   "ldap-1",
+					"createdTimestamp": int64(1730000000123),
+					"requiredActions":  []string{"CONFIGURE_TOTP"},
+					"attributes": map[string][]string{
+						"LDAP_ID":    {"abc-123"},
+						"department": {"R&D"},
+						"comment":    {"old comment"},
+						"uid":        {"1000"},
+					},
+				})
+			case http.MethodPut:
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&put))
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+	})
+
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
+	require.NoError(t, repo.UpdateUser(context.Background(), "jdoe", &models.User{
+		Username: "jdoe",
+		Name:     "John Doe",
+		Email:    []string{"jdoe@example.com"},
+		Disabled: true,
+	}))
+
+	require.NotNil(t, put)
+	var u kcUser
+	raw, err := json.Marshal(put)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &u))
+	assert.Equal(t, "u1", u.ID)
+	assert.Equal(t, "jdoe", u.Username)
+	assert.Equal(t, "John", u.FirstName)
+	assert.Equal(t, "Doe", u.LastName)
+	assert.Equal(t, "jdoe@example.com", u.Email)
+	assert.False(t, u.Enabled)
+	assert.Equal(t, map[string][]string{
+		"LDAP_ID":    {"abc-123"},
+		"department": {"R&D"},
+	}, u.Attributes, "the console's comment and uid cleared, the others kept")
+
+	assert.JSONEq(t, `true`, string(put["emailVerified"]))
+	assert.JSONEq(t, `"ldap-1"`, string(put["federationLink"]))
+	assert.Equal(t, `1730000000123`, string(put["createdTimestamp"]), "a number sent back verbatim")
+	assert.JSONEq(t, `["CONFIGURE_TOTP"]`, string(put["requiredActions"]))
+}
+
+// A uid the console cannot show (not a number) is not its own: kept.
+func TestKeycloakUpdateUserSetsOwnedAttributes(t *testing.T) {
+	var put kcUser
+	cfg, _ := newFakeKeycloak(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("/admin/realms/okdp/users", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode([]kcUser{{ID: "u1", Username: "jdoe"}})
+		})
+		mux.HandleFunc("/admin/realms/okdp/users/u1", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(kcUser{ID: "u1", Username: "jdoe", Enabled: true,
+					Attributes: map[string][]string{"uid": {"jdoe"}}})
+			case http.MethodPut:
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&put))
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+	})
+
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
+	require.NoError(t, repo.UpdateUser(context.Background(), "jdoe", &models.User{Username: "jdoe", Comment: "new"}))
+	assert.Equal(t, map[string][]string{"comment": {"new"}, "uid": {"jdoe"}}, put.Attributes)
+
+	put = kcUser{}
+	require.NoError(t, repo.UpdateUser(context.Background(), "jdoe", &models.User{Username: "jdoe", UID: 2001}))
+	assert.Equal(t, map[string][]string{"uid": {"2001"}}, put.Attributes)
 }
 
 func TestKeycloakGroupCRUDUsesGroupIDs(t *testing.T) {
@@ -164,6 +287,13 @@ func TestKeycloakGroupCRUDUsesGroupIDs(t *testing.T) {
 		})
 		mux.HandleFunc("/admin/realms/okdp/groups/g1", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":         "g1",
+					"name":       "team-a",
+					"attributes": map[string][]string{"comment": {"the team"}, "ldap-dn": {"cn=team-a"}},
+				})
+				return
 			case http.MethodPut:
 				require.NoError(t, json.NewDecoder(r.Body).Decode(&updated))
 			case http.MethodDelete:
@@ -173,7 +303,7 @@ func TestKeycloakGroupCRUDUsesGroupIDs(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 
 	group, err := repo.GetGroup(context.Background(), "team-a")
 	require.NoError(t, err)
@@ -183,6 +313,7 @@ func TestKeycloakGroupCRUDUsesGroupIDs(t *testing.T) {
 	require.NoError(t, repo.UpdateGroup(context.Background(), "team-a", &models.Group{Name: "team-a", Comment: "updated"}))
 	assert.Equal(t, "g1", updated.ID)
 	assert.Equal(t, []string{"updated"}, updated.Attributes["comment"])
+	assert.Equal(t, []string{"cn=team-a"}, updated.Attributes["ldap-dn"], "an attribute the console does not own is kept")
 
 	require.NoError(t, repo.DeleteGroup(context.Background(), "team-a"))
 	assert.True(t, deleted)
@@ -201,7 +332,7 @@ func TestKeycloakRetriesOnceOn401(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	users, err := repo.ListUsers(context.Background())
 
 	require.NoError(t, err)
@@ -216,7 +347,7 @@ func TestKeycloakUnavailableWithoutCredentials(t *testing.T) {
 	cfg, _ := newFakeKeycloak(t, nil)
 	cfg.KeycloakClientSecret = ""
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 
 	assert.False(t, repo.Available(context.Background()))
 	_, err := repo.ListUsers(context.Background())
@@ -236,7 +367,7 @@ func TestKeycloakRealmFollowsThePlatformIssuer(t *testing.T) {
 
 	repo := NewKeycloakIdentityRepository(cfg, func(context.Context) (string, bool, error) {
 		return base + "/realms/okdp/", false, nil
-	})
+	}, nil)
 
 	require.True(t, repo.Available(context.Background()))
 	groups, err := repo.ListGroups(context.Background())
@@ -253,10 +384,10 @@ func TestKeycloakUnavailableWhenTheIssuerIsNotARealm(t *testing.T) {
 	for _, issuer := range []string{"", "https://idp.example", "https://idp.example/realms/"} {
 		repo := NewKeycloakIdentityRepository(cfg, func(context.Context) (string, bool, error) {
 			return issuer, false, nil
-		})
+		}, nil)
 		assert.False(t, repo.Available(context.Background()), "issuer %q", issuer)
 	}
-	assert.False(t, NewKeycloakIdentityRepository(cfg, nil).Available(context.Background()))
+	assert.False(t, NewKeycloakIdentityRepository(cfg, nil, nil).Available(context.Background()))
 }
 
 // Removing a user from a group goes through the membership, keyed by ids.
@@ -277,7 +408,7 @@ func TestKeycloakDeleteGroupBindingUsesIDs(t *testing.T) {
 		})
 	})
 
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 	require.NoError(t, repo.DeleteGroupBindingByRef(context.Background(), "jdoe", "team-a"))
 	assert.True(t, removed)
 }
@@ -291,7 +422,7 @@ func TestKeycloakEmptyListsAreEmptyNotNil(t *testing.T) {
 			})
 		}
 	})
-	repo := NewKeycloakIdentityRepository(cfg, nil)
+	repo := NewKeycloakIdentityRepository(cfg, nil, nil)
 
 	users, err := repo.ListUsers(context.Background())
 	require.NoError(t, err)

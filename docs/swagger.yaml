@@ -1,5 +1,16 @@
 basePath: /
 definitions:
+  handlers.FeatureUnavailable:
+    properties:
+      error:
+        type: string
+      feature:
+        type: string
+      reason:
+        description: Reason is stable. The console keys off it rather than off the
+          message.
+        type: string
+    type: object
   models.BoundClaim:
     properties:
       binding:
@@ -46,6 +57,12 @@ definitions:
           editor or admin. A project absent has none: the caller does not see
           it.
         type: object
+      sql:
+        allOf:
+        - $ref: '#/definitions/models.SqlCapability'
+        description: |-
+          Sql are the bounds of the SQL editor (SQL_*), for an authenticated
+          caller only: GET /api/capabilities, public, no longer carries them.
       username:
         description: Username is the caller's, from its token.
         type: string
@@ -59,7 +76,11 @@ definitions:
       sql:
         allOf:
         - $ref: '#/definitions/models.SqlCapability'
-        description: Sql are the bounds of the SQL editor.
+        description: |-
+          Sql is no longer sent: the bounds of the SQL editor are the
+          caller's, GET /api/me sql, not the public bootstrap's. Kept in the
+          spec for a console that still reads it here, which then falls back
+          to its own bounds.
     type: object
   models.ClaimBinding:
     properties:
@@ -383,6 +404,49 @@ definitions:
           behave differently on edit and on delete, so the panel says which it is.
         type: boolean
     type: object
+  models.ErrorResponse:
+    properties:
+      code:
+        description: |-
+          Code tells a client what kind of refusal it is, when the answer has
+          one: forbidden, does-not-compile, instance-exists,
+          release-name-taken, sql-busy, sql-timeout...
+        type: string
+      error:
+        description: |-
+          Error is what went wrong, for a person. A failure of the server
+          itself (5xx) says so without its cause, which stays in the server's
+          log under RequestID.
+        type: string
+      fields:
+        description: |-
+          Fields are the problems of a compile at the fields they are about
+          (code does-not-compile, or a connection or claim the compiler's
+          rules refuse), for a form that shows each beside its field.
+        items:
+          $ref: '#/definitions/models.FieldProblem'
+        type: array
+      permission:
+        description: |-
+          Permission is, on a 403 code forbidden, the permission the route
+          needs: platform-admin, viewer, editor or admin (a role of Project).
+        enum:
+        - platform-admin
+        - viewer
+        - editor
+        - admin
+        type: string
+      project:
+        description: |-
+          Project is, on a 403 for a project role, the project it is a role
+          of.
+        type: string
+      requestId:
+        description: |-
+          RequestID is the request's id (the X-Request-Id header), on a
+          failure of the server, to quote to its administrator.
+        type: string
+    type: object
   models.ExecutorDefaults:
     properties:
       cores:
@@ -498,6 +562,32 @@ definitions:
         additionalProperties:
           type: string
         type: object
+    type: object
+  models.FieldProblem:
+    properties:
+      instance:
+        description: |-
+          Instance is the instance the problem is of, <project>/<instance>,
+          when a compile of the tree refused the write: the instance written
+          or another one the write breaks (one that uses what it changes).
+          Absent when the refusal is of no instance (the tree, a project's
+          name) or the problem is of what the request itself declares (a
+          connection, a claim's provider).
+        type: string
+      message:
+        description: Message is the compile's.
+        type: string
+      path:
+        description: |-
+          Path is the field as the compile's messages name it, keys joined by
+          dots, an index in brackets: catalogs[1].storage, claims.analytics;
+          "" for the instance as a whole.
+        type: string
+      pointer:
+        description: |-
+          Pointer is the same field as a JSON pointer (RFC 6901):
+          /catalogs/1/storage; "" for the instance as a whole.
+        type: string
     type: object
   models.GrantedConnection:
     properties:
@@ -977,14 +1067,11 @@ definitions:
         type: string
       serviceAccount:
         description: |-
-          ServiceAccount names the account the store authenticates as under
-          Kubernetes auth, so a project can give its store its own identity
-          instead of the default account every workload in the namespace shares.
-
-          A pointer, because on update three intents must stay apart: absent keeps
-          the account already in use, an empty string asks for the default account
-          back, and a name selects that account. A plain string merges the first
-          two, which leaves no way to return to the default once a name is set.
+          ServiceAccount is the account the store authenticates as under
+          Kubernetes auth: the ServiceAccount of the platform's secret store in
+          the namespace (global.okdp.secrets.serviceAccount, as the compile
+          writes it), and no other. Absent or empty, that account; another
+          name is refused.
         type: string
       token:
         type: string
@@ -1536,9 +1623,9 @@ paths:
   /api/capabilities:
     get:
       description: 'Capabilities the platform is configured with (user management
-        through Keycloak, console OIDC client, OIDC client provisioning backend, the
-        bounds of the SQL editor), so the UI can adapt. Public: what the caller may
-        do is GET /api/me'
+        through Keycloak, console OIDC client, OIDC client provisioning backend),
+        so the UI can adapt. Public: what the caller may do, and the bounds of the
+        SQL editor (sql, no longer sent here), are GET /api/me'
       produces:
       - application/json
       responses:
@@ -1561,6 +1648,19 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.ConnectionCatalogResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the available contracts
       tags:
       - connections
@@ -1572,7 +1672,11 @@ paths:
         project (project.yaml access, okdp-project-<p> an editor by default; a viewer
         reads, an editor writes, an admin edits project.yaml; a platform admin is
         admin everywhere). A project absent from projects is one the caller may not
-        see. A route the caller may not use answers 403 {"error", "code": "forbidden"}'
+        see. sql: the bounds of the SQL editor (once in GET /api/capabilities, public).
+        A route the caller may not use answers 403 {"error", "code": "forbidden",
+        "permission": platform-admin, viewer, editor or admin, "project" for a project
+        role}. Read it again on any event of GET /api/projects/stream: a change of
+        a project''s access is one'
       produces:
       - application/json
       responses:
@@ -1580,12 +1684,19 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.CallerAccess'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: What the caller may do
       tags:
       - access
@@ -1602,12 +1713,19 @@ paths:
             items:
               $ref: '#/definitions/models.MenuCategory'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List console navigation categories
       tags:
       - platform-services
@@ -1624,12 +1742,19 @@ paths:
             items:
               $ref: '#/definitions/models.PlatformService'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List available platform services
       tags:
       - platform-services
@@ -1656,21 +1781,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Add a service to the catalog
       tags:
       - platform-services
@@ -1689,18 +1821,28 @@ paths:
       responses:
         "204":
           description: No Content
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Remove a catalog service
       tags:
       - platform-services
@@ -1732,21 +1874,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update a catalog service
       tags:
       - platform-services
@@ -1771,6 +1920,24 @@ paths:
             items:
               $ref: '#/definitions/models.PackageInput'
             type: array
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Connections a service's package declares it needs
       tags:
       - platform-services
@@ -1797,18 +1964,28 @@ paths:
           schema:
             additionalProperties: true
             type: object
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get JSON Schema for a platform service
       tags:
       - platform-services
@@ -1830,12 +2007,24 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/service.ServiceVersionsResponse'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List available versions for a platform service
       tags:
       - platform-services
@@ -1854,12 +2043,19 @@ paths:
                 $ref: '#/definitions/models.ProfileImage'
               type: array
             type: object
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get available profile images
       tags:
       - platform-services
@@ -1880,12 +2076,19 @@ paths:
             items:
               $ref: '#/definitions/models.Project'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the caller's projects
       tags:
       - projects
@@ -1896,7 +2099,9 @@ paths:
         topology, to a new repository of its own, created through the Forgejo API
         with project.yaml only: no workflow, no secret, the CI of the output repository
         compiles it) and creates the project Namespace. 409 when the project is already
-        declared, or when a Namespace of that name exists and is not a project''s'
+        declared, or when a Namespace of that name exists and is not a project''s,
+        or when the project''s repository exists in the Forgejo organisation and is
+        not empty'
       parameters:
       - description: Project Object
         in: body
@@ -1914,21 +2119,28 @@ paths:
         "400":
           description: Invalid project name
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Project or Namespace already exists
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Create a project
       tags:
       - projects
@@ -1951,18 +2163,23 @@ paths:
       responses:
         "204":
           description: No Content
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Delete a project
       tags:
       - projects
@@ -1983,18 +2200,23 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.Project'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Project not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal server error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get a project
       tags:
       - projects
@@ -2025,21 +2247,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Project not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update a project
       tags:
       - projects
@@ -2066,18 +2295,23 @@ paths:
             items:
               $ref: '#/definitions/models.NamedClaimView'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the named claims of a project
       tags:
       - claims
@@ -2112,27 +2346,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Project not found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: A named claim of that name exists
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Declare a named claim
       tags:
       - claims
@@ -2158,21 +2397,24 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Remove a named claim
       tags:
       - claims
@@ -2209,21 +2451,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Change a named claim
       tags:
       - claims
@@ -2248,12 +2497,23 @@ paths:
             items:
               $ref: '#/definitions/models.ConnectionResponse'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the external connections of a project
       tags:
       - connections
@@ -2286,21 +2546,36 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "501":
           description: Not Implemented
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Create an external connection in a project
       tags:
       - connections
@@ -2325,18 +2600,32 @@ paths:
       responses:
         "204":
           description: No Content
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "501":
           description: Not Implemented
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Delete an external connection of a project
       tags:
       - connections
@@ -2374,21 +2663,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "501":
           description: Not Implemented
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update an external connection of a project
       tags:
       - connections
@@ -2414,6 +2714,28 @@ paths:
             items:
               $ref: '#/definitions/models.ConnectionConsumer'
             type: array
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Services of the project bound to a connection
       tags:
       - connections
@@ -2480,33 +2802,35 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "403":
           description: Forbidden
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "429":
           description: Too Many Requests
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "502":
           description: Bad Gateway
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Execute SQL on a database connection
       tags:
       - sql
@@ -2530,12 +2854,23 @@ paths:
             items:
               $ref: '#/definitions/models.InternalConnection'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the internal connections of a project
       tags:
       - connections
@@ -2565,6 +2900,23 @@ paths:
             items:
               $ref: '#/definitions/models.SelectableConnection'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Connections offered for a package input of a given contract
       tags:
       - connections
@@ -2597,9 +2949,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Test a connection from the platform
       tags:
       - connections
@@ -2622,12 +2993,23 @@ paths:
             additionalProperties:
               $ref: '#/definitions/models.ServiceMetrics'
             type: object
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get live resource usage for every instance of a project
       tags:
       - services
@@ -2651,18 +3033,23 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.ProvisioningResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the classes of the claims
       tags:
       - claims
@@ -2684,12 +3071,23 @@ paths:
             items:
               $ref: '#/definitions/models.ServiceInstance'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List deployed services for a project
       tags:
       - services
@@ -2729,21 +3127,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Deploy a platform service
       tags:
       - services
@@ -2774,21 +3183,24 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Delete a deployed service
       tags:
       - services
@@ -2812,18 +3224,28 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.ServiceInstance'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get a deployed service
       tags:
       - services
@@ -2853,18 +3275,28 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.InstanceClaims'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List the claims of an instance
       tags:
       - claims
@@ -2890,12 +3322,28 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.ServiceMetrics'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get live resource usage for a service instance
       tags:
       - services
@@ -2936,21 +3384,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update service parameters and/or version
       tags:
       - services
@@ -2977,12 +3432,28 @@ paths:
             items:
               $ref: '#/definitions/models.Pod'
             type: array
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List pods for a service instance
       tags:
       - services
@@ -3025,18 +3496,28 @@ paths:
           description: log output
           schema:
             type: string
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get pod logs
       tags:
       - services
@@ -3085,39 +3566,39 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "403":
           description: Forbidden
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "429":
           description: Too Many Requests
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "502":
           description: Bad Gateway
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "504":
           description: Gateway Timeout
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Execute a SQL query on a deployed SQL engine
       tags:
       - sql
@@ -3154,18 +3635,28 @@ paths:
             items:
               $ref: '#/definitions/models.RenderedValues'
             type: array
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Values the charts of an instance are rendered with
       tags:
       - services
@@ -3187,12 +3678,23 @@ paths:
           description: stream
           schema:
             type: string
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Stream service updates
       tags:
       - services
@@ -3214,12 +3716,23 @@ paths:
             items:
               $ref: '#/definitions/models.SparkAppInstance'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: List Spark applications for a project
       tags:
       - spark-apps
@@ -3256,21 +3769,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Submit a Spark application
       tags:
       - spark-apps
@@ -3293,18 +3817,23 @@ paths:
       responses:
         "204":
           description: No Content
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Delete a Spark application
       tags:
       - spark-apps
@@ -3328,18 +3857,23 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.SparkAppInstance'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get a Spark application
       tags:
       - spark-apps
@@ -3376,21 +3910,28 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Update a Spark application
       tags:
       - spark-apps
@@ -3428,18 +3969,23 @@ paths:
           description: log output
           schema:
             type: string
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get Spark application driver logs
       tags:
       - spark-apps
@@ -3464,18 +4010,23 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.SparkUIInfo'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get Spark application driver UI info
       tags:
       - spark-apps
@@ -3496,12 +4047,23 @@ paths:
           description: stream
           schema:
             type: string
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Stream Spark application updates
       tags:
       - spark-apps
@@ -3537,21 +4099,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Submit a Spark application from YAML
       tags:
       - spark-apps
@@ -3575,12 +4148,27 @@ paths:
             items:
               $ref: '#/definitions/models.ExternalSecretResponse'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: List external secrets for a project
       tags:
       - external-secrets
@@ -3611,27 +4199,36 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Create an external secret
       tags:
       - external-secrets
@@ -3657,18 +4254,32 @@ paths:
       responses:
         "204":
           description: No Content
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Delete an external secret
       tags:
       - external-secrets
@@ -3704,21 +4315,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Update an external secret
       tags:
       - external-secrets
@@ -3746,18 +4368,32 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.ExternalSecretStatusResponse'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Get external secret status
       tags:
       - external-secrets
@@ -3781,12 +4417,27 @@ paths:
             items:
               $ref: '#/definitions/models.SecretStoreResponse'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: List secret stores for a project
       tags:
       - secret-stores
@@ -3817,21 +4468,36 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "409":
           description: Conflict
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Create a secret store
       tags:
       - secret-stores
@@ -3856,18 +4522,32 @@ paths:
       responses:
         "204":
           description: No Content
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Delete a secret store
       tags:
       - secret-stores
@@ -3902,21 +4582,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Update a secret store
       tags:
       - secret-stores
@@ -3943,18 +4634,32 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.SecretStoreStatusResponse'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Get secret store status
       tags:
       - secret-stores
@@ -3985,9 +4690,32 @@ paths:
         "400":
           description: Bad Request
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "404":
+          description: not found
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Test secret store connection
       tags:
       - secret-stores
@@ -3996,8 +4724,10 @@ paths:
       description: 'Stream project updates using Server-Sent Events (SSE): an ADDED
         event per existing project the caller may see, then ADDED/MODIFIED/DELETED
         as project.yaml files change in the deployments repository (read every few
-        seconds, at once after a console change); a project the caller stops seeing
-        (its access changed) is DELETED from its stream'
+        seconds, at once after a console change). A change of its description or of
+        its access alone (project.yaml access) is MODIFIED: the console reads GET
+        /api/me again on any event. A project the caller starts seeing (its access
+        changed) is ADDED to its stream, one it stops seeing DELETED'
       produces:
       - text/event-stream
       responses:
@@ -4005,12 +4735,19 @@ paths:
           description: stream
           schema:
             type: string
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Stream project updates
       tags:
       - projects
@@ -4026,18 +4763,23 @@ paths:
           schema:
             additionalProperties: true
             type: object
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "404":
           description: Not Found
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get SparkApplication CRD schema
       tags:
       - spark-apps
@@ -4052,12 +4794,19 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.SparkConfig'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
-            additionalProperties:
-              type: string
-            type: object
+            $ref: '#/definitions/models.ErrorResponse'
       summary: Get Spark operator configuration
       tags:
       - spark-apps
@@ -4075,6 +4824,23 @@ paths:
             items:
               $ref: '#/definitions/models.Group'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: List all groups
       tags:
       - identity
@@ -4096,6 +4862,32 @@ paths:
           description: Created
           schema:
             $ref: '#/definitions/models.Group'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Create a new group
       tags:
       - identity
@@ -4115,6 +4907,23 @@ paths:
       responses:
         "204":
           description: No Content
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Delete a group
       tags:
       - identity
@@ -4141,6 +4950,32 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.Group'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Update a group
       tags:
       - identity
@@ -4158,6 +4993,23 @@ paths:
             items:
               $ref: '#/definitions/models.User'
             type: array
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: List all users
       tags:
       - identity
@@ -4179,6 +5031,32 @@ paths:
           description: Created
           schema:
             $ref: '#/definitions/models.User'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Create a new user
       tags:
       - identity
@@ -4198,6 +5076,23 @@ paths:
       responses:
         "204":
           description: No Content
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Delete a user
       tags:
       - identity
@@ -4218,6 +5113,23 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.User'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Get user by name
       tags:
       - identity
@@ -4244,6 +5156,32 @@ paths:
           description: OK
           schema:
             $ref: '#/definitions/models.User'
+        "400":
+          description: the request is refused (code, fields when the compile refuses
+            it)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "401":
+          description: no valid token
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "403":
+          description: 'code forbidden: the permission the route needs (permission,
+            project)'
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "413":
+          description: the request body is too large
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "500":
+          description: the server failed (requestId)
+          schema:
+            $ref: '#/definitions/models.ErrorResponse'
+        "501":
+          description: the feature is not installed (reason feature-not-installed)
+          schema:
+            $ref: '#/definitions/handlers.FeatureUnavailable'
       summary: Update a user
       tags:
       - identity

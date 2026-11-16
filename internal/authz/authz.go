@@ -80,6 +80,16 @@ func (p Permission) String() string {
 	return "none"
 }
 
+// Name names the permission in a 403's permission field, for a client:
+// platform-admin, viewer, editor or admin (a role of the 403's project);
+// "" for public and authenticated, which no 403 names.
+func (p Permission) Name() string {
+	if p == PlatformAdmin {
+		return "platform-admin"
+	}
+	return string(p.ProjectRole())
+}
+
 // ProjectRole is the role a project permission needs, "" for another.
 func (p Permission) ProjectRole() Role {
 	switch p {
@@ -213,6 +223,26 @@ func (a *Authority) ProjectAccess(ctx context.Context, project string) (map[stri
 	return access, nil
 }
 
+// Forget drops the access of project kept, so the next read is its
+// project.yaml's as it is now: a stream that saw it change reads the
+// new roles at once, not within CacheTTL.
+func (a *Authority) Forget(project string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.projects, project)
+	a.mu.Unlock()
+}
+
+// Forget drops the access of project its authority keeps
+// (Authority.Forget).
+func (c *Caller) Forget(project string) {
+	if c != nil {
+		c.authority.Forget(project)
+	}
+}
+
 // Caller is what one caller may do: the authority of its groups, read on
 // demand and kept for the request.
 type Caller struct {
@@ -320,16 +350,40 @@ func (c *Caller) Allows(ctx context.Context, perm Permission, project string) (b
 // ErrForbidden is a caller refused a right.
 var ErrForbidden = errors.New("forbidden")
 
-// Require is nil when the caller of ctx holds perm in project, an error
-// wrapping ErrForbidden otherwise (or the error of reading the
-// authority).
+// ForbiddenError is a caller refused Permission, of Project for a project
+// role ("" otherwise): it is ErrForbidden, its message the one a 403
+// gives.
+type ForbiddenError struct {
+	Permission Permission
+	Project    string
+}
+
+func (e *ForbiddenError) Error() string {
+	if e.Permission.ProjectRole() != "" {
+		return fmt.Sprintf("this needs the role %s of project '%s'", e.Permission, e.Project)
+	}
+	return "this needs the role " + e.Permission.String()
+}
+
+func (e *ForbiddenError) Is(target error) bool { return target == ErrForbidden }
+
+// Forbidden is the refusal of perm, of project for a project role.
+func Forbidden(perm Permission, project string) *ForbiddenError {
+	if perm.ProjectRole() == "" {
+		project = ""
+	}
+	return &ForbiddenError{Permission: perm, Project: project}
+}
+
+// Require is nil when the caller of ctx holds perm in project, a
+// *ForbiddenError otherwise (or the error of reading the authority).
 func Require(ctx context.Context, perm Permission, project string) error {
 	ok, err := CallerFrom(ctx).Allows(ctx, perm, project)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("%w: this needs the role %s of project %s", ErrForbidden, perm, project)
+		return Forbidden(perm, project)
 	}
 	return nil
 }

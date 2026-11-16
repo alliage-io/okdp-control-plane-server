@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
@@ -46,12 +47,15 @@ const (
 // @Param        serviceName path string true "Service instance name"
 // @Param        request body models.SqlQueryRequest true "SQL Query Request"
 // @Success      200  {object}  models.SqlQueryResult
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      403  {object}  map[string]string
-// @Failure      429  {object}  map[string]string
-// @Failure      502  {object}  map[string]string
-// @Failure      504  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      429  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      502  {object}  models.ErrorResponse
+// @Failure      504  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/{serviceName}/sql [post]
 func (h *SqlHandler) ExecuteQuery(c *gin.Context) {
 	req, ok := bindSqlRequest(c)
@@ -72,11 +76,14 @@ func (h *SqlHandler) ExecuteQuery(c *gin.Context) {
 // @Param        connName path string true "Connection name"
 // @Param        request body models.SqlQueryRequest true "SQL Query Request"
 // @Success      200  {object}  models.SqlQueryResult
-// @Failure      400  {object}  map[string]string
-// @Failure      403  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      429  {object}  map[string]string
-// @Failure      502  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      429  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse  "the server failed (requestId)"
+// @Failure      502  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/connections/{connName}/sql [post]
 func (h *SqlHandler) ExecuteOnConnection(c *gin.Context) {
 	req, ok := bindSqlRequest(c)
@@ -90,11 +97,11 @@ func (h *SqlHandler) ExecuteOnConnection(c *gin.Context) {
 func bindSqlRequest(c *gin.Context) (models.SqlQueryRequest, bool) {
 	var req models.SqlQueryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return req, false
 	}
 	if strings.TrimSpace(req.Query) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "query must not be empty"})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: "query must not be empty"})
 		return req, false
 	}
 	return req, true
@@ -103,11 +110,11 @@ func bindSqlRequest(c *gin.Context) (models.SqlQueryRequest, bool) {
 func respondSql(c *gin.Context, result *models.SqlQueryResult, err error) {
 	if err != nil {
 		coded := func(status int, code string) {
-			c.JSON(status, gin.H{"error": err.Error(), "code": code})
+			c.JSON(status, models.ErrorResponse{Error: err.Error(), Code: code})
 		}
 		switch {
 		case apierrors.IsNotFound(err):
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		case errors.Is(err, service.ErrSqlCredentialsRefused):
 			coded(http.StatusBadRequest, ErrorCodeSqlCredentialsRefused)
 		case errors.Is(err, service.ErrSqlUnbound):
@@ -117,7 +124,13 @@ func respondSql(c *gin.Context, result *models.SqlQueryResult, err error) {
 		case errors.Is(err, service.ErrSqlBusy):
 			coded(http.StatusTooManyRequests, ErrorCodeSqlBusy)
 		case errors.Is(err, service.ErrSqlWriteRefused):
-			coded(http.StatusForbidden, ErrorCodeSqlWriteRefused)
+			// The permission write mode needs, an editor's of the project.
+			body := models.ErrorResponse{Error: err.Error(), Code: ErrorCodeSqlWriteRefused}
+			var refused *authz.ForbiddenError
+			if errors.As(err, &refused) {
+				body.Permission, body.Project = refused.Permission.Name(), refused.Project
+			}
+			c.JSON(http.StatusForbidden, body)
 		case errors.Is(err, service.ErrSqlTLS):
 			coded(http.StatusBadGateway, ErrorCodeSqlTLS)
 		case errors.Is(err, service.ErrSqlAuthMethod):
@@ -131,7 +144,7 @@ func respondSql(c *gin.Context, result *models.SqlQueryResult, err error) {
 		case errors.Is(err, service.ErrSqlTimeout):
 			coded(http.StatusGatewayTimeout, ErrorCodeSqlTimeout)
 		case errors.Is(err, service.ErrConnectionsUnavailable):
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		default:
 			// The engine's or the driver's text stays in the log.
 			writeInternal(c, http.StatusBadGateway, err, "Failed to execute SQL query")

@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -30,6 +32,9 @@ type fakeSecrets struct {
 	labels  map[string]map[string]string
 	deleted []string
 	failPut error
+	// onPut runs on each write, before it: what the repository holds then
+	// is what a crash at that moment leaves.
+	onPut func(namespace, name string)
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -51,6 +56,9 @@ func (f *fakeSecrets) put(namespace, name string, managed bool, keys ...string) 
 }
 
 func (f *fakeSecrets) CreateOrUpdateSecret(_ context.Context, namespace, name string, data map[string][]byte) error {
+	if f.onPut != nil {
+		f.onPut(namespace, name)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failPut != nil {
@@ -200,6 +208,111 @@ func TestCreateOnATakenNameIsAConflictAndLeavesTheCredentialsAlone(t *testing.T)
 	_, err = svc.Create(context.Background(), "demo", again)
 
 	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.Equal(t, "s3cret", string(env.secrets.secrets["demo/warehouse-credentials"]["password"]))
+}
+
+// --- A Secret and its commit ---
+
+// failingStore is a store whose writes fail, as a push refused.
+type failingStore struct{ *gitops.MemoryStore }
+
+func (failingStore) Update(context.Context, gitops.Commit, func(tx gitops.Tx) error) (string, error) {
+	return "", errors.New("push refused")
+}
+
+// The connection is committed before its Secret is written: when the Secret
+// is written the repository already names it, so a crash at any point
+// leaves no Secret that no connection names.
+func TestCreateCommitsTheConnectionBeforeItsSecret(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	committed := false
+	env.secrets.onPut = func(namespace, name string) {
+		committed = strings.Contains(store.Files()["projects/demo/project.yaml"], "name: warehouse-credentials")
+	}
+
+	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+	require.NoError(t, err)
+	assert.True(t, committed, "the connection naming the Secret was committed before the Secret was written")
+}
+
+// A create the repository refuses writes no Secret at all.
+func TestACreateNotCommittedWritesNoSecret(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	svc.deployments = gitops.NewDeployments(failingStore{store})
+
+	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+	require.Error(t, err)
+	assert.Empty(t, env.secrets.secrets, "no Secret without its connection")
+}
+
+// Credentials that cannot be stored take the committed connection back.
+func TestACreateWhoseSecretFailsIsTakenBack(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	env.secrets.failPut = errors.New("apiserver down")
+
+	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+	require.Error(t, err)
+	assert.NotContains(t, store.Files()["projects/demo/project.yaml"], "warehouse")
+	assert.Empty(t, env.secrets.secrets)
+}
+
+// A credentials name a Secret the console did not write holds is refused
+// before anything is committed.
+func TestCreateRefusesAForeignSecretBeforeCommitting(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	env.secrets.put("demo", "warehouse-credentials", false, "password")
+
+	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+	require.Error(t, err)
+	assert.True(t, IsValidationError(err), "got %v", err)
+	assert.Empty(t, store.Messages, "nothing committed")
+	assert.Equal(t, "x", string(env.secrets.secrets["demo/warehouse-credentials"]["password"]))
+}
+
+// An update moving a connection to a Secret of its own commits first; one
+// the repository refuses writes none.
+func TestAnUpdateCommitsTheConnectionBeforeItsSecret(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	env.secrets.put("demo", "vault-db", false, "username", "password")
+	withVault := postgresRequest()
+	withVault.ExistingSecret = "vault-db"
+	_, err := svc.Create(context.Background(), "demo", withVault)
+	require.NoError(t, err)
+
+	refused := svc.deployments
+	svc.deployments = gitops.NewDeployments(failingStore{store})
+	_, err = svc.Update(context.Background(), "demo", "warehouse", postgresRequest())
+	require.Error(t, err)
+	_, written := env.secrets.secrets["demo/warehouse-credentials"]
+	assert.False(t, written, "no Secret without the connection naming it")
+
+	svc.deployments = refused
+	committed := false
+	env.secrets.onPut = func(namespace, name string) {
+		committed = strings.Contains(store.Files()["projects/demo/project.yaml"], "name: warehouse-credentials")
+	}
+	_, err = svc.Update(context.Background(), "demo", "warehouse", postgresRequest())
+	require.NoError(t, err)
+	assert.True(t, committed, "the connection naming its own Secret was committed before the Secret was written")
+}
+
+// Credentials of an update that cannot be stored restore the connection
+// as it was.
+func TestAnUpdateWhoseSecretFailsIsRestored(t *testing.T) {
+	svc, env, store := newServiceUnderTest(t)
+	_, err := svc.Create(context.Background(), "demo", postgresRequest())
+	require.NoError(t, err)
+
+	env.secrets.failPut = errors.New("apiserver down")
+	edit := postgresRequest()
+	edit.Values["port"] = float64(6432)
+	edit.Values["password"] = "rotated"
+	_, err = svc.Update(context.Background(), "demo", "warehouse", edit)
+	require.Error(t, err)
+
+	file := store.Files()["projects/demo/project.yaml"]
+	assert.Contains(t, file, "port: 5432")
+	assert.NotContains(t, file, "port: 6432")
 	assert.Equal(t, "s3cret", string(env.secrets.secrets["demo/warehouse-credentials"]["password"]))
 }
 
@@ -561,7 +674,7 @@ func TestDatabaseProbeRejectsAnUnknownEngine(t *testing.T) {
 		"engine": "oracle",
 		"host":   "db.example.com",
 		"port":   float64(1521),
-	}, netguard.Default())
+	}, probeNetwork{guard: netguard.Default()})
 
 	require.Len(t, checks, 1)
 	assert.False(t, checks[0].Success)

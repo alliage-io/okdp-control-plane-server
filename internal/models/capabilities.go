@@ -7,12 +7,15 @@ package models
 type Capabilities struct {
 	Identity         IdentityCapability         `json:"identity"`
 	OidcProvisioning OidcProvisioningCapability `json:"oidcProvisioning"`
-	// Sql are the bounds of the SQL editor.
-	Sql SqlCapability `json:"sql"`
+	// Sql is no longer sent: the bounds of the SQL editor are the
+	// caller's, GET /api/me sql, not the public bootstrap's. Kept in the
+	// spec for a console that still reads it here, which then falls back
+	// to its own bounds.
+	Sql *SqlCapability `json:"sql,omitempty"`
 }
 
 // SqlCapability are the bounds of the SQL editor (the SQL_* settings), so
-// the console bounds its own inputs.
+// the console bounds its own inputs: sql of GET /api/me.
 type SqlCapability struct {
 	// DefaultRows is the row cap of a request that names none
 	// (SQL_DEFAULT_ROWS); MaxRows the largest maxRows a request may ask

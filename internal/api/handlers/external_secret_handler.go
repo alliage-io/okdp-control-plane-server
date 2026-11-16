@@ -45,7 +45,11 @@ func isRejectedInput(err error) bool {
 // @Produce      json
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Success      200  {array}   models.ExternalSecretResponse
-// @Failure      500  {object}  map[string]string
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse  "not found"
+// @Failure      500  {object}  models.ErrorResponse
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/projects/{projectId}/external-secrets [get]
 func (h *ExternalSecretHandler) ListExternalSecrets(c *gin.Context) {
 	namespace := c.Param("name")
@@ -67,35 +71,39 @@ func (h *ExternalSecretHandler) ListExternalSecrets(c *gin.Context) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        request body models.ExternalSecretRequest true "External Secret Request"
 // @Success      201  {object}  models.ExternalSecretResponse
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      409  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      409  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/projects/{projectId}/external-secrets [post]
 func (h *ExternalSecretHandler) CreateExternalSecret(c *gin.Context) {
 	namespace := c.Param("name")
 
 	var req models.ExternalSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	es, err := h.service.CreateExternalSecret(c.Request.Context(), namespace, req)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": fmt.Sprintf("ExternalSecret '%s' already exists in project '%s'", req.Name, namespace),
+			c.JSON(http.StatusConflict, models.ErrorResponse{
+				Error: fmt.Sprintf("ExternalSecret '%s' already exists in project '%s'", req.Name, namespace),
 			})
 			return
 		}
 		// SecretStore not found error from service
 		if apierrors.IsNotFound(err) || isSecretStoreNotFoundError(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		if isRejectedInput(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		writeError(c, err, "Failed to create external secret")
@@ -114,9 +122,13 @@ func (h *ExternalSecretHandler) CreateExternalSecret(c *gin.Context) {
 // @Param        esName path string true "External Secret name"
 // @Param        request body models.ExternalSecretRequest true "External Secret Request"
 // @Success      200  {object}  models.ExternalSecretResponse
-// @Failure      400  {object}  map[string]string
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      413  {object}  models.ErrorResponse  "the request body is too large"
+// @Failure      500  {object}  models.ErrorResponse
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/projects/{projectId}/external-secrets/{esName} [put]
 func (h *ExternalSecretHandler) UpdateExternalSecret(c *gin.Context) {
 	namespace := c.Param("name")
@@ -124,24 +136,24 @@ func (h *ExternalSecretHandler) UpdateExternalSecret(c *gin.Context) {
 
 	var req models.ExternalSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		return
 	}
 
 	es, err := h.service.UpdateExternalSecret(c.Request.Context(), namespace, esName, req)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})
 			return
 		}
 		if isSecretStoreNotFoundError(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		if isRejectedInput(err) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
 		}
 		writeError(c, err, "Failed to update external secret")
@@ -159,8 +171,12 @@ func (h *ExternalSecretHandler) UpdateExternalSecret(c *gin.Context) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        esName path string true "External Secret name"
 // @Success      204
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/projects/{projectId}/external-secrets/{esName} [delete]
 func (h *ExternalSecretHandler) DeleteExternalSecret(c *gin.Context) {
 	namespace := c.Param("name")
@@ -168,8 +184,8 @@ func (h *ExternalSecretHandler) DeleteExternalSecret(c *gin.Context) {
 
 	if err := h.service.DeleteExternalSecret(c.Request.Context(), namespace, esName); err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})
 			return
 		}
@@ -188,8 +204,12 @@ func (h *ExternalSecretHandler) DeleteExternalSecret(c *gin.Context) {
 // @Param        name path string true "Project name (= Kubernetes namespace)"
 // @Param        esName path string true "External Secret name"
 // @Success      200  {object}  models.ExternalSecretStatusResponse
-// @Failure      404  {object}  map[string]string
-// @Failure      500  {object}  map[string]string
+// @Failure      400  {object}  models.ErrorResponse  "the request is refused (code, fields when the compile refuses it)"
+// @Failure      401  {object}  models.ErrorResponse  "no valid token"
+// @Failure      403  {object}  models.ErrorResponse  "code forbidden: the permission the route needs (permission, project)"
+// @Failure      404  {object}  models.ErrorResponse
+// @Failure      500  {object}  models.ErrorResponse
+// @Failure      501  {object}  handlers.FeatureUnavailable  "the feature is not installed (reason feature-not-installed)"
 // @Router       /api/projects/{projectId}/external-secrets/{esName}/status [get]
 func (h *ExternalSecretHandler) GetExternalSecretStatus(c *gin.Context) {
 	namespace := c.Param("name")
@@ -198,8 +218,8 @@ func (h *ExternalSecretHandler) GetExternalSecretStatus(c *gin.Context) {
 	status, err := h.service.GetExternalSecretStatus(c.Request.Context(), namespace, esName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
+			c.JSON(http.StatusNotFound, models.ErrorResponse{
+				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})
 			return
 		}
