@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 )
 
@@ -77,7 +77,7 @@ func TestStoreCredentialsAreLabelledAndManagedAsOurs(t *testing.T) {
 	if err := repo.DeleteSecret(ctx, "demo", "vault-credentials"); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.DeleteSecret(ctx, "demo", "vault-credentials"); !apierrors.IsNotFound(err) {
+	if err := repo.DeleteSecret(ctx, "demo", "vault-credentials"); !errors.Is(err, apperr.ErrNotFound) {
 		t.Fatalf("second delete: %v, want NotFound", err)
 	}
 }

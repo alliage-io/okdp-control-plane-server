@@ -9,8 +9,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	"github.com/go-git/go-git/v5/plumbing/transport/server"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 

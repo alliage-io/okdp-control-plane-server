@@ -7,8 +7,8 @@ import (
 	"sort"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"gopkg.in/yaml.v3"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -85,6 +85,10 @@ func (s *DefaultRenderedValuesService) GetRenderedValues(ctx context.Context, pr
 	})
 	result := make([]models.RenderedValues, 0, len(deps))
 	for _, d := range deps {
+		// The instance's objects, not the values of an upstream chart.
+		if d.key() == compiler.ObjectsChart {
+			continue
+		}
 		values, _ := compiled.Values[d.key()].(map[string]any)
 		ref := compiler.ChartRef{Repository: d.Repository, Chart: d.Name, Version: d.Version}
 		rendered := models.RenderedValues{

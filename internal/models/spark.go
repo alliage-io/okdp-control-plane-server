@@ -21,6 +21,13 @@ type SparkAppYAMLRequest struct {
 	YAML string `json:"yaml" binding:"required"`
 }
 
+// SparkAppEvent is one change of a project's SparkApplications, as streamed
+// to the console: Type is ADDED, MODIFIED or DELETED.
+type SparkAppEvent struct {
+	Type   string
+	Object SparkAppInstance
+}
+
 type SparkAppInstance struct {
 	Name          string            `json:"name"`
 	Type          string            `json:"type"`

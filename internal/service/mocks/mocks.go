@@ -89,8 +89,8 @@ func (m *SecretStoreRepository) DeleteSecret(ctx context.Context, namespace, nam
 	return args.Error(0)
 }
 
-func (m *SecretStoreRepository) RemoveDefaultLabel(ctx context.Context, namespace string) error {
-	args := m.Called(ctx, namespace)
+func (m *SecretStoreRepository) RemoveDefaultLabel(ctx context.Context, namespace, except string) error {
+	args := m.Called(ctx, namespace, except)
 	return args.Error(0)
 }
 

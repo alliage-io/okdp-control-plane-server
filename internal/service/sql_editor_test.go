@@ -21,8 +21,8 @@ import (
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
@@ -188,7 +188,7 @@ func TestANamedClaimRunsWithItsProvisionedSecret(t *testing.T) {
 	_, err = sql.resolveTarget(ctx, "demo", "later")
 	assert.ErrorIs(t, err, ErrSqlUnbound)
 	_, err = sql.resolveTarget(ctx, "demo", "nothing")
-	assert.True(t, apierrors.IsNotFound(err), "neither a connection nor a claim: %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "neither a connection nor a claim: %v", err)
 }
 
 // --- The connection the editor opens ---

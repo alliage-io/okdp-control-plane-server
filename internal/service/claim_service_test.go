@@ -7,13 +7,13 @@ import (
 	"testing"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
 
@@ -114,7 +114,7 @@ func TestNamedClaimsAreBoundAndNamed(t *testing.T) {
 	assert.True(t, c.Sql, "a PostgreSQL database: the SQL editor runs on it")
 
 	_, err = svc.ListNamedClaims(context.Background(), "nope")
-	assert.True(t, apierrors.IsNotFound(err))
+	assert.True(t, errors.Is(err, apperr.ErrNotFound))
 }
 
 func TestANamedClaimIsDeclaredInProjectYAMLItsCommentsKept(t *testing.T) {
@@ -134,7 +134,7 @@ func TestANamedClaimIsDeclaredInProjectYAMLItsCommentsKept(t *testing.T) {
 	assert.Contains(t, raw, "  metrics:\n    contract: database-server\n    class: large\n    request:\n      extensions:\n        - pgvector\n")
 
 	_, err = svc.CreateNamedClaim(context.Background(), "demo", models.NamedClaimRequest{Name: "metrics", Contract: "database-server"})
-	assert.True(t, apierrors.IsAlreadyExists(err), "%v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "%v", err)
 
 	view, err = svc.UpdateNamedClaim(context.Background(), "demo", "metrics", models.NamedClaimRequest{Contract: "database-server"})
 	require.NoError(t, err)
@@ -144,7 +144,7 @@ func TestANamedClaimIsDeclaredInProjectYAMLItsCommentsKept(t *testing.T) {
 	require.NoError(t, svc.DeleteNamedClaim(context.Background(), "demo", "metrics"))
 	assert.NotContains(t, store.Files()["projects/demo/project.yaml"], "metrics")
 	err = svc.DeleteNamedClaim(context.Background(), "demo", "metrics")
-	assert.True(t, apierrors.IsNotFound(err), "%v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "%v", err)
 }
 
 func TestANamedClaimIsRefusedWhenItCannotBind(t *testing.T) {

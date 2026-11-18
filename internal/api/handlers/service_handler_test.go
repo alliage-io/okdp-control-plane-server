@@ -10,10 +10,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/okdp/okdp-compiler/treeedit"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/okdp/okdp-gitops/treeedit"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
 )
@@ -50,7 +49,7 @@ func TestDeployConflictsCarryDistinctCodes(t *testing.T) {
 		t.Fatalf("release collision: %d %v", code, body)
 	}
 
-	code, body = deploy(t, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "services"}, "b-c"))
+	code, body = deploy(t, apperr.AlreadyExists("services", "b-c"))
 	if code != http.StatusConflict || body["code"] != ErrorCodeInstanceExists ||
 		body["error"] != "Instance 'b-c' already exists in project 'a'" {
 		t.Fatalf("duplicate instance: %d %v", code, body)
@@ -84,7 +83,7 @@ func TestGetRenderedValues(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `"changedLines":[1]`) || !strings.Contains(body, `"chart":"trino"`) {
 		t.Fatalf("200: %d %s", code, body)
 	}
-	notFound := apierrors.NewNotFound(schema.GroupResource{Resource: "services"}, "sql")
+	notFound := apperr.NotFound("services", "sql")
 	if code, body := getRenderedValues(t, renderedValuesStub{err: notFound}); code != http.StatusNotFound || !strings.Contains(body, "not found in project 'demo'") {
 		t.Fatalf("404: %d %s", code, body)
 	}

@@ -2,12 +2,13 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type IdentityHandler struct {
@@ -80,7 +81,7 @@ func (h *IdentityHandler) GetUser(c *gin.Context) {
 	name := c.Param("name")
 	user, err := h.service.GetUser(c.Request.Context(), name)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "User not found"})
 			return
 		}

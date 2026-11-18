@@ -7,18 +7,16 @@ import (
 	"sort"
 	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // claimsResource names the resource in not-found and conflict errors.
-var claimsResource = schema.GroupResource{Group: "okdp.io", Resource: "claims"}
+const claimsResource = "claims.okdp.io"
 
 // ClaimService manages the claims of a project: its named claims (the
 // claims: of its project.yaml), the classes a claim may be of (the
@@ -160,7 +158,7 @@ func (s *DefaultClaimService) classes(r treeedit.Reader, project string) (map[st
 // may be of.
 func (s *DefaultClaimService) Provisioning(ctx context.Context, project string) (*models.ProvisioningResponse, error) {
 	if err := treeedit.ValidateName("project", project); err != nil {
-		return nil, apierrors.NewNotFound(projectsResource, project)
+		return nil, apperr.NotFound(projectsResource, project)
 	}
 	var byContract map[string]*models.ContractClasses
 	err := s.deployments.Store.View(ctx, func(r treeedit.Reader) error {
@@ -200,10 +198,10 @@ func binding(t *compiler.Tree, namespace, release, class string, named bool) mod
 // ListNamedClaims returns the named claims of a project, bound.
 func (s *DefaultClaimService) ListNamedClaims(ctx context.Context, project string) ([]models.NamedClaimView, error) {
 	if err := treeedit.ValidateName("project", project); err != nil {
-		return nil, apierrors.NewNotFound(projectsResource, project)
+		return nil, apperr.NotFound(projectsResource, project)
 	}
 	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, treeedit.ErrNotFound) {
-		return nil, apierrors.NewNotFound(projectsResource, project)
+		return nil, apperr.NotFound(projectsResource, project)
 	} else if err != nil {
 		return nil, err
 	}
@@ -318,14 +316,14 @@ func (s *DefaultClaimService) UpdateNamedClaim(ctx context.Context, project, nam
 
 func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name string, req models.NamedClaimRequest, create bool) (*models.NamedClaimView, error) {
 	if err := treeedit.ValidateName("project", project); err != nil {
-		return nil, apierrors.NewNotFound(projectsResource, project)
+		return nil, apperr.NotFound(projectsResource, project)
 	}
 	if err := treeedit.ValidateName("claim", name); err != nil {
 		return nil, invalid("%v", err)
 	}
 	claim := models.NamedClaim{Name: name, Contract: req.Contract, Class: req.Class, Provider: req.Provider, Request: req.Request}
 	if _, err := s.deployments.GetProject(ctx, project); errors.Is(err, treeedit.ErrNotFound) {
-		return nil, apierrors.NewNotFound(projectsResource, project)
+		return nil, apperr.NotFound(projectsResource, project)
 	} else if err != nil {
 		return nil, err
 	}
@@ -360,7 +358,7 @@ func (s *DefaultClaimService) putNamedClaim(ctx context.Context, project, name s
 // it. Its provider keeps what the claim's connection holds.
 func (s *DefaultClaimService) DeleteNamedClaim(ctx context.Context, project, name string) error {
 	if err := treeedit.ValidateName("project", project); err != nil {
-		return apierrors.NewNotFound(projectsResource, project)
+		return apperr.NotFound(projectsResource, project)
 	}
 	_, err := s.deployments.DeleteClaim(ctx, auth.ActorFrom(ctx), project, name)
 	return claimGitError(err, name)
@@ -378,9 +376,9 @@ func claimGitError(err error, name string) error {
 	case errors.As(err, &inUse):
 		return invalid("claim %q is still named by %s; change them first", name, strings.Join(inUse.Users, ", "))
 	case errors.Is(err, treeedit.ErrExists):
-		return apierrors.NewAlreadyExists(claimsResource, name)
+		return apperr.AlreadyExists(claimsResource, name)
 	case errors.Is(err, treeedit.ErrNotFound):
-		return apierrors.NewNotFound(claimsResource, name)
+		return apperr.NotFound(claimsResource, name)
 	default:
 		return err
 	}
@@ -390,11 +388,11 @@ func claimGitError(err error, name string) error {
 // the project's sources.
 func (s *DefaultClaimService) InstanceClaims(ctx context.Context, project, instance string) (*models.InstanceClaims, error) {
 	if treeedit.ValidateName("project", project) != nil || treeedit.ValidateName("instance", instance) != nil {
-		return nil, apierrors.NewNotFound(servicesResource, instance)
+		return nil, apperr.NotFound(servicesResource, instance)
 	}
 	out := &models.InstanceClaims{Provisions: []string{}, Provided: []models.ProvidedClaim{}, Bound: []models.BoundClaim{}}
 	if _, err := s.deployments.GetInstance(ctx, project, instance); errors.Is(err, treeedit.ErrNotFound) {
-		return nil, apierrors.NewNotFound(servicesResource, instance)
+		return nil, apperr.NotFound(servicesResource, instance)
 	} else if err != nil {
 		return nil, err
 	}

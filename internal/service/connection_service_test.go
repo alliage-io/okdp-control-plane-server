@@ -8,14 +8,14 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/okdp/okdp-compiler/treeedit"
 	gitcatalog "github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
@@ -207,7 +207,7 @@ func TestCreateOnATakenNameIsAConflictAndLeavesTheCredentialsAlone(t *testing.T)
 	again.Values["password"] = "other"
 	_, err = svc.Create(context.Background(), "demo", again)
 
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 	assert.Equal(t, "s3cret", string(env.secrets.secrets["demo/warehouse-credentials"]["password"]))
 }
 
@@ -502,7 +502,7 @@ func TestListReadsTheConnectionFiles(t *testing.T) {
 	other, err := svc.List(context.Background(), "other")
 	require.NoError(t, err)
 	assert.Empty(t, other)
-	assert.True(t, svc.Catalog(context.Background()).CRDAvailable)
+	assert.NotEmpty(t, svc.Catalog(context.Background()).Types)
 }
 
 func descriptorWith(release string, outputs ...repository.DescriptorOutput) repository.Descriptor {

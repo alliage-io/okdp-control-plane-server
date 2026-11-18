@@ -59,7 +59,7 @@ func (r *k8sConnectionSecretRepository) InspectSecret(ctx context.Context, names
 		if apierrors.IsNotFound(err) {
 			return SecretContent{}, false, nil
 		}
-		return SecretContent{}, false, err
+		return SecretContent{}, false, fromK8s(err)
 	}
 
 	// Only the key names are read, never the values: the console must be able to
@@ -84,7 +84,7 @@ func (r *k8sConnectionSecretRepository) ReadSecret(ctx context.Context, namespac
 		if apierrors.IsNotFound(err) {
 			return nil, nil, false, nil
 		}
-		return nil, nil, false, err
+		return nil, nil, false, fromK8s(err)
 	}
 	return secret.Data, secret.Labels, true, nil
 }
@@ -112,10 +112,10 @@ func (r *k8sConnectionSecretRepository) CreateOrUpdateSecret(ctx context.Context
 	existing, err := r.typedClient.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = r.typedClient.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
-		return err
+		return fromK8s(err)
 	}
 	if err != nil {
-		return err
+		return fromK8s(err)
 	}
 
 	// The credentials name is derived from the connection name, so a Secret
@@ -140,7 +140,7 @@ func (r *k8sConnectionSecretRepository) CreateOrUpdateSecret(ctx context.Context
 
 	secret.ResourceVersion = existing.ResourceVersion
 	_, err = r.typedClient.CoreV1().Secrets(namespace).Update(ctx, secret, metav1.UpdateOptions{})
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sConnectionSecretRepository) DeleteSecret(ctx context.Context, namespace, name string) error {
@@ -148,5 +148,5 @@ func (r *k8sConnectionSecretRepository) DeleteSecret(ctx context.Context, namesp
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
-	return err
+	return fromK8s(err)
 }

@@ -5,21 +5,20 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/gitops"
-	"github.com/sirupsen/logrus"
+	"github.com/okdp/okdp-gitops/rules"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // credentialsSecretSuffix names the Secret the console writes for a
@@ -32,7 +31,7 @@ const credentialsSecretSuffix = "-credentials"
 const valueSecretRef = "secretRef"
 
 // connectionsResource names the resource in not-found and conflict errors.
-var connectionsResource = schema.GroupResource{Group: "okdp.io", Resource: "connections"}
+const connectionsResource = "connections.okdp.io"
 
 // ConnectionService manages the connections of a project.
 //
@@ -210,7 +209,7 @@ func IsValidationError(err error) bool {
 // IsNotFound reports whether an error from this service is a missing resource,
 // so the handler can answer 404 without importing the Kubernetes error package.
 func IsNotFound(err error) bool {
-	return apierrors.IsNotFound(err)
+	return errors.Is(err, apperr.ErrNotFound)
 }
 
 // connectionGitError maps the deployments repository errors to the API ones.
@@ -224,9 +223,9 @@ func connectionGitError(err error, name string) error {
 		// An instance that layers the connection in no longer compiles with it.
 		return DoesNotCompile(compileErr)
 	case errors.Is(err, treeedit.ErrNotFound):
-		return apierrors.NewNotFound(connectionsResource, name)
+		return apperr.NotFound(connectionsResource, name)
 	case errors.Is(err, treeedit.ErrExists):
-		return apierrors.NewAlreadyExists(connectionsResource, name)
+		return apperr.AlreadyExists(connectionsResource, name)
 	case errors.As(err, &inUse):
 		return invalid("connection %q is still referenced by %s; change them first", name, strings.Join(inUse.Users, ", "))
 	default:
@@ -236,8 +235,7 @@ func connectionGitError(err error, name string) error {
 
 func (s *DefaultConnectionService) Catalog(ctx context.Context) models.ConnectionCatalogResponse {
 	return models.ConnectionCatalogResponse{
-		Types:        s.catalog.List(),
-		CRDAvailable: true,
+		Types: s.catalog.List(),
 	}
 }
 
@@ -277,7 +275,7 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	// create must not touch it (the commit below refuses a taken name too,
 	// before any Secret is written).
 	if _, err := s.deployments.GetConnection(ctx, namespace, req.Name); err == nil {
-		return nil, apierrors.NewAlreadyExists(connectionsResource, req.Name)
+		return nil, apperr.AlreadyExists(connectionsResource, req.Name)
 	} else if !errors.Is(err, treeedit.ErrNotFound) {
 		return nil, err
 	}
@@ -328,9 +326,11 @@ func (s *DefaultConnectionService) Create(ctx context.Context, namespace string,
 	if writeSecret {
 		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, secretName, secrets); err != nil {
 			// A connection naming credentials that were never stored is
-			// taken back.
-			if _, rollbackErr := s.deployments.DeleteConnection(ctx, actor, namespace, req.Name); rollbackErr != nil {
-				logrus.WithError(rollbackErr).WithField("connection", req.Name).Warn("Failed to take back the connection whose credentials could not be stored")
+			// taken back, whether or not the client is still there.
+			rollback, cancel := compensationContext(ctx)
+			defer cancel()
+			if _, rollbackErr := s.deployments.DeleteConnection(rollback, actor, namespace, req.Name); rollbackErr != nil {
+				slog.Warn("Failed to take back the connection whose credentials could not be stored", "error", rollbackErr, "connection", req.Name)
 			}
 			return nil, storeCredentialsError(err)
 		}
@@ -405,9 +405,12 @@ func (s *DefaultConnectionService) Update(ctx context.Context, namespace, name s
 	}
 	if writeSecret {
 		if err := s.secrets.CreateOrUpdateSecret(ctx, namespace, ownedName, secrets); err != nil {
-			// The connection as it was: its values and its Secret.
-			if _, rollbackErr := s.deployments.PutConnection(ctx, actor, namespace, *existing, false); rollbackErr != nil {
-				logrus.WithError(rollbackErr).WithField("connection", name).Warn("Failed to restore the connection whose credentials could not be stored")
+			// The connection as it was: its values and its Secret,
+			// whether or not the client is still there.
+			rollback, cancel := compensationContext(ctx)
+			defer cancel()
+			if _, rollbackErr := s.deployments.PutConnection(rollback, actor, namespace, *existing, false); rollbackErr != nil {
+				slog.Warn("Failed to restore the connection whose credentials could not be stored", "error", rollbackErr, "connection", name)
 			}
 			return nil, storeCredentialsError(err)
 		}
@@ -438,7 +441,7 @@ func (s *DefaultConnectionService) Delete(ctx context.Context, namespace, name s
 		return nil
 	}
 	if existing.SecretRef != name+credentialsSecretSuffix {
-		logrus.WithField("secret", existing.SecretRef).Info("Leaving the credentials secret in place, the connection did not own it")
+		slog.Info("Leaving the credentials secret in place, the connection did not own it", "secret", existing.SecretRef)
 		return nil
 	}
 	s.deleteOwnedSecret(ctx, namespace, existing.SecretRef)
@@ -466,20 +469,20 @@ func (s *DefaultConnectionService) checkSecretWritable(ctx context.Context, name
 func (s *DefaultConnectionService) deleteOwnedSecret(ctx context.Context, namespace, name string) {
 	content, found, err := s.secrets.InspectSecret(ctx, namespace, name)
 	if err != nil {
-		logrus.WithError(err).WithField("secret", name).Warn("Could not inspect the credentials secret, leaving it in place")
+		slog.Warn("Could not inspect the credentials secret, leaving it in place", "error", err, "secret", name)
 		return
 	}
 	if !found {
 		return
 	}
 	if !content.Managed {
-		logrus.WithField("secret", name).Info("Leaving the credentials secret in place, the console did not write it")
+		slog.Info("Leaving the credentials secret in place, the console did not write it", "secret", name)
 		return
 	}
 	// The Secret outlives the connection only if this fails. Report nothing to
 	// the user for it, the connection itself is gone.
 	if err := s.secrets.DeleteSecret(ctx, namespace, name); err != nil {
-		logrus.WithError(err).WithField("secret", name).Warn("Failed to delete the credentials secret of a connection")
+		slog.Warn("Failed to delete the credentials secret of a connection", "error", err, "secret", name)
 	}
 }
 
@@ -719,7 +722,7 @@ func (s *DefaultConnectionService) checkConnection(ctx context.Context, project 
 			}
 		}
 	}
-	if err := compiler.CheckConnection(s.catalog.Contracts(), project, c, platform); err != nil {
+	if err := compiler.CheckConnection(rules.Standard(), s.catalog.Contracts(), project, c, platform); err != nil {
 		return rejected(err)
 	}
 	return nil

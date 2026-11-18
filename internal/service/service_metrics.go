@@ -3,139 +3,108 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
-	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	corev1 "k8s.io/api/core/v1"
+	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
 )
 
-// GetServiceMetrics aggregates live CPU/memory usage from the metrics-server
-// for every pod belonging to a service instance, against the total limits
-// read from the pods' container specs.
+// GetProjectMetrics aggregates live CPU/memory usage from metrics-server for
+// every instance of a project, against the total limits read from the
+// pods' container specs.
 func (s *DefaultServiceService) GetProjectMetrics(ctx context.Context, project string) (map[string]*models.ServiceMetrics, error) {
 	instances, err := s.ListServices(ctx, project)
 	if err != nil {
 		return nil, err
 	}
 
-	podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	allPods, err := s.k8sClient.Resource(podGVR).Namespace(project).List(ctx, metav1.ListOptions{})
+	allPods, err := s.workloads.ListPods(ctx, project, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
-	metricsByPod := s.listPodMetricsByName(ctx, project)
+	usage := s.podUsage(ctx, project)
 
 	metrics := make(map[string]*models.ServiceMetrics, len(instances))
 	for _, inst := range instances {
-		var pods []unstructured.Unstructured
-		for _, pod := range allPods.Items {
-			if pod.GetLabels()[repository.LabelAppInstance] == inst.ReleaseName {
-				pods = append(pods, pod)
+		var pods []corev1.Pod
+		for i := range allPods {
+			if allPods[i].Labels[repository.LabelAppInstance] == inst.ReleaseName {
+				pods = append(pods, allPods[i])
 			}
 		}
-		metrics[inst.Name] = buildServiceMetrics(pods, metricsByPod)
+		metrics[inst.Name] = buildServiceMetrics(pods, usage)
 	}
 	return metrics, nil
 }
 
-func (s *DefaultServiceService) listPodMetricsByName(ctx context.Context, namespace string) map[string]*unstructured.Unstructured {
-	metricsGVR := schema.GroupVersionResource{
-		Group:    "metrics.k8s.io",
-		Version:  "v1beta1",
-		Resource: "pods",
-	}
-	byName := map[string]*unstructured.Unstructured{}
-	list, err := s.k8sClient.Resource(metricsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+// GetServiceMetrics aggregates the same for one instance.
+func (s *DefaultServiceService) GetServiceMetrics(ctx context.Context, project, serviceName string) (*models.ServiceMetrics, error) {
+	pods, err := s.workloads.ListPods(ctx, project, instanceSelector(project, serviceName))
 	if err != nil {
-		logrus.Debugf("metrics for namespace %s unavailable: %v", namespace, err)
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+	return buildServiceMetrics(pods, s.podUsage(ctx, project)), nil
+}
+
+// podUsage is what metrics-server reports of a namespace's pods, by pod;
+// none when it does not answer.
+func (s *DefaultServiceService) podUsage(ctx context.Context, namespace string) map[string]*metricsv1beta1.PodMetrics {
+	byName := map[string]*metricsv1beta1.PodMetrics{}
+	list, err := s.workloads.PodMetrics(ctx, namespace)
+	if err != nil {
+		slog.Debug(fmt.Sprintf("metrics for namespace %s unavailable: %v", namespace, err))
 		return byName
 	}
-	for i := range list.Items {
-		byName[list.Items[i].GetName()] = &list.Items[i]
+	for i := range list {
+		byName[list[i].Name] = &list[i]
 	}
 	return byName
 }
 
-func buildServiceMetrics(pods []unstructured.Unstructured, metricsByPod map[string]*unstructured.Unstructured) *models.ServiceMetrics {
+func buildServiceMetrics(pods []corev1.Pod, usageByPod map[string]*metricsv1beta1.PodMetrics) *models.ServiceMetrics {
 	var cpuLimit, memLimit float64
 	var cpuUsed, memUsed float64
 	cpuUsedAvailable := false
 	memUsedAvailable := false
 
-	for _, pod := range pods {
-		containers, _, _ := unstructured.NestedSlice(pod.Object, "spec", "containers")
-		for _, c := range containers {
-			container, ok := c.(map[string]interface{})
-			if !ok {
-				continue
+	for i := range pods {
+		for c := range pods[i].Spec.Containers {
+			resources := &pods[i].Spec.Containers[c].Resources
+			// The limits when set, else the requests.
+			quantities := resources.Limits
+			if quantities == nil {
+				quantities = resources.Requests
 			}
-			resources, _ := container["resources"].(map[string]interface{})
-			if resources == nil {
-				continue
+			if cpu, ok := quantities[corev1.ResourceCPU]; ok {
+				cpuLimit += cpu.AsApproximateFloat64()
 			}
-			for _, bucket := range []string{"limits", "requests"} {
-				quantities, _ := resources[bucket].(map[string]interface{})
-				if quantities == nil {
-					continue
-				}
-				if v, ok := quantities["cpu"].(string); ok && v != "" {
-					if cores, err := parseCPUQuantity(v); err != nil {
-						logrus.WithError(err).WithField("pod", pod.GetName()).Warn("skipping unparseable CPU limit")
-					} else {
-						cpuLimit += cores
-					}
-				}
-				if v, ok := quantities["memory"].(string); ok && v != "" {
-					if bytes, err := parseMemoryQuantity(v); err != nil {
-						logrus.WithError(err).WithField("pod", pod.GetName()).Warn("skipping unparseable memory limit")
-					} else {
-						memLimit += bytes
-					}
-				}
-				break
+			if memory, ok := quantities[corev1.ResourceMemory]; ok {
+				memLimit += memory.AsApproximateFloat64()
 			}
 		}
 	}
 
-	for _, pod := range pods {
-		podMetrics, ok := metricsByPod[pod.GetName()]
+	for i := range pods {
+		podMetrics, ok := usageByPod[pods[i].Name]
 		if !ok {
 			continue
 		}
-		containers, _, _ := unstructured.NestedSlice(podMetrics.Object, "containers")
-		for _, c := range containers {
-			container, ok := c.(map[string]interface{})
-			if !ok {
-				continue
+		for c := range podMetrics.Containers {
+			usage := podMetrics.Containers[c].Usage
+			if cpu, ok := usage[corev1.ResourceCPU]; ok {
+				cpuUsed += cpu.AsApproximateFloat64()
+				cpuUsedAvailable = true
 			}
-			usage, _ := container["usage"].(map[string]interface{})
-			if usage == nil {
-				continue
-			}
-			if v, ok := usage["cpu"].(string); ok && v != "" {
-				if cores, err := parseCPUQuantity(v); err != nil {
-					logrus.WithError(err).WithField("pod", pod.GetName()).Warn("skipping unparseable CPU usage from metrics-server")
-				} else {
-					cpuUsed += cores
-					cpuUsedAvailable = true
-				}
-			}
-			if v, ok := usage["memory"].(string); ok && v != "" {
-				if bytes, err := parseMemoryQuantity(v); err != nil {
-					logrus.WithError(err).WithField("pod", pod.GetName()).Warn("skipping unparseable memory usage from metrics-server")
-				} else {
-					memUsed += bytes
-					memUsedAvailable = true
-				}
+			if memory, ok := usage[corev1.ResourceMemory]; ok {
+				memUsed += memory.AsApproximateFloat64()
+				memUsedAvailable = true
 			}
 		}
 	}
 
-	metrics := &models.ServiceMetrics{
+	return &models.ServiceMetrics{
 		CPU: models.MetricValue{
 			UsedRaw:   cpuUsed,
 			LimitRaw:  cpuLimit,
@@ -153,57 +122,6 @@ func buildServiceMetrics(pods []unstructured.Unstructured, metricsByPod map[stri
 			Available: memUsedAvailable,
 		},
 	}
-	return metrics
-}
-
-func (s *DefaultServiceService) GetServiceMetrics(ctx context.Context, project, serviceName string) (*models.ServiceMetrics, error) {
-	podGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	podList, err := s.k8sClient.Resource(podGVR).Namespace(project).List(ctx, metav1.ListOptions{
-		LabelSelector: instanceSelector(project, serviceName),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	metricsByPod := s.listPodMetricsByName(ctx, project)
-	return buildServiceMetrics(podList.Items, metricsByPod), nil
-}
-
-// parseCPUQuantity parses a Kubernetes CPU quantity string (e.g. "500m",
-// "2", "1500000000n", "1.5") and returns the value in whole cores. Wraps
-// k8s.io/apimachinery resource.ParseQuantity, the canonical parser used
-// throughout the Kubernetes ecosystem, so we inherit correct handling of
-// every SI suffix (n, u, m, k, M, G, T, P, E) and binary suffix (Ki, Mi,
-// Gi, Ti, Pi, Ei) as well as decimal and scientific notation.
-// Returns an error when s is not a valid quantity; callers are expected
-// to log a warning and skip the faulty container, not fail the whole
-// request.
-func parseCPUQuantity(s string) (float64, error) {
-	if s == "" {
-		return 0, nil
-	}
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid CPU quantity %q: %w", s, err)
-	}
-	// AsApproximateFloat64 returns the value in the quantity's base units.
-	// For CPU, the base unit is already "cores" (e.g. "500m" → 0.5).
-	return q.AsApproximateFloat64(), nil
-}
-
-// parseMemoryQuantity parses a Kubernetes memory quantity string (e.g.
-// "512Mi", "2Gi", "1024", "1.5Gi") and returns the value in bytes. Same
-// rationale as parseCPUQuantity, we delegate to resource.ParseQuantity.
-func parseMemoryQuantity(s string) (float64, error) {
-	if s == "" {
-		return 0, nil
-	}
-	q, err := resource.ParseQuantity(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid memory quantity %q: %w", s, err)
-	}
-	// For memory, the base unit is bytes.
-	return q.AsApproximateFloat64(), nil
 }
 
 // formatCPU returns a compact human-readable string in cores.

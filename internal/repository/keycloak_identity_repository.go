@@ -5,17 +5,15 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/config"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
-	"github.com/sirupsen/logrus"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // keycloakIdentityRepository implements IdentityRepository against the
@@ -26,11 +24,10 @@ type keycloakIdentityRepository struct {
 	kc *keycloakClient
 }
 
-// Resources used to surface backend lookups as Kubernetes-style NotFound
-// errors, so handlers keep relying on apierrors.IsNotFound.
-var (
-	userResource  = schema.GroupResource{Group: "identity.okdp.io", Resource: "users"}
-	groupResource = schema.GroupResource{Group: "identity.okdp.io", Resource: "groups"}
+// The resources named by the NotFound errors of backend lookups.
+const (
+	userResource  = "users.identity.okdp.io"
+	groupResource = "groups.identity.okdp.io"
 )
 
 // listPageSize bounds admin list calls. The identity admin console operates
@@ -178,7 +175,7 @@ func (r *keycloakIdentityRepository) findUser(ctx context.Context, username stri
 			return &users[i], nil
 		}
 	}
-	return nil, apierrors.NewNotFound(userResource, username)
+	return nil, apperr.NotFound(userResource, username)
 }
 
 // findGroup resolves a top-level group by name. Keycloak's group search is
@@ -194,7 +191,7 @@ func (r *keycloakIdentityRepository) findGroup(ctx context.Context, name string)
 			return &groups[i], nil
 		}
 	}
-	return nil, apierrors.NewNotFound(groupResource, name)
+	return nil, apperr.NotFound(groupResource, name)
 }
 
 // putMerged GETs the representation at path, sets fields over it and lets
@@ -424,7 +421,7 @@ func (r *keycloakIdentityRepository) ListGroupBindings(ctx context.Context, user
 	for i := range kcUsers {
 		groups, err := r.userGroups(ctx, kcUsers[i].ID)
 		if err != nil {
-			logrus.WithError(err).WithField("user", kcUsers[i].Username).Warn("Failed to list keycloak group memberships")
+			slog.Warn("Failed to list keycloak group memberships", "error", err, "user", kcUsers[i].Username)
 			continue
 		}
 		for _, g := range groups {

@@ -10,17 +10,20 @@
 package authz
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/okdp/okdp-gitops/deploy"
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
-	"github.com/sirupsen/logrus"
+	"github.com/okdp/okdp-gitops/rules"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // Role is the role of a group within a project: compiler.AccessViewer,
@@ -146,6 +149,11 @@ func (s deploymentsSource) ProjectFile(ctx context.Context, project string) ([]b
 // global.okdp.access.admins or to a project's access counts within it.
 const CacheTTL = 5 * time.Second
 
+// projectCacheSize bounds the projects whose access is kept: a project's
+// name comes from a URL any authenticated caller writes, the least
+// recently read dropped past it.
+const projectCacheSize = 4096
+
 // Authority reads the platform's authority from its Source, each part
 // kept CacheTTL.
 type Authority struct {
@@ -154,7 +162,7 @@ type Authority struct {
 
 	mu       sync.Mutex
 	admins   *entry[[]string]
-	projects map[string]*entry[map[string]Role]
+	projects *accessCache
 }
 
 type entry[T any] struct {
@@ -162,9 +170,58 @@ type entry[T any] struct {
 	at    time.Time
 }
 
+// accessCache keeps the access of the projects last read, at most max.
+// Not safe for concurrent use: Authority.mu guards it.
+type accessCache struct {
+	max    int
+	order  *list.List // of *accessItem, most recently used first
+	byName map[string]*list.Element
+}
+
+type accessItem struct {
+	project string
+	entry   *entry[map[string]Role]
+}
+
+func newAccessCache(max int) *accessCache {
+	return &accessCache{max: max, order: list.New(), byName: map[string]*list.Element{}}
+}
+
+func (c *accessCache) get(project string) *entry[map[string]Role] {
+	el := c.byName[project]
+	if el == nil {
+		return nil
+	}
+	c.order.MoveToFront(el)
+	return el.Value.(*accessItem).entry
+}
+
+func (c *accessCache) put(project string, e *entry[map[string]Role]) {
+	if el := c.byName[project]; el != nil {
+		el.Value.(*accessItem).entry = e
+		c.order.MoveToFront(el)
+		return
+	}
+	c.byName[project] = c.order.PushFront(&accessItem{project, e})
+	for c.order.Len() > c.max {
+		oldest := c.order.Back()
+		c.order.Remove(oldest)
+		delete(c.byName, oldest.Value.(*accessItem).project)
+	}
+}
+
+func (c *accessCache) forget(project string) {
+	if el := c.byName[project]; el != nil {
+		c.order.Remove(el)
+		delete(c.byName, project)
+	}
+}
+
+func (c *accessCache) len() int { return c.order.Len() }
+
 // NewAuthority reads the authority of source.
 func NewAuthority(source Source) *Authority {
-	return &Authority{source: source, ttl: CacheTTL, projects: map[string]*entry[map[string]Role]{}}
+	return &Authority{source: source, ttl: CacheTTL, projects: newAccessCache(projectCacheSize)}
 }
 
 // PlatformAdmins are the groups of global.okdp.access.admins, as the
@@ -186,7 +243,7 @@ func (a *Authority) PlatformAdmins(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("%s: %w", compiler.PlatformFile, err)
 		}
 	}
-	admins, err := compiler.PlatformAdmins(doc)
+	admins, err := compiler.PlatformAdmins(ctx, rules.Standard(), doc)
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +257,15 @@ func (a *Authority) PlatformAdmins(ctx context.Context) ([]string, error) {
 // reads them (compiler.ProjectAccess): okdp-project-<project> an editor
 // when its project.yaml gives no access. A file the compile refuses gives
 // no group a role (its error logged): the platform does not apply it
-// either.
+// either. A name no project can have (compiler.IsName) gives no group a
+// role, checked first: a URL's :name reaches neither the cache nor the
+// log.
 func (a *Authority) ProjectAccess(ctx context.Context, project string) (map[string]Role, error) {
+	if !compiler.IsName(project) {
+		return map[string]Role{}, nil
+	}
 	a.mu.Lock()
-	if e := a.projects[project]; e != nil && time.Since(e.at) < a.ttl {
+	if e := a.projects.get(project); e != nil && time.Since(e.at) < a.ttl {
 		a.mu.Unlock()
 		return e.value, nil
 	}
@@ -212,13 +274,13 @@ func (a *Authority) ProjectAccess(ctx context.Context, project string) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", treeedit.ProjectFilePath(project), err)
 	}
-	access, err := compiler.ProjectAccess(raw, project)
+	access, err := deploy.ProjectAccess(rules.Standard(), raw, project)
 	if err != nil {
-		logrus.WithError(err).WithField("project", project).Warn("The access of the project cannot be read: no group has a role in it but the platform admins")
+		slog.Warn("The access of the project cannot be read: no group has a role in it but the platform admins", "error", err, "project", project)
 		access = map[string]Role{}
 	}
 	a.mu.Lock()
-	a.projects[project] = &entry[map[string]Role]{value: access, at: time.Now()}
+	a.projects.put(project, &entry[map[string]Role]{value: access, at: time.Now()})
 	a.mu.Unlock()
 	return access, nil
 }
@@ -231,7 +293,7 @@ func (a *Authority) Forget(project string) {
 		return
 	}
 	a.mu.Lock()
-	delete(a.projects, project)
+	a.projects.forget(project)
 	a.mu.Unlock()
 }
 
@@ -263,6 +325,16 @@ func (a *Authority) Caller(groups []string) *Caller {
 // Unrestricted is the caller of an API served without authentication
 // (AUTH_DISABLED, local development only): every right.
 func Unrestricted() *Caller { return &Caller{unrestricted: true} }
+
+// Fresh is a caller of the same groups that keeps nothing of c's: what a
+// long-lived request reads its rights with, IsPlatformAdmin read anew
+// from the authority, not as the request first saw it.
+func (c *Caller) Fresh() *Caller {
+	if c == nil || c.unrestricted {
+		return c
+	}
+	return &Caller{authority: c.authority, groups: c.groups}
+}
 
 // Groups are the caller's groups.
 func (c *Caller) Groups() []string {
@@ -386,6 +458,43 @@ func Require(ctx context.Context, perm Permission, project string) error {
 		return Forbidden(perm, project)
 	}
 	return nil
+}
+
+type routeKey struct{}
+
+type route struct {
+	perm    Permission
+	project string
+}
+
+// WithRoute returns ctx carrying the permission of its route and the
+// project it is of (the router's table, middleware.Authorize):
+// RecheckRoute reads them.
+func WithRoute(ctx context.Context, perm Permission, project string) context.Context {
+	return context.WithValue(ctx, routeKey{}, route{perm, project})
+}
+
+// RecheckRoute reads anew whether the caller of ctx still holds the
+// permission of its route: the context to go on with, its caller Fresh, or
+// a *ForbiddenError, or the error of reading the authority. A stream's
+// periodic check that its request is still allowed, the caller's rights
+// read from the authority as it is now, not as at the request's start;
+// nil for a context without a route (no middleware.Authorize).
+func RecheckRoute(ctx context.Context) (context.Context, error) {
+	r, ok := ctx.Value(routeKey{}).(route)
+	if !ok {
+		return ctx, nil
+	}
+	caller := CallerFrom(ctx).Fresh()
+	ctx = WithCaller(ctx, caller)
+	allowed, err := caller.Allows(ctx, r.perm, r.project)
+	if err != nil {
+		return ctx, err
+	}
+	if !allowed {
+		return ctx, Forbidden(r.perm, r.project)
+	}
+	return ctx, nil
 }
 
 type callerKey struct{}

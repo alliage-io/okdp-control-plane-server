@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +52,7 @@ func TestCreateNamespaceRefusesANamespaceThatIsNotAProject(t *testing.T) {
 	repo := NewProjectNamespaceRepository(client)
 
 	created, err := repo.CreateNamespace(context.Background(), &models.Project{Name: "kube-system"})
-	if !apierrors.IsAlreadyExists(err) || created {
+	if !errors.Is(err, apperr.ErrAlreadyExists) || created {
 		t.Fatalf("expected already-exists, got created=%v err=%v", created, err)
 	}
 }

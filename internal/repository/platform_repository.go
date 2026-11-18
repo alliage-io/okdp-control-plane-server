@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/provisioning"
 	"github.com/okdp/okdp-gitops/gitops"
-	"github.com/sirupsen/logrus"
+	"github.com/okdp/okdp-gitops/treeedit"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -24,7 +24,7 @@ type PlatformRepository interface {
 	Invalidate()
 	// GetPlatformServices returns the managed OKDP services of the console
 	// menu (catalogs.yaml categories[].services); their versions are the
-	// catalogs' (PackageSchemaService).
+	// catalogs' (DefaultPackageSchemaService).
 	GetPlatformServices(ctx context.Context) ([]models.PlatformService, error)
 
 	// GetMenuCategories returns the console navigation sections (catalogs.yaml categories).
@@ -122,7 +122,7 @@ func (r *platformRepository) GetPlatformServices(ctx context.Context) ([]models.
 		return nil, err
 	}
 	if len(cats) == 0 {
-		logrus.Warn("No categories found in " + treeedit.CatalogsFile)
+		slog.Warn("No categories found in " + treeedit.CatalogsFile)
 	}
 	// Never nil: an empty catalog answers [] in JSON, not null.
 	services := make([]models.PlatformService, 0)

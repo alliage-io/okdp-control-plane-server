@@ -80,7 +80,7 @@ func routerOver(store gitops.Store, poll time.Duration, verifier auth.Verifier) 
 	projects := handlers.NewProjectHandler(projectService)
 	projects.Sql = sqlBounds
 	authority := authz.NewAuthority(authz.DeploymentsSource(deployments))
-	return SetupRouter(&config.Config{}, verifier, authority, nil, projects, nil, nil, nil, nil, nil, nil, nil, nil)
+	return mustRouter(Deps{Config: &config.Config{}, Verifier: verifier, Authority: authority, Projects: projects})
 }
 
 // inProject turns a route pattern into a path of project demo, each

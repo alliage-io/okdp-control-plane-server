@@ -33,7 +33,7 @@ func gitBackedRouter(t *testing.T) (*gin.Engine, *gitops.MemoryStore) {
 	projects := handlers.NewProjectHandler(service.NewDefaultProjectService(nil, deployments))
 	services := handlers.NewServiceHandler(service.NewDefaultServiceService(service.ServiceDeps{Deployments: deployments}), nil)
 	cfg := &config.Config{AllowedOrigins: "https://console.example"}
-	return SetupRouter(cfg, nil, nil, nil, projects, nil, nil, nil, services, nil, nil, nil, nil), store
+	return mustRouter(Deps{Config: cfg, Projects: projects, Services: services}), store
 }
 
 // DELETE …/services/.. used to resolve to projects/demo and remove the whole
@@ -98,7 +98,48 @@ func TestObjectNamesInThePathAreValidated(t *testing.T) {
 
 func testRouterWithoutAuth() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	return SetupRouter(&config.Config{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return mustRouter(Deps{Config: &config.Config{}})
+}
+
+// mustRouter is SetupRouter, its configuration valid.
+func mustRouter(d Deps) *gin.Engine {
+	r, err := SetupRouter(d)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func TestClientIPTrustsOnlyTheConfiguredProxies(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := map[string]struct {
+		trusted []string
+		want    string
+	}{
+		"no proxy trusted: the connection's address, the header forged": {nil, "198.51.100.7"},
+		"the peer a trusted proxy: the header believed":                 {[]string{"198.51.100.0/24"}, "203.0.113.9"},
+		"another network trusted: the header ignored":                   {[]string{"10.0.0.0/8"}, "198.51.100.7"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := mustRouter(Deps{Config: &config.Config{TrustedProxies: tc.trusted}})
+			r.GET("/ip", func(c *gin.Context) { c.String(http.StatusOK, c.ClientIP()) })
+			req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+			req.RemoteAddr = "198.51.100.7:1234"
+			req.Header.Set("X-Forwarded-For", "203.0.113.9")
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Body.String() != tc.want {
+				t.Errorf("ClientIP %q, want %q", w.Body.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestAnInvalidTrustedProxyIsRefused(t *testing.T) {
+	if _, err := SetupRouter(Deps{Config: &config.Config{TrustedProxies: []string{"not-an-address"}}}); err == nil {
+		t.Fatal("no error for an invalid TRUSTED_PROXIES entry")
+	}
 }
 
 func TestResponsesCarryTheSecurityHeaders(t *testing.T) {

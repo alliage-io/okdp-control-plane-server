@@ -5,8 +5,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 

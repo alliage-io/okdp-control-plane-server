@@ -55,6 +55,8 @@ func TestSqlRefusalsCarryTheirCode(t *testing.T) {
 		{fmt.Errorf("claim 'x' %w", service.ErrSqlUnbound), http.StatusBadRequest, ErrorCodeSqlClaimUnbound},
 		{fmt.Errorf("dial: %w", netguard.ErrRefused), http.StatusBadRequest, ErrorCodeSqlAddressRefused},
 		{service.ErrSqlBusy, http.StatusTooManyRequests, ErrorCodeSqlBusy},
+		{service.ErrSqlNoTokenExchange, http.StatusBadRequest, ErrorCodeSqlNoTokenExchange},
+		{service.ErrSqlTokenExchange, http.StatusBadGateway, ErrorCodeSqlTokenExchange},
 		{service.ErrSqlWriteRefused, http.StatusForbidden, ErrorCodeSqlWriteRefused},
 		{fmt.Errorf("engine unreachable: %w", service.ErrSqlTLS), http.StatusBadGateway, ErrorCodeSqlTLS},
 		{fmt.Errorf("engine unreachable: %w", service.ErrSqlAuthMethod), http.StatusBadGateway, ErrorCodeSqlAuthMethod},

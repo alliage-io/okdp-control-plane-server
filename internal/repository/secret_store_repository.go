@@ -3,11 +3,11 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
-	"github.com/sirupsen/logrus"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,7 +38,8 @@ type SecretStoreRepository interface {
 	DeleteSecret(ctx context.Context, namespace, name string) error
 
 	// RemoveDefaultLabel removes the default-store label from all SecretStores in the namespace
-	RemoveDefaultLabel(ctx context.Context, namespace string) error
+	// but the one named except (none when "")
+	RemoveDefaultLabel(ctx context.Context, namespace, except string) error
 }
 
 type k8sSecretStoreRepository struct {
@@ -69,13 +70,13 @@ func (r *k8sSecretStoreRepository) Create(ctx context.Context, namespace string,
 	_, err = r.client.Resource(r.gvr).Namespace(namespace).Create(
 		ctx, &unstructured.Unstructured{Object: unstructuredMap}, metav1.CreateOptions{},
 	)
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sSecretStoreRepository) Get(ctx context.Context, namespace, name string) (*crd.ESOSecretStore, error) {
 	u, err := r.client.Resource(r.gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fromK8s(err)
 	}
 
 	store, err := toSecretStore(u.Object)
@@ -88,14 +89,14 @@ func (r *k8sSecretStoreRepository) Get(ctx context.Context, namespace, name stri
 func (r *k8sSecretStoreRepository) List(ctx context.Context, namespace string) ([]crd.ESOSecretStore, error) {
 	list, err := r.client.Resource(r.gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fromK8s(err)
 	}
 
 	var stores []crd.ESOSecretStore
 	for _, item := range list.Items {
 		store, err := toSecretStore(item.Object)
 		if err != nil {
-			logrus.WithError(err).Warn("Failed to convert SecretStore from unstructured")
+			slog.Warn("Failed to convert SecretStore from unstructured", "error", err)
 			continue
 		}
 		stores = append(stores, *store)
@@ -118,7 +119,7 @@ func toSecretStore(obj map[string]interface{}) (*crd.ESOSecretStore, error) {
 func (r *k8sSecretStoreRepository) Update(ctx context.Context, namespace string, store *crd.ESOSecretStore) error {
 	existing, err := r.client.Resource(r.gvr).Namespace(namespace).Get(ctx, store.Name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fromK8s(err)
 	}
 
 	store.ResourceVersion = existing.GetResourceVersion()
@@ -131,11 +132,11 @@ func (r *k8sSecretStoreRepository) Update(ctx context.Context, namespace string,
 	_, err = r.client.Resource(r.gvr).Namespace(namespace).Update(
 		ctx, &unstructured.Unstructured{Object: unstructuredMap}, metav1.UpdateOptions{},
 	)
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sSecretStoreRepository) Delete(ctx context.Context, namespace, name string) error {
-	return r.client.Resource(r.gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	return fromK8s(r.client.Resource(r.gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}))
 }
 
 // --- Kubernetes Secrets for credentials ---
@@ -170,22 +171,22 @@ func (r *k8sSecretStoreRepository) CreateOrUpdateSecret(ctx context.Context, nam
 	existing, getErr := r.client.Resource(secretGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(getErr) {
 		_, err = r.client.Resource(secretGVR).Namespace(namespace).Create(ctx, u, metav1.CreateOptions{})
-		return err
+		return fromK8s(err)
 	}
 	if getErr != nil {
-		return getErr
+		return fromK8s(getErr)
 	}
 	if existing.GetLabels()[crd.LabelManagedBy] != crd.ManagedByValue {
 		return fmt.Errorf("%w: secret %q in namespace %q", ErrForeignSecret, name, namespace)
 	}
 	_, err = r.client.Resource(secretGVR).Namespace(namespace).Update(ctx, u, metav1.UpdateOptions{})
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sSecretStoreRepository) GetSecretData(ctx context.Context, namespace, name string) (map[string][]byte, error) {
 	u, err := r.client.Resource(secretGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fromK8s(err)
 	}
 
 	var secret corev1.Secret
@@ -200,7 +201,7 @@ func (r *k8sSecretStoreRepository) GetSecretData(ctx context.Context, namespace,
 func (r *k8sSecretStoreRepository) DeleteSecret(ctx context.Context, namespace, name string) error {
 	existing, err := r.client.Resource(secretGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fromK8s(err)
 	}
 	if existing.GetLabels()[crd.LabelManagedBy] != crd.ManagedByValue {
 		return fmt.Errorf("%w: secret %q in namespace %q", ErrForeignSecret, name, namespace)
@@ -208,28 +209,31 @@ func (r *k8sSecretStoreRepository) DeleteSecret(ctx context.Context, namespace, 
 	// Preconditioned on the object just inspected: a Secret replaced in
 	// between is not deleted on the strength of the old one's label.
 	uid := existing.GetUID()
-	return r.client.Resource(secretGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{
+	return fromK8s(r.client.Resource(secretGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &uid},
-	})
+	}))
 }
 
 // RemoveDefaultLabel lists all SecretStores with the default label and removes it.
-func (r *k8sSecretStoreRepository) RemoveDefaultLabel(ctx context.Context, namespace string) error {
+func (r *k8sSecretStoreRepository) RemoveDefaultLabel(ctx context.Context, namespace, except string) error {
 	list, err := r.client.Resource(r.gvr).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: crd.LabelDefaultStore + "=true",
 	})
 	if err != nil {
-		return err
+		return fromK8s(err)
 	}
 
 	for _, item := range list.Items {
+		if item.GetName() == except {
+			continue
+		}
 		labels := item.GetLabels()
 		delete(labels, crd.LabelDefaultStore)
 		item.SetLabels(labels)
 
 		_, err := r.client.Resource(r.gvr).Namespace(namespace).Update(ctx, &item, metav1.UpdateOptions{})
 		if err != nil {
-			logrus.WithError(err).Warnf("Failed to remove default label from SecretStore %s", item.GetName())
+			slog.Warn(fmt.Sprintf("Failed to remove default label from SecretStore %s", item.GetName()), "error", err)
 		}
 	}
 	return nil

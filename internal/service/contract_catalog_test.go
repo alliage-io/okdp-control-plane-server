@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	compiler "github.com/okdp/okdp-compiler"
+	"github.com/okdp/okdp-gitops/rules"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +21,7 @@ func checkValues(catalog ContractCatalog, contract string, values map[string]any
 	if err := missingCredentials(descriptor, values); err != nil {
 		return err
 	}
-	return compiler.CheckConnection(catalog.Contracts(), "demo", compiler.Connection{Name: "c", Contract: contract, Values: withoutSecrets(descriptor, values), SecretRef: "c-credentials"}, nil)
+	return compiler.CheckConnection(rules.Standard(), catalog.Contracts(), "demo", compiler.Connection{Name: "c", Contract: contract, Values: withoutSecrets(descriptor, values), SecretRef: "c-credentials"}, nil)
 }
 
 func newTestCatalog(t *testing.T) ContractCatalog {

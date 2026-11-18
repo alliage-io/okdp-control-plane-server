@@ -1,5 +1,9 @@
 replicaCount: 1
 
+# Above the server's own bound (45s) on the requests in flight at a stop: a
+# commit and its Secret are written to the end, the streams end at once.
+terminationGracePeriodSeconds: 60
+
 image:
   repository: quay.io/okdp/images/okdp-control-plane-server
   # Defaults to the chart appVersion.
@@ -11,6 +15,10 @@ configuration:
   # Single origin, set verbatim in the Access-Control-Allow-Origin header.
   allowedOrigins: https://okdp-ui.example.com
   logLevel: info
+  # Peers (addresses or CIDRs) whose X-Forwarded-For is believed for the client
+  # address of the audit log: the ingress controller's pods. None by default,
+  # the client is then the address of the connection.
+  trustedProxies: []
   # Comma-separated registry hosts to reach over plain HTTP (dev sandboxes
   # with a local registry). Leave empty in any real deployment.
   insecureOciRegistries: ""
@@ -132,6 +140,13 @@ sqlEditor:
   maxResultBytes: 16777216
   # Statements one user runs at once; past it, 429.
   maxConcurrentPerUser: 2
+  # The audience of the token a statement on Trino runs with
+  # (SQL_TOKEN_EXCHANGE_AUDIENCE): the caller's token is exchanged at the
+  # issuer (RFC 8693, by the client of keycloak.credentialsSecret), and
+  # forwarded only as a token of this audience. Empty: statements on Trino
+  # answer 400, code sql-no-token-exchange. README, "SQL editor": what the
+  # realm must allow.
+  tokenExchangeAudience: ""
 
 # The SecretStores the console creates in the projects' namespaces. One of
 # kubernetes auth authenticates as the ServiceAccount of the platform's

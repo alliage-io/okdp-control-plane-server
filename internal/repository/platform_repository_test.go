@@ -8,8 +8,8 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // newContextWith builds a platform repository whose global.okdp is the given

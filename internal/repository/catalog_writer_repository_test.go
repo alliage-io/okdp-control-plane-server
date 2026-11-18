@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 func TestPlatformServiceToMap(t *testing.T) {

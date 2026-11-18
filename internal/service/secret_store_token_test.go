@@ -103,9 +103,11 @@ func TestValidateVaultTokenStillRejectsForbidden(t *testing.T) {
 }
 
 // A store whose <name>-credentials is someone else's Secret is a bad request,
-// and nothing is created.
+// the store created for it taken back.
 func TestCreateSecretStoreRefusesAForeignCredentialsSecret(t *testing.T) {
 	repo := &mocks.SecretStoreRepository{}
+	repo.On("Create", mock.Anything, "demo", mock.Anything).Return(nil)
+	repo.On("Delete", mock.Anything, "demo", "p-hive").Return(nil)
 	repo.On("CreateOrUpdateSecret", mock.Anything, "demo", "p-hive-credentials", mock.Anything).
 		Return(fmt.Errorf("%w: secret %q", repository.ErrForeignSecret, "p-hive-credentials"))
 	req := tokenRequest("https://vault.example", "s.token")
@@ -116,7 +118,7 @@ func TestCreateSecretStoreRefusesAForeignCredentialsSecret(t *testing.T) {
 	if !IsValidationError(err) {
 		t.Fatalf("expected a validation error, got %v", err)
 	}
-	repo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+	repo.AssertCalled(t, "Delete", mock.Anything, "demo", "p-hive")
 }
 
 // A connection test sends the caller's token to an allowed server only,

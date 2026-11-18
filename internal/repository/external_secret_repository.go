@@ -3,9 +3,9 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
-	"github.com/sirupsen/logrus"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,13 +56,13 @@ func (r *k8sExternalSecretRepository) Create(ctx context.Context, namespace stri
 	_, err = r.client.Resource(r.gvr).Namespace(namespace).Create(
 		ctx, &unstructured.Unstructured{Object: unstructuredMap}, metav1.CreateOptions{},
 	)
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sExternalSecretRepository) Get(ctx context.Context, namespace, name string) (*crd.ESOExternalSecret, error) {
 	u, err := r.client.Resource(r.gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fromK8s(err)
 	}
 
 	var es crd.ESOExternalSecret
@@ -75,14 +75,14 @@ func (r *k8sExternalSecretRepository) Get(ctx context.Context, namespace, name s
 func (r *k8sExternalSecretRepository) List(ctx context.Context, namespace string) ([]crd.ESOExternalSecret, error) {
 	list, err := r.client.Resource(r.gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fromK8s(err)
 	}
 
 	var items []crd.ESOExternalSecret
 	for _, item := range list.Items {
 		var es crd.ESOExternalSecret
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &es); err != nil {
-			logrus.WithError(err).Warn("Failed to convert ExternalSecret from unstructured")
+			slog.Warn("Failed to convert ExternalSecret from unstructured", "error", err)
 			continue
 		}
 		items = append(items, es)
@@ -93,7 +93,7 @@ func (r *k8sExternalSecretRepository) List(ctx context.Context, namespace string
 func (r *k8sExternalSecretRepository) Update(ctx context.Context, namespace string, es *crd.ESOExternalSecret) error {
 	existing, err := r.client.Resource(r.gvr).Namespace(namespace).Get(ctx, es.Name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return fromK8s(err)
 	}
 
 	es.ResourceVersion = existing.GetResourceVersion()
@@ -106,9 +106,9 @@ func (r *k8sExternalSecretRepository) Update(ctx context.Context, namespace stri
 	_, err = r.client.Resource(r.gvr).Namespace(namespace).Update(
 		ctx, &unstructured.Unstructured{Object: unstructuredMap}, metav1.UpdateOptions{},
 	)
-	return err
+	return fromK8s(err)
 }
 
 func (r *k8sExternalSecretRepository) Delete(ctx context.Context, namespace, name string) error {
-	return r.client.Resource(r.gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	return fromK8s(r.client.Resource(r.gvr).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}))
 }

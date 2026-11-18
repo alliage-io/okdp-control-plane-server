@@ -2,13 +2,14 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // SecretStoreHandler handles secret-store-related requests
@@ -81,7 +82,7 @@ func (h *SecretStoreHandler) CreateSecretStore(c *gin.Context) {
 
 	store, err := h.service.CreateSecretStore(c.Request.Context(), namespace, req)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error: fmt.Sprintf("Secret store '%s' already exists in project '%s'", req.Name, namespace),
 			})
@@ -129,7 +130,7 @@ func (h *SecretStoreHandler) UpdateSecretStore(c *gin.Context) {
 
 	store, err := h.service.UpdateSecretStore(c.Request.Context(), namespace, storeName, req)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Secret store '%s' not found in project '%s'", storeName, namespace),
 			})
@@ -166,7 +167,7 @@ func (h *SecretStoreHandler) DeleteSecretStore(c *gin.Context) {
 	storeName := c.Param("storeName")
 
 	if err := h.service.DeleteSecretStore(c.Request.Context(), namespace, storeName); err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Secret store '%s' not found in project '%s'", storeName, namespace),
 			})
@@ -231,7 +232,7 @@ func (h *SecretStoreHandler) GetStatus(c *gin.Context) {
 
 	status, err := h.service.GetSecretStoreStatus(c.Request.Context(), namespace, storeName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Secret store '%s' not found in project '%s'", storeName, namespace),
 			})

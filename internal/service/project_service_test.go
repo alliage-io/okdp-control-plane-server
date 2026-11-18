@@ -9,10 +9,10 @@ import (
 
 	"github.com/okdp/okdp-gitops/gitops"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service/mocks"
 )
@@ -49,7 +49,7 @@ func TestProjectsWrittenInGitAreListedAndResolved(t *testing.T) {
 
 	for _, name := range []string{"no-file", "kube-system", "Bad_Name"} {
 		_, err = svc.GetProject(ctx, name)
-		assert.True(t, apierrors.IsNotFound(err), "%s: got %v", name, err)
+		assert.True(t, errors.Is(err, apperr.ErrNotFound), "%s: got %v", name, err)
 	}
 }
 
@@ -81,14 +81,14 @@ func TestCreateProjectRefusesAProjectAlreadyInGit(t *testing.T) {
 
 	// The engine created the namespace of the hand-written project: it has
 	// no label, so the namespace answers first.
-	namespaces.On("CreateNamespace", ctx, project).Return(false, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "namespaces"}, "demo")).Once()
+	namespaces.On("CreateNamespace", ctx, project).Return(false, apperr.AlreadyExists("namespaces", "demo")).Once()
 	err := svc.CreateProject(ctx, project)
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 
 	// A namespace the console left behind is reused: Git answers.
 	namespaces.On("CreateNamespace", ctx, project).Return(false, nil).Once()
 	err = svc.CreateProject(ctx, project)
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 
 	assert.Equal(t, handWritten, store.Files()["projects/demo/project.yaml"], "untouched")
 	namespaces.AssertExpectations(t)
@@ -100,16 +100,33 @@ func TestCreateProjectRemovesTheNamespaceWhenGitRefuses(t *testing.T) {
 	project := &models.Project{Name: "demo"}
 
 	namespaces.On("CreateNamespace", ctx, project).Return(true, nil)
-	namespaces.On("DeleteNamespace", ctx, "demo").Return(true, nil)
+	namespaces.On("DeleteNamespace", mock.Anything, "demo").Return(true, nil)
 	err := svc.CreateProject(ctx, project)
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
+	namespaces.AssertExpectations(t)
+}
+
+// The namespace of a project Git refused is removed even when the client
+// is gone by then (SRV-25): the rollback's context is not the request's.
+func TestCreateProjectRemovesTheNamespaceWhenTheClientIsGone(t *testing.T) {
+	svc, namespaces, _ := newProjectServiceUnderTest(map[string]string{"projects/demo/project.yaml": handWritten})
+	ctx, cancel := context.WithCancel(context.Background())
+	project := &models.Project{Name: "demo"}
+
+	namespaces.On("CreateNamespace", mock.Anything, project).Run(func(mock.Arguments) { cancel() }).Return(true, nil)
+	namespaces.On("DeleteNamespace", mock.MatchedBy(func(c context.Context) bool {
+		_, hasDeadline := c.Deadline()
+		return c.Err() == nil && hasDeadline
+	}), "demo").Return(true, nil)
+	err := svc.CreateProject(ctx, project)
+	require.Error(t, err)
 	namespaces.AssertExpectations(t)
 }
 
 func TestCreateProjectRefusesAnInvalidName(t *testing.T) {
 	svc, namespaces, store := newProjectServiceUnderTest(nil)
 	err := svc.CreateProject(context.Background(), &models.Project{Name: "Not_A_Label"})
-	assert.True(t, apierrors.IsBadRequest(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrInvalid), "got %v", err)
 	assert.Empty(t, store.Messages)
 	namespaces.AssertNotCalled(t, "CreateNamespace")
 }
@@ -127,7 +144,7 @@ func TestCreateProjectRefusesAReservedName(t *testing.T) {
 		"openbao":  `project "openbao": the namespace is reserved by the platform (global.okdp.policy.reserved): no project has it`,
 	} {
 		err := svc.CreateProject(aliceContext(), &models.Project{Name: name})
-		assert.True(t, apierrors.IsBadRequest(err), "%s: got %v", name, err)
+		assert.True(t, errors.Is(err, apperr.ErrInvalid), "%s: got %v", name, err)
 		assert.EqualError(t, err, want)
 	}
 	assert.Empty(t, store.Messages)
@@ -154,7 +171,7 @@ func TestUpdateProjectWritesTheDescriptionOfAHandWrittenProject(t *testing.T) {
 	assert.Equal(t, "# declared by hand\ndescription: Edited\nglobal: {}\n", store.Files()["projects/demo/project.yaml"])
 
 	_, err = svc.UpdateProject(ctx, &models.Project{Name: "missing", Description: "x"})
-	assert.True(t, apierrors.IsNotFound(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "got %v", err)
 }
 
 // Deleting removes projects/<p>/ from Git, so the engine uninstalls every
@@ -173,7 +190,7 @@ func TestDeleteProjectRemovesItFromGitThenTheNamespace(t *testing.T) {
 	}
 
 	err := svc.DeleteProject(ctx, "demo")
-	assert.True(t, apierrors.IsNotFound(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "got %v", err)
 	namespaces.AssertExpectations(t)
 }
 
@@ -262,7 +279,7 @@ func TestWatchProjectsStreamsAChangeOfTheAccessAlone(t *testing.T) {
 
 func TestProjectErrorMapsAnExistingRepositoryToAConflict(t *testing.T) {
 	err := projectError(fmt.Errorf("owner/demo: %w", gitops.ErrRepositoryNotEmpty), "demo")
-	assert.True(t, apierrors.IsConflict(err), "got %v", err)
-	assert.False(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrConflict), "got %v", err)
+	assert.False(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 	assert.Contains(t, err.Error(), "not empty")
 }

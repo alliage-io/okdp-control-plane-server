@@ -10,10 +10,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/okdp/okdp-control-plane-server/internal/api/middleware"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
 )
 
@@ -42,15 +41,15 @@ func TestAnInternalErrorKeepsItsCauseInTheLog(t *testing.T) {
 }
 
 func TestDomainErrorsKeepTheirStatus(t *testing.T) {
-	gr := schema.GroupResource{Group: "okdp.io", Resource: "connections"}
+	gr := "connections.okdp.io"
 	for _, tc := range []struct {
 		err    error
 		status int
 	}{
-		{apierrors.NewNotFound(gr, "w"), http.StatusNotFound},
-		{apierrors.NewAlreadyExists(gr, "w"), http.StatusConflict},
+		{apperr.NotFound(gr, "w"), http.StatusNotFound},
+		{apperr.AlreadyExists(gr, "w"), http.StatusConflict},
 		{fmt.Errorf("x: %w", service.ErrConnectionsUnavailable), http.StatusNotImplemented},
-		{apierrors.NewBadRequest("spec.image: required"), http.StatusBadRequest},
+		{apperr.Invalid("spec.image: required"), http.StatusBadRequest},
 	} {
 		if status, body, _ := answer(t, tc.err); status != tc.status || body["error"] != tc.err.Error() {
 			t.Errorf("%v: got %d %v, want %d", tc.err, status, body, tc.status)

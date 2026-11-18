@@ -5,8 +5,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // LabelAppInstance is the label every workload of an instance carries:

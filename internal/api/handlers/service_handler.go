@@ -1,16 +1,16 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // Error codes carried next to "error": in 409 answers of POST .../services,
@@ -38,12 +38,19 @@ func validationBody(err error) models.ErrorResponse {
 // ServiceHandler handles platform service and catalog requests
 type ServiceHandler struct {
 	service        service.ServiceService
-	schemaService  service.PackageSchemaService
+	schemaService  packageSchemas
 	renderedValues service.RenderedValuesService
 }
 
+// packageSchemas is what the routes read of a package of the catalogs.
+type packageSchemas interface {
+	GetParameterSchema(ctx context.Context, serviceName, tag string) (map[string]any, error)
+	GetPackageInputs(ctx context.Context, serviceName, tag string) ([]models.PackageInput, error)
+	GetServiceVersions(ctx context.Context, serviceName string) (*service.ServiceVersionsResponse, error)
+}
+
 // NewServiceHandler creates a new ServiceHandler
-func NewServiceHandler(svc service.ServiceService, schemaSvc service.PackageSchemaService) *ServiceHandler {
+func NewServiceHandler(svc service.ServiceService, schemaSvc packageSchemas) *ServiceHandler {
 	return &ServiceHandler{service: svc, schemaService: schemaSvc}
 }
 
@@ -243,7 +250,7 @@ func (h *ServiceHandler) DeployService(c *gin.Context) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error(), Code: ErrorCodeReleaseNameTaken})
 			return
 		}
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			instanceName := req.InstanceName
 			if instanceName == "" {
 				instanceName = req.Service
@@ -284,7 +291,7 @@ func (h *ServiceHandler) GetService(c *gin.Context) {
 
 	instance, err := h.service.GetService(c.Request.Context(), project, serviceName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
@@ -315,7 +322,7 @@ func (h *ServiceHandler) DeleteService(c *gin.Context) {
 	serviceName := c.Param("serviceName")
 
 	if err := h.service.DeleteService(c.Request.Context(), project, serviceName); err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
@@ -344,43 +351,15 @@ func (h *ServiceHandler) DeleteService(c *gin.Context) {
 // @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/services/stream [get]
 func (h *ServiceHandler) StreamServices(c *gin.Context) {
-	project := c.Param("name")
-
-	w := c.Writer
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Transfer-Encoding", "chunked")
-
-	events, err := h.service.WatchServices(c.Request.Context(), project)
+	events, err := h.service.WatchServices(c.Request.Context(), c.Param("name"))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 
-	keepalive := time.NewTicker(30 * time.Second)
-	defer keepalive.Stop()
-
-	c.Writer.Flush()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-keepalive.C:
-			// A comment line keeps proxies from cutting an idle stream.
-			if _, err := c.Writer.WriteString(": keepalive\n\n"); err != nil {
-				return
-			}
-			c.Writer.Flush()
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			c.SSEvent("message", gin.H{"type": event.Type, "object": event.Object})
-			c.Writer.Flush()
-		}
-	}
+	serveStream(c, events, func(s *sseStream, event service.ServiceEvent) error {
+		return s.Event("message", gin.H{"type": event.Type, "object": event.Object})
+	})
 }
 
 // --- Package Schema ---
@@ -402,7 +381,7 @@ func (h *ServiceHandler) GetServiceVersions(c *gin.Context) {
 
 	resp, err := h.schemaService.GetServiceVersions(c.Request.Context(), serviceName)
 	if err != nil {
-		logrus.WithError(err).WithField("service", serviceName).Error("Failed to get service versions")
+		slog.Error("Failed to get service versions", "error", err, "service", serviceName)
 		writeError(c, err)
 		return
 	}
@@ -427,7 +406,7 @@ func (h *ServiceHandler) GetServiceInputs(c *gin.Context) {
 
 	inputs, err := h.schemaService.GetPackageInputs(c.Request.Context(), serviceName, tag)
 	if err != nil {
-		logrus.WithError(err).WithField("service", serviceName).Error("Failed to get service inputs")
+		slog.Error("Failed to get service inputs", "error", err, "service", serviceName)
 		writeError(c, err)
 		return
 	}
@@ -459,7 +438,7 @@ func (h *ServiceHandler) GetServiceSchema(c *gin.Context) {
 
 	schema, err := h.schemaService.GetParameterSchema(c.Request.Context(), serviceName, tag)
 	if err != nil {
-		logrus.WithError(err).WithField("service", serviceName).Error("Failed to get service schema")
+		slog.Error("Failed to get service schema", "error", err, "service", serviceName)
 		writeError(c, err)
 		return
 	}
@@ -516,7 +495,7 @@ func (h *ServiceHandler) UpdateServiceParameters(c *gin.Context) {
 
 	instance, err := h.service.UpdateServiceParameters(c.Request.Context(), project, serviceName, req)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
@@ -555,7 +534,7 @@ func (h *ServiceHandler) GetRenderedValues(c *gin.Context) {
 	}
 	values, err := h.renderedValues.GetRenderedValues(c.Request.Context(), project, serviceName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Service '%s' not found in project '%s'", serviceName, project),
 			})
@@ -672,7 +651,7 @@ func (h *ServiceHandler) GetPodLogs(c *gin.Context) {
 
 	stream, err := h.service.GetPodLogs(c.Request.Context(), project, serviceName, podName, container, tailLines, follow)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("Pod '%s' of service '%s' not found in project '%s'", podName, serviceName, project),
 			})
@@ -683,66 +662,5 @@ func (h *ServiceHandler) GetPodLogs(c *gin.Context) {
 	}
 	defer stream.Close()
 
-	if follow {
-		w := c.Writer
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Transfer-Encoding", "chunked")
-		w.Flush()
-
-		lines := make(chan string)
-		scanErr := make(chan error, 1)
-		// Captured here: gin returns the *gin.Context to its pool as soon as
-		// the handler returns and overwrites Request, so reading it from the
-		// goroutine races and would watch another request's cancellation.
-		streamCtx := c.Request.Context()
-		go func() {
-			scanner := newLogStreamScanner(stream)
-			for scanner.Scan() {
-				select {
-				case lines <- scanner.Text():
-				case <-streamCtx.Done():
-					close(lines)
-					return
-				}
-			}
-			scanErr <- scanner.Err()
-			close(lines)
-		}()
-
-		keepalive := time.NewTicker(30 * time.Second)
-		defer keepalive.Stop()
-
-		for {
-			select {
-			case <-c.Request.Context().Done():
-				return
-			case <-keepalive.C:
-				// A comment line keeps proxies from cutting an idle stream.
-				if _, err := w.WriteString(": keepalive\n\n"); err != nil {
-					return
-				}
-				w.Flush()
-			case line, ok := <-lines:
-				if !ok {
-					select {
-					case err := <-scanErr:
-						if err != nil {
-							logrus.WithError(err).Warn("Log stream ended on a scanner error")
-							c.SSEvent("error", logStreamErrorMessage(err))
-							w.Flush()
-						}
-					default:
-					}
-					return
-				}
-				c.SSEvent("message", line)
-				w.Flush()
-			}
-		}
-	} else {
-		c.Header("Content-Type", "text/plain; charset=utf-8")
-		c.DataFromReader(http.StatusOK, -1, "text/plain; charset=utf-8", stream, nil)
-	}
+	writeLogs(c, stream, follow)
 }

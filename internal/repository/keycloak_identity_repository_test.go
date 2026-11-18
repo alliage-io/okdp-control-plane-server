@@ -4,16 +4,16 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/config"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // newFakeKeycloak starts an httptest server answering the token endpoint
@@ -115,7 +115,7 @@ func TestKeycloakGetUserNotFound(t *testing.T) {
 	_, err := repo.GetUser(context.Background(), "ghost")
 
 	require.Error(t, err)
-	assert.True(t, apierrors.IsNotFound(err), "expected a NotFound error, got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "expected a NotFound error, got %v", err)
 }
 
 func TestKeycloakCreateUserSetsPassword(t *testing.T) {

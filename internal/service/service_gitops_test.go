@@ -2,9 +2,9 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,18 +15,14 @@ import (
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-gitops/catalog"
 	"github.com/okdp/okdp-gitops/gitops"
+	"github.com/okdp/okdp-gitops/treeedit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/buildinfo"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -56,7 +52,7 @@ func (stubPlatform) Invalidate() {}
 
 // stubSchema answers the parameter schema of every chart.
 type stubSchema struct {
-	PackageSchemaService
+	PackageVersions
 	schema map[string]any
 }
 
@@ -71,7 +67,7 @@ func (stubSchema) ListPackageTags(context.Context, string, string) ([]string, er
 // stubEngine reports fixed statuses.
 type stubEngine struct {
 	statuses map[string]repository.EngineStatus
-	events   chan watch.Event
+	events   chan repository.EngineChange
 }
 
 func (stubEngine) Name() string { return "flux" }
@@ -81,15 +77,11 @@ func (e stubEngine) List(context.Context, string) (map[string]repository.EngineS
 func (e stubEngine) Get(_ context.Context, _, release string) (repository.EngineStatus, error) {
 	return e.statuses[release], nil
 }
-func (e stubEngine) Watch(context.Context) (watch.Interface, error) {
+func (e stubEngine) Watch(context.Context) (<-chan repository.EngineChange, error) {
 	if e.events == nil {
 		return nil, errors.New("no watch")
 	}
-	return watch.NewProxyWatcher(e.events), nil
-}
-func (stubEngine) ReleaseOf(obj *unstructured.Unstructured) (string, string) {
-	project, _, _ := unstructured.NestedString(obj.Object, "spec", "targetNamespace")
-	return project, obj.GetName()
+	return e.events, nil
 }
 
 func trinoSchema() map[string]any {
@@ -121,11 +113,7 @@ func newGitServiceUnderTest(t *testing.T, engine repository.EngineAdapter, descr
 		SchemaService: stubSchema{schema: trinoSchema()},
 		Engine:        engine,
 		Descriptors:   descriptors,
-		K8sClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-			{Version: "v1", Resource: "pods"}:                   "PodList",
-			{Version: "v1", Resource: "persistentvolumeclaims"}: "PersistentVolumeClaimList",
-			{Version: "v1", Resource: "events"}:                 "EventList",
-		}),
+		Workloads:     repository.NewWorkloads(k8sfake.NewClientset(), nil),
 	})
 	return svc, store
 }
@@ -160,7 +148,7 @@ func TestDeployCommitsTheInstanceFiles(t *testing.T) {
 	assert.NotEmpty(t, instance.Revision)
 
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql"})
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 }
 
 // assertNoOutput fails for each file of the output in files (under
@@ -274,7 +262,7 @@ func TestUpdateMergesIntoValuesAndMovesTheVersion(t *testing.T) {
 	assert.NotEmpty(t, instance.Revision)
 
 	_, err = svc.UpdateServiceParameters(aliceContext(), "demo", "nope", models.ServiceUpdateRequest{})
-	assert.True(t, apierrors.IsNotFound(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "got %v", err)
 }
 
 type stubDescriptors struct {
@@ -348,11 +336,11 @@ func TestDeleteRemovesTheInstanceDirectory(t *testing.T) {
 	}
 	assert.Equal(t, "okdp: delete demo/trino by alice"+coAuthor, store.Messages[len(store.Messages)-1])
 	assert.Contains(t, store.Files(), compiled, "the output is the CI's to remove")
-	assert.True(t, apierrors.IsNotFound(svc.DeleteService(aliceContext(), "demo", "trino")))
+	assert.True(t, errors.Is(svc.DeleteService(aliceContext(), "demo", "trino"), apperr.ErrNotFound))
 }
 
 func TestWatchStreamsTheConsoleCommitsAndEngineChanges(t *testing.T) {
-	events := make(chan watch.Event, 4)
+	events := make(chan repository.EngineChange, 4)
 	engine := stubEngine{statuses: map[string]repository.EngineStatus{}, events: events}
 	svc, _ := newGitServiceUnderTest(t, engine, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,9 +356,7 @@ func TestWatchStreamsTheConsoleCommitsAndEngineChanges(t *testing.T) {
 	assert.Equal(t, "Pending", first.Object.Status)
 
 	engine.statuses["demo-trino"] = repository.EngineStatus{Found: true, Phase: repository.PhaseInstalling}
-	hr := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{"targetNamespace": "demo"}}}
-	hr.SetName("demo-trino")
-	events <- watch.Event{Type: watch.Modified, Object: hr}
+	events <- repository.EngineChange{Project: "demo", Release: "demo-trino", Type: "MODIFIED"}
 	second := next(t, stream)
 	assert.Equal(t, "MODIFIED", second.Type)
 	assert.Equal(t, "Installing", second.Object.Status)
@@ -515,11 +501,11 @@ func TestReleaseNameCollisionIsNotADuplicateInstance(t *testing.T) {
 
 	_, err = svc.DeployService(aliceContext(), "demo-sql", models.ServiceRequest{Service: "trino", InstanceName: "x"})
 	require.True(t, IsReleaseNameTaken(err), "got %v", err)
-	assert.False(t, apierrors.IsAlreadyExists(err))
+	assert.False(t, errors.Is(err, apperr.ErrAlreadyExists))
 	assert.Equal(t, "release name 'demo-sql-x' is already used by instance 'sql-x' of project 'demo'", err.Error())
 
 	_, err = svc.DeployService(aliceContext(), "demo", models.ServiceRequest{Service: "trino", InstanceName: "sql-x"})
-	assert.True(t, apierrors.IsAlreadyExists(err), "got %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrAlreadyExists), "got %v", err)
 	assert.False(t, IsReleaseNameTaken(err))
 }
 
@@ -571,11 +557,7 @@ func TestDeletingAnInstanceKeepsTheKeycloakClients(t *testing.T) {
 		PlatformRepo:  identityPlatform{keycloak: keycloak.URL},
 		SchemaService: stubSchema{schema: trinoSchema()},
 		Engine:        stubEngine{},
-		K8sClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
-			{Version: "v1", Resource: "pods"}:                   "PodList",
-			{Version: "v1", Resource: "persistentvolumeclaims"}: "PersistentVolumeClaimList",
-			{Version: "v1", Resource: "events"}:                 "EventList",
-		}),
+		Workloads:     repository.NewWorkloads(k8sfake.NewClientset(), nil),
 	})
 	_, err := svc.DeployService(aliceContext(), "okdp", models.ServiceRequest{Service: "trino", InstanceName: "control-plane"})
 	require.NoError(t, err)

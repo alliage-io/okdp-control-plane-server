@@ -38,6 +38,10 @@ type Identity struct {
 	// mapper's "Full group path" off), those of platform.yaml
 	// global.okdp.access.admins and of each project.yaml access.
 	Groups []string
+	// ExpiresAt is when the token stops being valid (its exp); the zero
+	// time when none is known. A stream of the token ends then
+	// (handlers.streamGuard).
+	ExpiresAt time.Time
 }
 
 // DefaultGroupsClaim is the claim of a token that holds the caller's
@@ -84,18 +88,7 @@ func NewVerifier(ctx context.Context, cfg Config) (Verifier, error) {
 		return nil, errors.New("no OIDC client id: a token would authenticate without proving it was issued for this API")
 	}
 
-	// go-oidc otherwise falls back to http.DefaultClient, which has no timeout.
-	client := &http.Client{Timeout: issuerTimeout}
-	if cfg.InsecureSkipVerify || cfg.RootCAs != nil {
-		// Cloned, not built from scratch: a bare Transport has no Proxy, and
-		// the chart passes the egress proxy the pod must go through.
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.TLSClientConfig = &tls.Config{RootCAs: cfg.RootCAs, MinVersion: tls.VersionTLS12}
-		if cfg.InsecureSkipVerify {
-			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- opt-in, discouraged
-		}
-		client.Transport = transport
-	}
+	client := issuerClient(cfg.InsecureSkipVerify, cfg.RootCAs)
 
 	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), cfg.Issuer)
 	if err != nil {
@@ -112,6 +105,23 @@ func NewVerifier(ctx context.Context, cfg Config) (Verifier, error) {
 		clientID:    cfg.ClientID,
 		groupsClaim: groupsClaim,
 	}, nil
+}
+
+// issuerClient is the HTTP client of the calls to the issuer.
+func issuerClient(insecure bool, roots *x509.CertPool) *http.Client {
+	// go-oidc otherwise falls back to http.DefaultClient, which has no timeout.
+	client := &http.Client{Timeout: issuerTimeout}
+	if insecure || roots != nil {
+		// Cloned, not built from scratch: a bare Transport has no Proxy, and
+		// the chart passes the egress proxy the pod must go through.
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		if insecure {
+			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- opt-in, discouraged
+		}
+		client.Transport = transport
+	}
+	return client
 }
 
 func (v *oidcVerifier) Verify(ctx context.Context, rawToken string) (*Identity, error) {
@@ -142,7 +152,7 @@ func (v *oidcVerifier) Verify(ctx context.Context, rawToken string) (*Identity, 
 	if username == "" {
 		username = claims.Email
 	}
-	return &Identity{Subject: token.Subject, Username: username, Name: claims.Name, Email: claims.Email, Groups: groupsOf(all, v.groupsClaim)}, nil
+	return &Identity{Subject: token.Subject, Username: username, Name: claims.Name, Email: claims.Email, Groups: groupsOf(all, v.groupsClaim), ExpiresAt: token.Expiry}, nil
 }
 
 // groupsOf returns the groups of the claim name of claims, a dotted name

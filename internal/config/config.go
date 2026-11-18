@@ -18,6 +18,11 @@ type Config struct {
 	AllowedOrigins          string
 	LogLevel                string
 	ExcludedSidecarPrefixes []string
+	// TrustedProxies are the peers (addresses or CIDRs, TRUSTED_PROXIES,
+	// comma-separated) whose X-Forwarded-For is believed for the client
+	// address of the audit log. None by default: the client is the address
+	// of the connection. Set it to the ingress controller's pods.
+	TrustedProxies []string
 	// InsecureOCIRegistries lists registry hosts reached over plain HTTP
 	// (the upstream charts of the chart cache): a development-sandbox
 	// affordance for local registries without TLS.
@@ -190,6 +195,12 @@ type SQLConfig struct {
 	// the Kubernetes API server (SQL_ALLOWED_NETWORKS, comma-separated):
 	// the platform's allow-list, empty by default.
 	AllowedNetworks []string
+	// TokenExchangeAudience is the audience of the token a statement on
+	// a SQL engine runs with (SQL_TOKEN_EXCHANGE_AUDIENCE): the caller's
+	// token is exchanged for one of it at the issuer (RFC 8693) by the
+	// Keycloak client (KEYCLOAK_CLIENT_ID), never forwarded as it came.
+	// Empty, statements on Trino are refused.
+	TokenExchangeAudience string
 }
 
 // SecretStoresConfig bounds the SecretStores the console creates in the
@@ -251,6 +262,12 @@ func Load() (*Config, error) {
 	}
 	cfg.SQL = sql
 
+	for _, p := range strings.Split(getEnv("TRUSTED_PROXIES", ""), ",") {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			cfg.TrustedProxies = append(cfg.TrustedProxies, trimmed)
+		}
+	}
+
 	for _, u := range strings.Split(getEnv("SECRET_STORE_ALLOWED_SERVERS", ""), ",") {
 		if trimmed := strings.TrimSpace(u); trimmed != "" {
 			cfg.SecretStores.AllowedServers = append(cfg.SecretStores.AllowedServers, trimmed)
@@ -308,6 +325,7 @@ func loadSQL() (SQLConfig, error) {
 	if sql.DefaultRows > sql.MaxRows {
 		sql.DefaultRows = sql.MaxRows
 	}
+	sql.TokenExchangeAudience = strings.TrimSpace(getEnv("SQL_TOKEN_EXCHANGE_AUDIENCE", ""))
 	for _, n := range strings.Split(getEnv("SQL_ALLOWED_NETWORKS", ""), ",") {
 		if trimmed := strings.TrimSpace(n); trimmed != "" {
 			sql.AllowedNetworks = append(sql.AllowedNetworks, trimmed)

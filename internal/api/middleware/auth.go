@@ -2,11 +2,11 @@ package middleware
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
 
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -52,7 +52,7 @@ func RequireAuthentication(verifier auth.Verifier) gin.HandlerFunc {
 		if err != nil {
 			// The reason stays in the log: naming the failed check tells an
 			// attacker which one to work on.
-			logrus.WithError(err).WithField("path", c.Request.URL.Path).Warn("Rejected a bearer token")
+			slog.Warn("Rejected a bearer token", "error", err, "path", c.Request.URL.Path)
 			unauthorized(c, "the bearer token was rejected")
 			return
 		}

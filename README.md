@@ -53,7 +53,8 @@ Project layout:
 - `cmd/server`: entry point.
 - `internal/api`: HTTP handlers and router.
 - `internal/service`: business logic.
-- `internal/repository`: cluster and repository access (platform values, what the instances publish, GitOps engine status).
+- `internal/repository`: cluster and repository access (platform values, what the instances publish, GitOps engine status, the workloads). The Kubernetes clients stay here, one `rest.Config`, their errors translated to domain errors.
+- `internal/apperr`: the domain errors (`ErrNotFound`, `ErrAlreadyExists`, `ErrConflict`, `ErrInvalid`), translated to a status by `handlers.writeError`.
 - `internal/config`: configuration loaded from environment variables.
 - `chart/`: Helm chart.
 
@@ -102,7 +103,7 @@ projects/<project>/instances/<instance>/instance.yaml   # {service, version}: th
 projects/<project>/instances/<instance>/config.yaml     # the submitted parameters only (none without parameters)
 compiled/projects/<project>/instances/<project>-<instance>/
                                                         # okdp-compiler's umbrella chart (Chart.yaml, instance.values.yaml,
-                                                        # okdp.objects.yaml, okdp.info.yaml), helmrelease.yaml,
+                                                        # okdp.info.yaml), helmrelease.yaml,
                                                         # kustomization.yaml (Flux), application.yaml (Argo CD)
 sources.yaml                                            # the output: the revisions of the sources and catalogs it is the compile of
 ```
@@ -144,9 +145,18 @@ from it answers `403` to everyone.
 | none (public) | `GET /api/capabilities`, the console's bootstrap |
 | authenticated | `GET /api/me`; `GET /api/projects` and `/api/projects/stream` (the projects the caller may see only); the catalog and the platform's settings: `GET /api/platform-services[/…]`, `/api/platform-categories`, `/api/contracts`, `/api/profile-images`, `/api/spark-config`, `/api/spark-app-schema` |
 | platform admin | `/api/v1/identity/*` (users and groups, every method); `POST`, `PUT`, `DELETE /api/platform-services[/…]` (the menu of `catalogs.yaml`); `POST /api/projects`, `DELETE /api/projects/:name` |
-| project viewer | `GET /api/projects/:name` and every `GET` and stream under `/api/projects/:name/`; `POST …/services/:s/sql` (Trino, the caller's own token) |
+| project viewer | `GET /api/projects/:name` and every `GET` and stream under `/api/projects/:name/`; `POST …/services/:s/sql` (Trino, the caller's token exchanged for the engine's audience) |
 | project editor | every write under `/api/projects/:name/` (instances, connections and their tests, named claims, secret stores and their tests, external secrets, Spark applications); `POST …/connections/:c/sql`, and the write mode of the SQL editor |
 | project admin | `PUT /api/projects/:name` (its `project.yaml`) |
+
+A stream (`/api/projects/stream`, `.../services/stream`, `.../spark-apps/stream`, a log
+followed) re-checks its route's permission at each keepalive (30s, the authority read as it
+is then) and ends when its token expires, with an SSE `error` event naming why; the console
+reconnects, a new request. A stream also ends, without an event, when the server stops: at
+`SIGTERM` the streams end at once, the other requests in flight are served to their end
+(a commit and its Secret are written together), within 45s, the chart's
+`terminationGracePeriodSeconds` (60s) above it. Each write of a stream has its own 15s
+deadline: a client that stops reading loses the stream.
 
 A platform admin has every project role. A caller without the permission gets `403`
 `{"error": "<what it needs>", "code": "forbidden", "permission": "<permission>",
@@ -293,6 +303,14 @@ the CI of the output compiles the commit again at its next run, the whole tree, 
 writes them (below, [the output](#the-output-okdp-gitops)), so a commit made by hand and a console one are
 compiled the same way.
 
+The server's compiles (these checks and the reads of the tree) do not render the upstream
+charts (`gitops.Compiler.SkipRender`, `service.NewTreeCompiler`): Helm's engine takes no
+context, so a render past its timeout would leave its goroutine in the server, and its
+memory is bounded only once it returns. What a project's upstream values deploy is checked
+by the render of the CI's compile, the boundary: a write only the render refuses is
+committed, then the CI's compile refuses the instance and says so. A chart that could not be
+fetched refuses no write either.
+
 An instance names a package: `service` and `version` in `instance.yaml`, the directory
 `catalog/<service>/<version>/` of a catalog (below). [okdp-compiler](https://github.com/OKDP/okdp-compiler)
 compiles it under the release `<project>-<instance>` in the namespace `<project>`, with the
@@ -303,8 +321,8 @@ publish, each claim of a connection reference bound to the instance that provisi
 contract, of any namespace. The parameters are checked against the package's
 `config.schema.json`, the connections against their contracts, and the values of each
 upstream chart computed; the instance is written as one chart, an umbrella over its
-upstream charts (`Chart.yaml`, `instance.values.yaml`, OKDP's own objects in
-`okdp.objects.yaml`, what it publishes in `okdp.info.yaml`). Each connection reference to
+upstream charts and the chart of OKDP's own objects (`Chart.yaml`,
+`instance.values.yaml`, what it publishes in `okdp.info.yaml`). Each connection reference to
 another instance (an output it publishes, by its name, or a claim it provisions) becomes a
 `dependsOn` of the HelmRelease and a later Argo CD sync wave.
 
@@ -370,7 +388,20 @@ reports a failure to connect without its cause, which the server logs.
 ### SQL editor
 
 `POST /api/projects/<p>/services/<instance>/sql` runs a statement on a Trino instance with
-the caller's own bearer token: Trino authorizes it. `POST /api/projects/<p>/connections/<c>/sql`
+a token of the caller exchanged for Trino's audience at the issuer (RFC 8693 token exchange
+by the Keycloak client of `KEYCLOAK_CLIENT_ID`, audience `SQL_TOKEN_EXCHANGE_AUDIENCE`), never
+the caller's own, which the API would accept back from whoever controls the engine: Trino
+authorizes the exchanged token. Without an exchange configured the statement answers
+`400`, code `sql-no-token-exchange`, nothing forwarded; `502`, code `sql-token-exchange`,
+when the identity provider refuses it, or gives a token the API would accept (naming the
+console's client in `aud`, `azp` or `client_id`), or an opaque one. The realm must
+allow the exchange: Keycloak 26.2 or later, standard token exchange enabled on the
+exchange client (`standard.token.exchange.enabled`, the attribute of the client, distinct
+from the console's own), the caller's access token carrying that client in its `aud`
+(an audience mapper on the console's client, what Keycloak requires of the subject
+token), the requested audience (Trino's client) available to the exchange client through a
+client scope (an audience mapper), and Trino accepting that audience (its OAuth client,
+or `http-server.authentication.oauth2.additional-audiences`, of each instance). `POST /api/projects/<p>/connections/<c>/sql`
 runs one on a `database-server` connection (engine `postgresql`) declared in the tree: the
 project's, else the platform's, else a named claim of the project (the connection its
 provider granted it). Host, port and database are the connection's, never the request's,
@@ -399,9 +430,9 @@ A statement runs read-only by default: alone (a batch of several is an SQL error
 `READ ONLY` transaction rolled back after it. `write: true` in the request runs a batch of
 statements in write mode, a project `editor`'s ([authorization](#authorization)); a statement
 on a connection, read-only or not, is an editor's too (it runs with credentials of the
-project's Secrets, which a viewer cannot read), one on a Trino service a viewer's (with the
-caller's own token). Read-only guards against mistakes; the boundary is what the database grants
-the connection's user. Every statement is logged with the caller, the connection and the
+project's Secrets, which a viewer cannot read), one on a Trino service a viewer's (with a
+token exchanged for the engine, never the caller's own). Read-only guards against
+mistakes; the boundary is what the database grants the connection's user. Every statement is logged with the caller, the connection and the
 start of its text, and is bounded by `SQL_STATEMENT_TIMEOUT`, a row cap, a result-size
 cap and a per-user concurrency limit (`429`, code `sql-busy`); a client that disconnects
 cancels it. A result carries the row cap it ran with (`maxRows`: the request's, else
@@ -739,19 +770,18 @@ startup. Then run `make dev`.
 
 ### Build, test and lint
 
-No cluster is required, but okdp-compiler and okdp-gitops checked out next to this
-repository (`go.mod` replaces them with `../okdp-compiler` and `../okdp-gitops` until
-they are published; CI and the image build fetch them there at the commits
-`OKDP_COMPILER_REF` and `OKDP_GITOPS_REF` of their workflows, and the image copies
-both modules whole from the build contexts):
+No cluster is required, but okdp-gitops checked out next to this repository (`go.mod`
+replaces it with `../okdp-gitops` until it is published; CI and the image build fetch it
+there at the commit `OKDP_GITOPS_REF` of their workflows, and the image copies the module
+whole from the build context). okdp-compiler and cel2yaml are downloaded at the releases
+`go.mod` requires:
 
 ```sh
 make build     # compile the binary to bin/server
 make test      # run the tests
 make lint      # run golangci-lint
 make swagger   # regenerate the Swagger documentation
-docker build --build-context okdp-compiler=../okdp-compiler \
-  --build-context okdp-gitops=../okdp-gitops -t okdp-control-plane-server .
+docker build --build-context okdp-gitops=../okdp-gitops -t okdp-control-plane-server .
 ```
 
 Run `make help` for the full list of targets.
@@ -768,6 +798,7 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `PORT` | HTTP port the server listens on | `8093` | No |
 | `ALLOWED_ORIGINS` | Single CORS origin, set verbatim in `Access-Control-Allow-Origin` (the console URL) | `http://localhost:4200` | No |
 | `LOG_LEVEL` | Log verbosity (`debug`, `info`, `warn`, `error`) | `info` | No |
+| `TRUSTED_PROXIES` | Peers (addresses or CIDRs, comma-separated; chart: `configuration.trustedProxies`) whose `X-Forwarded-For` is believed for the client address of the audit log: the ingress controller's pods. None by default, the client is then the address of the connection | | No |
 | `GIN_MODE` | HTTP framework mode (`debug` prints every route) | `release` | No |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` | Override the issuer and the client the console's tokens are verified against | the platform values (`global.okdp.identity.oidc`, else `global.okdp.oidc`) | No |
 | `OIDC_GROUPS_CLAIM` | The token's claim of the caller's groups, a list of group names, a dotted name for a nested claim (chart: `oidc.groupsClaim`); the permissions are read with them ([authorization](#authorization)) | `groups` | No |
@@ -792,6 +823,7 @@ its `configuration:` values (see [`chart/values.yaml`](chart/values.yaml)).
 | `SQL_DEFAULT_ROWS` / `SQL_MAX_ROWS` | Row cap of a request that names none / the largest it may ask | `1000` / `10000` | No |
 | `SQL_MAX_RESULT_BYTES` | Size of a result's rows past which the rest is dropped | `16777216` | No |
 | `SQL_MAX_CONCURRENT_PER_USER` | Statements one user runs at once (`429` past it) | `2` | No |
+| `SQL_TOKEN_EXCHANGE_AUDIENCE` | Audience of the token a statement on Trino runs with (chart: `sqlEditor.tokenExchangeAudience`, [SQL editor](#sql-editor)); empty, statements on Trino are refused (`400`, code `sql-no-token-exchange`) | | No |
 | `SQL_ALLOWED_NETWORKS` | CIDRs the SQL editor and the connection tests may reach although loopback, link-local or the API server (comma-separated) | | No |
 | `OKDP_CA_FILE` | PEM bundle every outbound TLS connection trusts beside the system's CAs ([TLS](#tls); chart: `tls.caBundleSecret` and `tls.caBundleKey`, mounted at `/etc/okdp/ca/<caBundleKey>`). Replaces `SQL_CA_FILE`, refused at startup when still set | | No |
 | `SECRET_STORE_ALLOWED_SERVERS` | Vault (OpenBao) server URLs a project's SecretStore and its connection test may name beside the platform's secret store's (comma-separated; chart: `secretStores.allowedServers`) ([secret stores](#secret-stores)) | | No |

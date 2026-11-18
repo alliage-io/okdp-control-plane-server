@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
-	"github.com/sirupsen/logrus"
 )
 
 // The contract schemas are those of the catalogs (contracts/ of each
@@ -253,7 +253,7 @@ func (c *catalogContracts) get() ContractCatalog {
 		return NewContractCatalog(fsys)
 	}()
 	if err != nil {
-		logrus.WithError(err).Warn("Could not read the contracts of the catalogs")
+		slog.Warn("Could not read the contracts of the catalogs", "error", err)
 		if c.current == nil {
 			empty, _ := NewContractCatalog(emptyFS{})
 			return empty

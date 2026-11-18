@@ -1,10 +1,10 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
 
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -45,12 +45,12 @@ func Authorize(table Permissions, authority *authz.Authority, authenticationOff 
 			// A nil authority knows no admin and no project role.
 			caller = authority.Caller(identity.Groups)
 		}
-		c.Request = c.Request.WithContext(authz.WithCaller(c.Request.Context(), caller))
 		project := c.Param("name")
+		c.Request = c.Request.WithContext(authz.WithRoute(authz.WithCaller(c.Request.Context(), caller), perm, project))
 		allowed, err := caller.Allows(c.Request.Context(), perm, project)
 		if err != nil {
 			id := RequestIDOf(c)
-			logrus.WithError(err).WithField("requestId", id).WithField("path", c.Request.URL.Path).Error("Could not read the platform's authority")
+			slog.Error("Could not read the platform's authority", "error", err, "requestId", id, "path", c.Request.URL.Path)
 			c.AbortWithStatusJSON(http.StatusInternalServerError, models.ErrorResponse{Error: "Request failed", RequestID: id})
 			return
 		}

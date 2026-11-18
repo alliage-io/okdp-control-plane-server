@@ -8,6 +8,10 @@ data:
   PORT: {{ .Values.service.port | quote }}
   ALLOWED_ORIGINS: {{ .Values.configuration.allowedOrigins | quote }}
   LOG_LEVEL: {{ .Values.configuration.logLevel | quote }}
+  {{- with .Values.configuration.trustedProxies }}
+  # Whose X-Forwarded-For is believed for the client address of the audit log.
+  TRUSTED_PROXIES: {{ join "," . | quote }}
+  {{- end }}
   # The claim of the caller's groups, which every permission is read with.
   OIDC_GROUPS_CLAIM: {{ .Values.oidc.groupsClaim | default "groups" | quote }}
   # Where the platform, the projects and the output live (gitops.topology).
@@ -65,6 +69,9 @@ data:
   SQL_MAX_ROWS: {{ .maxRows | quote }}
   SQL_MAX_RESULT_BYTES: {{ .maxResultBytes | int64 | quote }}
   SQL_MAX_CONCURRENT_PER_USER: {{ .maxConcurrentPerUser | quote }}
+  {{- if .tokenExchangeAudience }}
+  SQL_TOKEN_EXCHANGE_AUDIENCE: {{ .tokenExchangeAudience | quote }}
+  {{- end }}
   {{- if .allowedNetworks }}
   SQL_ALLOWED_NETWORKS: {{ join "," .allowedNetworks | quote }}
   {{- end }}

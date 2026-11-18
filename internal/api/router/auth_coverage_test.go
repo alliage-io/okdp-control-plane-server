@@ -26,7 +26,7 @@ func (refuseAllVerifier) Verify(context.Context, string) (*auth.Identity, error)
 // dereference one and panic, so a gap in the guard cannot read as a pass.
 func testRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	return SetupRouter(&config.Config{}, refuseAllVerifier{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	return mustRouter(Deps{Config: &config.Config{}, Verifier: refuseAllVerifier{}})
 }
 
 // Repeated from the middleware on purpose: one more exemption has to be added

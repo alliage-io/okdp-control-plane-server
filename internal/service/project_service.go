@@ -3,23 +3,23 @@ package service
 import (
 	"context"
 	"errors"
+	"github.com/okdp/okdp-gitops/deploy"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/gitops"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/okdp/okdp-gitops/rules"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
-var projectsResource = schema.GroupResource{Group: "okdp.io", Resource: "projects"}
+const projectsResource = "projects.okdp.io"
 
 // ProjectService defines the business logic for projects
 type ProjectService interface {
@@ -78,15 +78,15 @@ func projectError(err error, name string) error {
 		return nil
 	case errors.As(err, &compileErr):
 		// A name the compile refuses: the compiler's message.
-		return apierrors.NewBadRequest(err.Error())
+		return apperr.Invalid(err.Error())
 	case errors.Is(err, treeedit.ErrNotFound):
-		return apierrors.NewNotFound(projectsResource, name)
+		return apperr.NotFound(projectsResource, name)
 	case errors.Is(err, treeedit.ErrExists):
-		return apierrors.NewAlreadyExists(projectsResource, name)
+		return apperr.AlreadyExists(projectsResource, name)
 	case errors.Is(err, gitops.ErrRepositoryNotEmpty):
 		// The project's repository exists with content: a 409 that says
 		// so, adopting it is a commit by hand to projects.yaml.
-		return apierrors.NewConflict(projectsResource, name, err)
+		return apperr.Conflict(projectsResource, name, err)
 	default:
 		return err
 	}
@@ -130,7 +130,7 @@ func (s *DefaultProjectService) GetProject(ctx context.Context, name string) (*m
 // console. It is removed again when the commit fails.
 func (s *DefaultProjectService) CreateProject(ctx context.Context, project *models.Project) error {
 	if err := treeedit.ValidateName("project", project.Name); err != nil {
-		return apierrors.NewBadRequest(err.Error())
+		return apperr.Invalid(err.Error())
 	}
 	if err := s.deployments.CheckProjectName(ctx, project.Name); err != nil {
 		return projectError(err, project.Name)
@@ -145,8 +145,10 @@ func (s *DefaultProjectService) CreateProject(ctx context.Context, project *mode
 	_, err := s.deployments.CreateProject(ctx, auth.ActorFrom(ctx), treeedit.Project{Name: project.Name, Description: project.Description})
 	if err != nil {
 		if created {
-			if _, rollbackErr := s.namespaces.DeleteNamespace(ctx, project.Name); rollbackErr != nil {
-				logrus.WithError(rollbackErr).WithField("project", project.Name).Warn("Could not remove the namespace of a project Git refused")
+			rollback, cancel := compensationContext(ctx)
+			defer cancel()
+			if _, rollbackErr := s.namespaces.DeleteNamespace(rollback, project.Name); rollbackErr != nil {
+				slog.Warn("Could not remove the namespace of a project Git refused", "error", rollbackErr, "project", project.Name)
 			}
 		}
 		return projectError(err, project.Name)
@@ -178,7 +180,7 @@ func (s *DefaultProjectService) DeleteProject(ctx context.Context, name string) 
 	}
 	if _, err := s.namespaces.DeleteNamespace(ctx, name); err != nil {
 		// The project is gone from Git, which is what the answer reports.
-		logrus.WithError(err).WithField("project", name).Warn("Could not delete the namespace of a deleted project")
+		slog.Warn("Could not delete the namespace of a deleted project", "error", err, "project", name)
 	}
 	return nil
 }
@@ -255,7 +257,7 @@ func (s *DefaultProjectService) WatchProjects(ctx context.Context) (<-chan Proje
 			}
 			projects, err := s.ListProjects(ctx)
 			if err != nil {
-				logrus.WithError(err).Warn("Could not read the projects for a project stream")
+				slog.Warn("Could not read the projects for a project stream", "error", err)
 				continue
 			}
 			// nil when it cannot be read: the access compared next time.
@@ -311,7 +313,7 @@ func (s *DefaultProjectService) accessOf(ctx context.Context, projects []models.
 			if err != nil && !errors.Is(err, treeedit.ErrNotFound) {
 				return err
 			}
-			roles, err := compiler.ProjectAccess(raw, p.Name)
+			roles, err := deploy.ProjectAccess(rules.Standard(), raw, p.Name)
 			if err != nil {
 				out[p.Name] = "error: " + err.Error()
 				continue
@@ -326,7 +328,7 @@ func (s *DefaultProjectService) accessOf(ctx context.Context, projects []models.
 		return nil
 	})
 	if err != nil {
-		logrus.WithError(err).Warn("Could not read the access of the projects for a project stream")
+		slog.Warn("Could not read the access of the projects for a project stream", "error", err)
 		return nil
 	}
 	return out

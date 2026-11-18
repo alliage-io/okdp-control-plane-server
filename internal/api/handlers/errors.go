@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/okdp/okdp-control-plane-server/internal/api/middleware"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
@@ -29,13 +29,13 @@ func writeError(c *gin.Context, err error, logMessage ...string) {
 	switch {
 	case errors.Is(err, service.ErrConnectionsUnavailable):
 		c.JSON(http.StatusNotImplemented, models.ErrorResponse{Error: err.Error()})
-	case apierrors.IsNotFound(err):
+	case errors.Is(err, apperr.ErrNotFound):
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
-	case apierrors.IsAlreadyExists(err), apierrors.IsConflict(err):
+	case errors.Is(err, apperr.ErrAlreadyExists), errors.Is(err, apperr.ErrConflict):
 		c.JSON(http.StatusConflict, models.ErrorResponse{Error: err.Error()})
 	case service.IsValidationError(err):
 		c.JSON(http.StatusBadRequest, validationBody(err))
-	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+	case errors.Is(err, apperr.ErrInvalid), errors.Is(err, apperr.ErrInvalid):
 		c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 	case errors.As(err, &refused):
 		c.JSON(http.StatusForbidden, middleware.ForbiddenBody(refused.Error(), refused))
@@ -61,6 +61,6 @@ func writeInternal(c *gin.Context, status int, err error, logMessage ...string) 
 	if len(logMessage) > 0 {
 		message = logMessage[0]
 	}
-	logrus.WithError(err).WithFields(logrus.Fields{"requestId": id, "path": c.Request.URL.Path}).Error(message)
+	slog.Error(message, "error", err, "requestId", id, "path", c.Request.URL.Path)
 	c.JSON(status, models.ErrorResponse{Error: internalErrorMessage, RequestID: id})
 }

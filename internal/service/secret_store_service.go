@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -13,12 +14,11 @@ import (
 
 	compiler "github.com/okdp/okdp-compiler"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -118,30 +118,38 @@ func (s *DefaultSecretStoreService) CreateSecretStore(ctx context.Context, names
 
 	credSecretName := req.Name + "-credentials"
 
+	// validateRequest lets the token be empty because an update reads that
+	// as "keep the stored one". On a create there is nothing to keep: an
+	// empty token writes an empty Secret and the store can never
+	// authenticate, while the API answers 201.
+	if req.Auth.Type == "token" && req.Auth.Config.Token == "" {
+		return nil, invalid("auth.config.token is required for token auth")
+	}
+
+	// The store first: a name already taken answers 409 before any
+	// credentials or label change. Created, the Secret and the labels follow,
+	// the store taken back if its Secret cannot be written.
+	store := buildSecretStoreCRD(namespace, req, credSecretName, identity)
+	if err := s.repo.Create(ctx, namespace, store); err != nil {
+		return nil, err
+	}
+
 	if req.Auth.Type == "token" {
-		// validateRequest lets the token be empty because an update reads that
-		// as "keep the stored one". On a create there is nothing to keep: an
-		// empty token writes an empty Secret and the store can never
-		// authenticate, while the API answers 201.
-		if req.Auth.Config.Token == "" {
-			return nil, invalid("auth.config.token is required for token auth")
-		}
 		secretData := map[string][]byte{"token": []byte(req.Auth.Config.Token)}
 		if err := s.repo.CreateOrUpdateSecret(ctx, namespace, credSecretName, secretData); err != nil {
+			rollback, cancel := compensationContext(ctx)
+			defer cancel()
+			if rollbackErr := s.repo.Delete(rollback, namespace, req.Name); rollbackErr != nil {
+				slog.Warn("Failed to take back the store whose credentials could not be stored", "error", rollbackErr, "store", req.Name)
+			}
 			return nil, storeCredentialsError(err)
 		}
 	}
 
 	if req.IsDefault {
-		if err := s.repo.RemoveDefaultLabel(ctx, namespace); err != nil {
-			logrus.WithError(err).Warn("Failed to clear previous default store label")
+		if err := s.repo.RemoveDefaultLabel(ctx, namespace, req.Name); err != nil {
+			slog.Warn("Failed to clear previous default store label", "error", err)
 		}
-	}
-
-	store := buildSecretStoreCRD(namespace, req, credSecretName, identity)
-
-	if err := s.repo.Create(ctx, namespace, store); err != nil {
-		return nil, err
 	}
 
 	created, err := s.repo.Get(ctx, namespace, req.Name)
@@ -189,8 +197,8 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 	}
 
 	if req.IsDefault {
-		if err := s.repo.RemoveDefaultLabel(ctx, namespace); err != nil {
-			logrus.WithError(err).Warn("Failed to clear previous default store label")
+		if err := s.repo.RemoveDefaultLabel(ctx, namespace, ""); err != nil {
+			slog.Warn("Failed to clear previous default store label", "error", err)
 		}
 	}
 
@@ -206,8 +214,8 @@ func (s *DefaultSecretStoreService) UpdateSecretStore(ctx context.Context, names
 	// Vault token would outlive the store's use of it: still valid in Vault,
 	// no longer shown anywhere in the console.
 	if usedTokenAuth && req.Auth.Type != "token" {
-		if err := s.repo.DeleteSecret(ctx, namespace, credSecretName); err != nil && !apierrors.IsNotFound(err) {
-			logrus.WithError(err).Warnf("Failed to delete unused credentials secret %s", credSecretName)
+		if err := s.repo.DeleteSecret(ctx, namespace, credSecretName); err != nil && !errors.Is(err, apperr.ErrNotFound) {
+			slog.Warn(fmt.Sprintf("Failed to delete unused credentials secret %s", credSecretName), "error", err)
 		}
 	}
 
@@ -228,8 +236,8 @@ func (s *DefaultSecretStoreService) DeleteSecretStore(ctx context.Context, names
 
 	credSecretName := name + "-credentials"
 	if err := s.repo.DeleteSecret(ctx, namespace, credSecretName); err != nil {
-		if !apierrors.IsNotFound(err) {
-			logrus.WithError(err).Warnf("Failed to delete credentials secret %s", credSecretName)
+		if !errors.Is(err, apperr.ErrNotFound) {
+			slog.Warn(fmt.Sprintf("Failed to delete credentials secret %s", credSecretName), "error", err)
 		}
 	}
 
@@ -317,7 +325,7 @@ func validateVaultToken(ctx context.Context, guard *netguard.Guard, roots *x509.
 		return invalid("vault.server %q: %v", server, netguard.ErrRefused)
 	}
 	if err != nil {
-		logrus.WithError(err).WithField("server", server).Info("A secret store's connection test failed")
+		slog.Info("A secret store's connection test failed", "error", err, "server", server)
 		return fmt.Errorf("connection failed: the Vault server did not answer")
 	}
 	defer resp.Body.Close()

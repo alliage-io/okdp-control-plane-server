@@ -1,14 +1,13 @@
 package repository
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-
-	"github.com/sirupsen/logrus"
 )
 
 // crdAvailabilityTTL bounds how long a negative probe is trusted, so that
@@ -91,7 +90,7 @@ func (p *APIProbe) probe() bool {
 	if err != nil {
 		// A missing group is expected, not a failure worth logging every time.
 		if !apierrors.IsNotFound(err) {
-			logrus.WithError(err).WithField("feature", p.feature).Debug("Could not discover the CRDs")
+			slog.Debug("Could not discover the CRDs", "error", err, "feature", p.feature)
 		}
 		return false
 	}
@@ -106,6 +105,6 @@ func (p *APIProbe) probe() bool {
 		}
 	}
 
-	logrus.WithField("feature", p.feature).Info("CRDs detected: the feature is enabled")
+	slog.Info("CRDs detected: the feature is enabled", "feature", p.feature)
 	return true
 }

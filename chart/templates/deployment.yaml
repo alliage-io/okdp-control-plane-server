@@ -20,6 +20,7 @@ spec:
         {{- include "okdp-control-plane-server.labels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "okdp-control-plane-server.fullname" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}

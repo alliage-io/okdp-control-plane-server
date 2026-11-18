@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/sirupsen/logrus"
 
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
@@ -41,6 +41,13 @@ var (
 	// ErrSqlTimeout: the engine did not answer within the statement
 	// timeout (SQL_STATEMENT_TIMEOUT); the statement was cancelled.
 	ErrSqlTimeout = errors.New("the statement did not finish within the statement timeout and was cancelled")
+	// ErrSqlNoTokenExchange: the caller's token would have to be forwarded
+	// (it is accepted at /api, a replay for whoever controls the engine)
+	// and no token exchange is configured.
+	ErrSqlNoTokenExchange = errors.New("the token exchange of the SQL editor is not configured (SQL_TOKEN_EXCHANGE_AUDIENCE and the Keycloak client's secret): the caller's token is not forwarded to the engine")
+	// ErrSqlTokenExchange: the identity provider refused or failed the
+	// exchange.
+	ErrSqlTokenExchange = errors.New("the identity provider gave no token for the engine")
 )
 
 // SqlLimits bounds the SQL editor; a zero field takes its default.
@@ -91,12 +98,19 @@ type SqlOptions struct {
 	// write mode on a project's connection; nil allows every
 	// authenticated caller.
 	AuthorizeWrite func(ctx context.Context, project string) error
+	// TokenExchange trades the caller's token for one of the engine's
+	// audience, the only token forwarded to the engine (auth.TokenExchanger,
+	// RFC 8693); nil, a statement on an engine that needs one is refused,
+	// the caller's token never forwarded.
+	TokenExchange auth.TokenExchanger
 }
 
 // SqlService executes SQL statements on deployed SQL engines.
 type SqlService interface {
 	// ExecuteQuery runs a statement on the given service instance. The
-	// caller's Authorization header is forwarded: the engine enforces
+	// caller's Authorization header is exchanged for a token of the
+	// engine's audience (auth.TokenExchanger), never forwarded: the
+	// engine enforces
 	// platform SSO itself.
 	ExecuteQuery(ctx context.Context, project, serviceName, authorization string, req models.SqlQueryRequest) (*models.SqlQueryResult, error)
 	// ExecuteOnConnection runs a statement on a connection of the project
@@ -157,6 +171,7 @@ type DefaultSqlService struct {
 	rootCAs     *x509.CertPool
 	authorize   func(ctx context.Context, project string) error
 	running     *userSlots
+	exchange    auth.TokenExchanger
 }
 
 // NewDefaultSqlService resolves instances through getService (the URL the
@@ -185,6 +200,7 @@ func NewDefaultSqlService(getService func(ctx context.Context, project, name str
 		rootCAs:     opts.RootCAs,
 		authorize:   opts.AuthorizeWrite,
 		running:     &userSlots{max: limits.MaxConcurrentPerUser, n: map[string]int{}},
+		exchange:    opts.TokenExchange,
 	}
 }
 
@@ -206,12 +222,36 @@ func (s *DefaultSqlService) ExecuteQuery(ctx context.Context, project, serviceNa
 		client = s.insecure
 	}
 
-	// The engine authorizes the caller's own token: its mode is the
-	// engine's, the write flag is not read.
+	// The engine authorizes a token of its own audience for the caller,
+	// never the caller's own, which the API would accept back; the mode
+	// is the engine's, the write flag is not read.
 	audit := sqlAudit(ctx, project, "service", serviceName, instance.Service, false, req.Query)
 	return s.timed(ctx, audit, req, func(ctx context.Context, caps sqlCaps) (*models.SqlQueryResult, error) {
-		return engine.execute(ctx, client, instance.URL, authorization, req.Query, caps)
+		engineToken, err := s.engineToken(ctx, authorization)
+		if err != nil {
+			return nil, err
+		}
+		return engine.execute(ctx, client, instance.URL, engineToken, req.Query, caps)
 	})
+}
+
+// engineToken is the Authorization of a statement on an engine: the
+// caller's bearer token exchanged (SqlOptions.TokenExchange), nothing
+// when the request has none (AUTH_DISABLED).
+func (s *DefaultSqlService) engineToken(ctx context.Context, authorization string) (string, error) {
+	if authorization == "" {
+		return "", nil
+	}
+	if s.exchange == nil {
+		return "", ErrSqlNoTokenExchange
+	}
+	subject := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
+	token, err := s.exchange.Exchange(ctx, subject)
+	if err != nil {
+		slog.Warn("Could not exchange the caller's token for the SQL engine", "error", err)
+		return "", ErrSqlTokenExchange
+	}
+	return "Bearer " + token, nil
 }
 
 func (s *DefaultSqlService) ExecuteOnConnection(ctx context.Context, project, name string, req models.SqlQueryRequest) (*models.SqlQueryResult, error) {
@@ -280,20 +320,20 @@ func (u *userSlots) acquire(user string) (func(), bool) {
 
 // sqlAudit is the log entry of a statement: who runs it, where, in which
 // mode, and the start of its text (sqlStatementForLog).
-func sqlAudit(ctx context.Context, project, kind, name, scope string, write bool, query string) *logrus.Entry {
+func sqlAudit(ctx context.Context, project, kind, name, scope string, write bool, query string) *slog.Logger {
 	mode := "read-only"
 	if write {
 		mode = "write"
 	}
-	return logrus.WithFields(logrus.Fields{
-		"user":      auth.ActorName(ctx),
-		"project":   project,
-		kind:        name,
-		"scope":     scope,
-		"mode":      mode,
-		"statement": sqlStatementForLog(query),
-		"length":    len(query),
-	})
+	return slog.With(
+		"user", auth.ActorName(ctx),
+		"project", project,
+		kind, name,
+		"scope", scope,
+		"mode", mode,
+		"statement", sqlStatementForLog(query),
+		"length", len(query),
+	)
 }
 
 // sqlStatementLogRunes is how much of a statement the log keeps.
@@ -321,7 +361,7 @@ func sqlStatementForLog(query string) string {
 // the row cap, bounds the execution by the statement timeout (and by the
 // request's context: a client that goes away cancels the statement), logs
 // it and fills the counters every engine shares.
-func (s *DefaultSqlService) timed(ctx context.Context, audit *logrus.Entry, req models.SqlQueryRequest, run func(ctx context.Context, caps sqlCaps) (*models.SqlQueryResult, error)) (*models.SqlQueryResult, error) {
+func (s *DefaultSqlService) timed(ctx context.Context, audit *slog.Logger, req models.SqlQueryRequest, run func(ctx context.Context, caps sqlCaps) (*models.SqlQueryResult, error)) (*models.SqlQueryResult, error) {
 	release, ok := s.running.acquire(auth.ActorName(ctx))
 	if !ok {
 		audit.Warn("SQL statement refused: too many running for this user")
@@ -342,7 +382,7 @@ func (s *DefaultSqlService) timed(ctx context.Context, audit *logrus.Entry, req 
 	result, err := run(timed, caps)
 	elapsed := time.Since(start)
 	if err != nil {
-		audit.WithError(err).WithField("elapsedMs", elapsed.Milliseconds()).Warn("SQL statement failed")
+		audit.Warn("SQL statement failed", "error", err, "elapsedMs", elapsed.Milliseconds())
 		if ctx.Err() == nil && errors.Is(timed.Err(), context.DeadlineExceeded) {
 			// The statement's timeout, not the client gone.
 			return nil, fmt.Errorf("%w (%s)", ErrSqlTimeout, s.limits.StatementTimeout)
@@ -353,9 +393,9 @@ func (s *DefaultSqlService) timed(ctx context.Context, audit *logrus.Entry, req 
 	result.ElapsedMs = elapsed.Milliseconds()
 	result.MaxRows = caps.rows
 	result.Truncated = result.TruncatedBy != ""
-	done := audit.WithFields(logrus.Fields{"elapsedMs": result.ElapsedMs, "rows": result.RowCount, "truncated": result.Truncated})
+	done := audit.With("elapsedMs", result.ElapsedMs, "rows", result.RowCount, "truncated", result.Truncated)
 	if result.Error != nil {
-		done = done.WithField("errorName", result.Error.ErrorName)
+		done = done.With("errorName", result.Error.ErrorName)
 	}
 	done.Info("SQL statement done")
 	return result, nil
@@ -525,6 +565,6 @@ func (trinoEngine) cancel(client *http.Client, nextURI, authorization string) {
 	if resp, err := client.Do(req); err == nil {
 		resp.Body.Close()
 	} else {
-		logrus.WithError(err).Debug("Failed to cancel SQL query")
+		slog.Debug("Failed to cancel SQL query", "error", err)
 	}
 }

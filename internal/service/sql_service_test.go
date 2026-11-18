@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
+	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
 )
@@ -64,7 +67,7 @@ func (f *fakeTrino) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func sqlServiceFor(url, service string) *DefaultSqlService {
 	return NewDefaultSqlService(func(_ context.Context, project, name string) (*models.ServiceInstance, error) {
 		if name == "missing" {
-			return nil, apierrors.NewNotFound(servicesResource, name)
+			return nil, apperr.NotFound(servicesResource, name)
 		}
 		return &models.ServiceInstance{Name: name, Service: service, URL: url}, nil
 	}, SqlConnectionSource{}, nil, SqlOptions{Guard: loopbackAllowed()})
@@ -85,7 +88,7 @@ func TestSqlFollowsPagesOnTheInstanceURL(t *testing.T) {
 	srv := httptest.NewServer(trino)
 	defer srv.Close()
 
-	res, err := sqlServiceFor(srv.URL+"/", "trino").ExecuteQuery(context.Background(), "p", "t", "Bearer tok", models.SqlQueryRequest{Query: "SELECT n"})
+	res, err := sqlServiceWith(srv.URL+"/", "trino", &fakeExchange{token: "tok"}).ExecuteQuery(context.Background(), "p", "t", "Bearer caller", models.SqlQueryRequest{Query: "SELECT n"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,7 @@ func TestSqlFollowsPagesOnTheInstanceURL(t *testing.T) {
 	}
 	for _, a := range trino.auths {
 		if a != "Bearer tok" {
-			t.Fatalf("authorization not forwarded: %q", a)
+			t.Fatalf("the exchanged token not on every page: %q", a)
 		}
 	}
 }
@@ -193,7 +196,7 @@ func TestSqlRejectedCredentials(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := sqlServiceFor(srv.URL, "trino").ExecuteQuery(context.Background(), "p", "t", "Bearer x", models.SqlQueryRequest{Query: "SELECT 1"})
+	_, err := sqlServiceWith(srv.URL, "trino", &fakeExchange{token: "x"}).ExecuteQuery(context.Background(), "p", "t", "Bearer x", models.SqlQueryRequest{Query: "SELECT 1"})
 	if err == nil || errors.Is(err, ErrSqlUnsupported) {
 		t.Fatalf("expected an engine error, got %v", err)
 	}
@@ -210,7 +213,74 @@ func TestSqlResolutionErrors(t *testing.T) {
 	if _, err := sqlServiceFor("", "trino").ExecuteQuery(ctx, "p", "t", "", req); !errors.Is(err, ErrSqlNoURL) {
 		t.Fatalf("expected ErrSqlNoURL, got %v", err)
 	}
-	if _, err := sqlServiceFor("https://x", "trino").ExecuteQuery(ctx, "p", "missing", "", req); !apierrors.IsNotFound(err) {
+	if _, err := sqlServiceFor("https://x", "trino").ExecuteQuery(ctx, "p", "missing", "", req); !errors.Is(err, apperr.ErrNotFound) {
 		t.Fatalf("expected NotFound, got %v", err)
 	}
+}
+
+// fakeExchange records the subject of an exchange and gives a token of its
+// own.
+type fakeExchange struct {
+	subject string
+	token   string
+	err     error
+}
+
+func (f *fakeExchange) Exchange(_ context.Context, subject string) (string, error) {
+	f.subject = subject
+	return f.token, f.err
+}
+
+// The caller's own token never reaches Trino: the engine gets what the
+// exchange gives (SRV-22); without an exchange the statement is refused,
+// without a token (AUTH_DISABLED) nothing is sent.
+func TestSqlForwardsOnlyTheExchangedToken(t *testing.T) {
+	trino := &fakeTrino{}
+	srv := httptest.NewServer(trino)
+	defer srv.Close()
+	seen := func() string {
+		trino.mu.Lock()
+		defer trino.mu.Unlock()
+		if len(trino.auths) == 0 {
+			return ""
+		}
+		return trino.auths[len(trino.auths)-1]
+	}
+	reset := func() { trino.mu.Lock(); trino.auths = nil; trino.mu.Unlock() }
+	statement := models.SqlQueryRequest{Query: "SELECT 1"}
+
+	exchange := &fakeExchange{token: "engine-token"}
+	svc := sqlServiceWith(srv.URL, "trino", exchange)
+	_, err := svc.ExecuteQuery(context.Background(), "p", "t", "Bearer caller-token", statement)
+	require.NoError(t, err)
+	assert.Equal(t, "caller-token", exchange.subject)
+	assert.Equal(t, "Bearer engine-token", seen())
+
+	// The exchange is refused: a coded error, nothing forwarded.
+	reset()
+	exchange = &fakeExchange{err: errors.New("invalid_token")}
+	_, err = sqlServiceWith(srv.URL, "trino", exchange).ExecuteQuery(context.Background(), "p", "t", "Bearer caller-token", statement)
+	assert.ErrorIs(t, err, ErrSqlTokenExchange)
+	assert.Empty(t, seen())
+
+	// None configured: never the caller's own token.
+	reset()
+	_, err = sqlServiceWith(srv.URL, "trino", nil).ExecuteQuery(context.Background(), "p", "t", "Bearer caller-token", statement)
+	assert.ErrorIs(t, err, ErrSqlNoTokenExchange)
+	assert.Empty(t, seen())
+
+	// No token at all (AUTH_DISABLED): nothing sent, no exchange asked.
+	exchange = &fakeExchange{token: "engine-token"}
+	_, err = sqlServiceWith(srv.URL, "trino", exchange).ExecuteQuery(context.Background(), "p", "t", "", statement)
+	require.NoError(t, err)
+	assert.Empty(t, seen())
+	assert.Empty(t, exchange.subject)
+}
+
+// sqlServiceWith is sqlServiceFor with the token exchange of the
+// statements on Trino.
+func sqlServiceWith(url, service string, exchange auth.TokenExchanger) *DefaultSqlService {
+	svc := sqlServiceFor(url, service)
+	svc.exchange = exchange
+	return svc
 }

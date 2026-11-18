@@ -4,9 +4,11 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
@@ -124,5 +126,29 @@ func TestAdaptersKeepToTheirProject(t *testing.T) {
 	argo := NewArgoCDAdapter(client, "argocd")
 	if st, err := argo.Get(context.Background(), "demo", "demo-hive"); err != nil || !st.Found {
 		t.Fatalf("argo get = %v, %v", st, err)
+	}
+}
+
+func TestWatchChangesMapsTheObjectsToTheirRelease(t *testing.T) {
+	w := watch.NewFake()
+	changes := watchChanges(context.Background(), w, func(u *unstructured.Unstructured) (string, string) {
+		return "demo", u.GetName()
+	})
+	hr := &unstructured.Unstructured{}
+	hr.SetName("demo-trino")
+	go func() {
+		w.Action(watch.Error, &metav1.Status{})
+		w.Modify(hr)
+		w.Stop()
+	}()
+	got, ok := <-changes
+	if !ok {
+		t.Fatal("no change")
+	}
+	if want := (EngineChange{Project: "demo", Release: "demo-trino", Type: "MODIFIED"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	if _, ok := <-changes; ok {
+		t.Fatal("the channel is left open after the watch closed")
 	}
 }

@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/okdp/okdp-compiler/treeedit"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"github.com/okdp/okdp-gitops/treeedit"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
 )
 
@@ -169,12 +169,12 @@ func readsOnly(es crd.ESOExternalSecret, key string) bool {
 // gives a provider's credentials.
 func (s *DefaultSqlService) fromClaim(ctx context.Context, project, name string) (*sqlTarget, error) {
 	if s.connections.Claims == nil || s.connections.Tree == nil {
-		return nil, apierrors.NewNotFound(connectionsResource, name)
+		return nil, apperr.NotFound(connectionsResource, name)
 	}
 	claims, err := s.connections.Claims(ctx, project)
 	if err != nil {
 		if errors.Is(err, treeedit.ErrNotFound) {
-			return nil, apierrors.NewNotFound(connectionsResource, name)
+			return nil, apperr.NotFound(connectionsResource, name)
 		}
 		return nil, err
 	}
@@ -185,7 +185,7 @@ func (s *DefaultSqlService) fromClaim(ctx context.Context, project, name string)
 		}
 	}
 	if claim == nil {
-		return nil, apierrors.NewNotFound(connectionsResource, name)
+		return nil, apperr.NotFound(connectionsResource, name)
 	}
 	t, err := s.connections.Tree(ctx)
 	if _, ok := errors.AsType[*compiler.LoadError](err); ok {

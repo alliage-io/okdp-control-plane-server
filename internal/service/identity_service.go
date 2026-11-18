@@ -23,14 +23,9 @@ type IdentityService interface {
 
 	// Groups
 	ListGroups(ctx context.Context) ([]models.Group, error)
-	GetGroup(ctx context.Context, name string) (*models.Group, error)
 	CreateGroup(ctx context.Context, group *models.Group) error
 	UpdateGroup(ctx context.Context, name string, group *models.Group) error
 	DeleteGroup(ctx context.Context, name string) error
-
-	// Bindings
-	AssignUserToGroup(ctx context.Context, user, group string) error
-	RemoveUserFromGroup(ctx context.Context, user, group string) error
 }
 
 type defaultIdentityService struct {
@@ -168,10 +163,6 @@ func (s *defaultIdentityService) ListGroups(ctx context.Context) ([]models.Group
 	return s.repo.ListGroups(ctx)
 }
 
-func (s *defaultIdentityService) GetGroup(ctx context.Context, name string) (*models.Group, error) {
-	return s.repo.GetGroup(ctx, name)
-}
-
 func (s *defaultIdentityService) CreateGroup(ctx context.Context, group *models.Group) error {
 	return s.repo.CreateGroup(ctx, group)
 }
@@ -182,14 +173,4 @@ func (s *defaultIdentityService) UpdateGroup(ctx context.Context, name string, g
 
 func (s *defaultIdentityService) DeleteGroup(ctx context.Context, name string) error {
 	return s.repo.DeleteGroup(ctx, name)
-}
-
-// --- Bindings ---
-
-func (s *defaultIdentityService) AssignUserToGroup(ctx context.Context, user, group string) error {
-	return s.repo.CreateGroupBinding(ctx, user, group)
-}
-
-func (s *defaultIdentityService) RemoveUserFromGroup(ctx context.Context, user, group string) error {
-	return s.repo.DeleteGroupBindingByRef(ctx, user, group)
 }

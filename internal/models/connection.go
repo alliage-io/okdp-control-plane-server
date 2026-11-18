@@ -137,10 +137,6 @@ func (t *ContractDescriptor) SecretFields() []string {
 // ConnectionCatalogResponse is the payload of GET /api/contracts.
 type ConnectionCatalogResponse struct {
 	Types []ContractDescriptor `json:"types"`
-	// CRDAvailable reports whether external connections can be persisted,
-	// which is whenever a deployments repository is configured (always, in a
-	// running server). The name is kept for API compatibility.
-	CRDAvailable bool `json:"crdAvailable"`
 }
 
 // ConnectionRequest is the body for creating or updating an external connection.

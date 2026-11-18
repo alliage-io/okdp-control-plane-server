@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"log/slog"
+	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -42,4 +44,49 @@ func logStreamErrorMessage(err error) string {
 		return "log line too long, stream interrupted"
 	}
 	return "log stream interrupted"
+}
+
+// writeLogs answers a log request: the lines of stream as Server-Sent
+// Events when follow, plain text otherwise.
+func writeLogs(c *gin.Context, stream io.Reader, follow bool) {
+	if !follow {
+		c.DataFromReader(http.StatusOK, -1, "text/plain; charset=utf-8", stream, nil)
+		return
+	}
+
+	type logLine struct {
+		text string
+		err  error
+	}
+	lines := make(chan logLine)
+	// Captured here: gin returns the *gin.Context to its pool as soon as
+	// the handler returns and overwrites Request, so reading it from the
+	// goroutine races and would watch another request's cancellation.
+	streamCtx := c.Request.Context()
+	go func() {
+		defer close(lines)
+		scanner := newLogStreamScanner(stream)
+		for scanner.Scan() {
+			select {
+			case lines <- logLine{text: scanner.Text()}:
+			case <-streamCtx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			select {
+			case lines <- logLine{err: err}:
+			case <-streamCtx.Done():
+			}
+		}
+	}()
+
+	serveStream(c, lines, func(s *sseStream, line logLine) error {
+		if line.err != nil {
+			slog.Warn("Log stream ended on a scanner error", "error", line.err)
+			_ = s.Event("error", logStreamErrorMessage(line.err))
+			return line.err
+		}
+		return s.Event("message", line.text)
+	})
 }

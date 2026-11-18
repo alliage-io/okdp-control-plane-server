@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-gitops/catalog"
-	"github.com/sirupsen/logrus"
 )
 
 type ServiceVersionsResponse struct {
@@ -27,21 +27,6 @@ type CatalogSource func(ctx context.Context) (*catalog.Catalogs, error)
 
 // ParameterSchemaFile is the schema of a package's parameters.
 const ParameterSchemaFile = "config.schema.json"
-
-type PackageSchemaService interface {
-	GetParameterSchema(ctx context.Context, serviceName, tag string) (map[string]any, error)
-	// GetPackageInputs returns the connections a package declares it needs, so
-	// the console can offer a choice for each one at deployment time.
-	GetPackageInputs(ctx context.Context, serviceName, tag string) ([]models.PackageInput, error)
-	GetServiceVersions(ctx context.Context, serviceName string) (*ServiceVersionsResponse, error)
-	ListVersionsForServices(ctx context.Context, services []models.PlatformService) map[string][]string
-	// ListPackageTags returns the versions of a service's package in the
-	// catalogs, even if the service is not (yet) in the console menu.
-	ListPackageTags(ctx context.Context, serviceName, repositoryOverride string) ([]string, error)
-	// CatalogOf names the catalog repository of each service of the
-	// catalogs.
-	CatalogOf(ctx context.Context) map[string]string
-}
 
 // DefaultPackageSchemaService reads the packages of the catalogs: their
 // versions (the directories of catalog/<service>/), their parameter schema
@@ -103,7 +88,7 @@ func (s *DefaultPackageSchemaService) GetServiceVersions(ctx context.Context, se
 	}
 	versions, err := s.ListPackageTags(ctx, serviceName, "")
 	if err != nil {
-		logrus.WithError(err).Warnf("failed to list the versions of %s in the catalogs", serviceName)
+		slog.Warn(fmt.Sprintf("failed to list the versions of %s in the catalogs", serviceName), "error", err)
 		versions = nil
 		if entry.DefaultVersion != "" {
 			versions = []string{entry.DefaultVersion}
@@ -119,12 +104,12 @@ func (s *DefaultPackageSchemaService) ListVersionsForServices(ctx context.Contex
 	versions := make(map[string][]string, len(services))
 	cats, err := s.open(ctx)
 	if err != nil {
-		logrus.WithError(err).Warn("failed to open the catalogs, the services keep their default version")
+		slog.Warn("failed to open the catalogs, the services keep their default version", "error", err)
 		return versions
 	}
 	all, err := cats.Services()
 	if err != nil {
-		logrus.WithError(err).Warn("failed to read the catalogs, the services keep their default version")
+		slog.Warn("failed to read the catalogs, the services keep their default version", "error", err)
 		return versions
 	}
 	byName := map[string][]string{}

@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 )
 
@@ -34,7 +34,7 @@ func TestSqlOnConnectionResolution(t *testing.T) {
 	req := models.SqlQueryRequest{Query: "SELECT 1"}
 
 	_, err := sql.ExecuteOnConnection(ctx, "demo", "nope", req)
-	assert.True(t, apierrors.IsNotFound(err), "unknown connection: %v", err)
+	assert.True(t, errors.Is(err, apperr.ErrNotFound), "unknown connection: %v", err)
 
 	mysql := postgresRequest()
 	mysql.Name = "shop"

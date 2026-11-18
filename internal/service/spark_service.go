@@ -11,10 +11,7 @@ import (
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/kubernetes"
 )
 
 type SparkService interface {
@@ -24,17 +21,26 @@ type SparkService interface {
 	UpdateApp(ctx context.Context, project, appName string, req models.SparkAppUpdateRequest) (*models.SparkAppInstance, error)
 	ListApps(ctx context.Context, project string) ([]models.SparkAppInstance, error)
 	DeleteApp(ctx context.Context, project, name string) error
-	WatchApps(ctx context.Context, project string) (watch.Interface, error)
+	// WatchApps streams the SparkApplications of a project as they change,
+	// until ctx ends or the watch closes (the channel is then closed).
+	WatchApps(ctx context.Context, project string) (<-chan models.SparkAppEvent, error)
 	GetDriverLogs(ctx context.Context, project, appName, container string, tailLines int64, follow bool) (io.ReadCloser, error)
 	GetSparkConfig(ctx context.Context) (*models.SparkConfig, error)
 	GetSparkUI(ctx context.Context, project, appName string) (*models.SparkUIInfo, error)
 	GetAppSchema(ctx context.Context) (map[string]interface{}, error)
 }
 
+// sparkWorkloads is what the Spark service reads of the workloads of a
+// project (repository.Workloads).
+type sparkWorkloads interface {
+	PodLogs(ctx context.Context, namespace, pod, container string, tailLines int64, follow bool) (io.ReadCloser, error)
+	PVCExists(ctx context.Context, namespace, name string) (bool, error)
+}
+
 type DefaultSparkService struct {
 	sparkRepo   repository.SparkAppRepository
 	contextRepo repository.PlatformRepository
-	typedClient kubernetes.Interface
+	workloads   sparkWorkloads
 	// tree is the compile of the tree: the spark-rbac instance of each
 	// project (sparkPolicy).
 	tree func(ctx context.Context) (*compiler.Tree, error)
@@ -42,11 +48,11 @@ type DefaultSparkService struct {
 
 // NewDefaultSparkService builds the Spark service; tree is the compile of
 // the tree the policy of a project's SparkApplications is read from.
-func NewDefaultSparkService(sparkRepo repository.SparkAppRepository, contextRepo repository.PlatformRepository, typedClient kubernetes.Interface, tree func(ctx context.Context) (*compiler.Tree, error)) *DefaultSparkService {
+func NewDefaultSparkService(sparkRepo repository.SparkAppRepository, contextRepo repository.PlatformRepository, workloads sparkWorkloads, tree func(ctx context.Context) (*compiler.Tree, error)) *DefaultSparkService {
 	return &DefaultSparkService{
 		sparkRepo:   sparkRepo,
 		contextRepo: contextRepo,
-		typedClient: typedClient,
+		workloads:   workloads,
 		tree:        tree,
 	}
 }
@@ -211,7 +217,7 @@ func (s *DefaultSparkService) DeleteApp(ctx context.Context, project, name strin
 	return s.sparkRepo.Delete(ctx, project, name)
 }
 
-func (s *DefaultSparkService) WatchApps(ctx context.Context, project string) (watch.Interface, error) {
+func (s *DefaultSparkService) WatchApps(ctx context.Context, project string) (<-chan models.SparkAppEvent, error) {
 	return s.sparkRepo.Watch(ctx, project, project)
 }
 
@@ -329,17 +335,7 @@ func (s *DefaultSparkService) GetDriverLogs(ctx context.Context, project, appNam
 		return nil, fmt.Errorf("driver pod not yet available for SparkApplication %s", appName)
 	}
 
-	opts := &corev1.PodLogOptions{
-		Follow: follow,
-	}
-	if tailLines > 0 {
-		opts.TailLines = &tailLines
-	}
-	if container != "" {
-		opts.Container = container
-	}
-
-	stream, err := s.typedClient.CoreV1().Pods(project).GetLogs(podName, opts).Stream(ctx)
+	stream, err := s.workloads.PodLogs(ctx, project, podName, container, tailLines, follow)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get driver pod logs: %w", err)
 	}
@@ -392,8 +388,7 @@ const historyServerInstance = "spark-history-server"
 
 func (s *DefaultSparkService) findEventLogPVC(ctx context.Context, project string) string {
 	pvcName := compiler.ReleaseName(project, historyServerInstance) + "-events"
-	_, err := s.typedClient.CoreV1().PersistentVolumeClaims(project).Get(ctx, pvcName, metav1.GetOptions{})
-	if err != nil {
+	if ok, err := s.workloads.PVCExists(ctx, project, pvcName); err != nil || !ok {
 		return ""
 	}
 	return pvcName

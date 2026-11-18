@@ -75,14 +75,14 @@ func (r *k8sProjectNamespaceRepository) CreateNamespace(ctx context.Context, pro
 		return true, nil
 	}
 	if !apierrors.IsAlreadyExists(err) {
-		return false, err
+		return false, fromK8s(err)
 	}
 	existing, getErr := r.client.CoreV1().Namespaces().Get(ctx, project.Name, metav1.GetOptions{})
 	if getErr != nil {
-		return false, getErr
+		return false, fromK8s(getErr)
 	}
 	if existing.Labels[ProjectLabel] == "" {
-		return false, err
+		return false, fromK8s(err)
 	}
 	return false, nil
 }
@@ -93,7 +93,7 @@ func (r *k8sProjectNamespaceRepository) DeleteNamespace(ctx context.Context, nam
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fromK8s(err)
 	}
 	if ns.Labels[ProjectLabel] == "" {
 		return false, nil
@@ -102,5 +102,5 @@ func (r *k8sProjectNamespaceRepository) DeleteNamespace(ctx context.Context, nam
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
-	return err == nil, err
+	return err == nil, fromK8s(err)
 }

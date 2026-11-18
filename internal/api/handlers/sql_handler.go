@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/netguard"
@@ -35,11 +35,13 @@ const (
 	ErrorCodeSqlNoURL              = "sql-no-url"
 	ErrorCodeSqlNoCredentials      = "sql-no-credentials"
 	ErrorCodeSqlTimeout            = "sql-timeout"
+	ErrorCodeSqlNoTokenExchange    = "sql-no-token-exchange"
+	ErrorCodeSqlTokenExchange      = "sql-token-exchange"
 )
 
 // ExecuteQuery godoc
 // @Summary      Execute a SQL query on a deployed SQL engine
-// @Description  Proxies the statement to the service instance (Trino only), forwarding the caller's bearer token; `write` is not read (the engine authorizes the token). Engine-side SQL errors answer 200 with `error` set. Every statement is logged with the caller and the instance. Bounded by the statement timeout (SQL_STATEMENT_TIMEOUT: 504, code sql-timeout, the query cancelled), the row cap (maxRows, at most SQL_MAX_ROWS; the result's maxRows is the cap applied) and the result-size cap (SQL_MAX_RESULT_BYTES), past which the result is truncated (truncatedBy: rows or bytes); a client that disconnects cancels the query. A viewer of the project may run it. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-address-refused): the engine address is loopback, link-local or the Kubernetes API server; 400 (code sql-unsupported): the instance is no Trino; 400 (code sql-no-url): it publishes no URL yet. Any other failure of the engine answers 502 with a generic message and the requestId, its cause in the server's log.
+// @Description  Proxies the statement to the service instance (Trino only), with the caller's bearer token exchanged for a token of the engine's audience (RFC 8693), never forwarded as it came: 400 (code sql-no-token-exchange) when no exchange is configured, 502 (code sql-token-exchange) when the identity provider refuses; `write` is not read (the engine authorizes the token). Engine-side SQL errors answer 200 with `error` set. Every statement is logged with the caller and the instance. Bounded by the statement timeout (SQL_STATEMENT_TIMEOUT: 504, code sql-timeout, the query cancelled), the row cap (maxRows, at most SQL_MAX_ROWS; the result's maxRows is the cap applied) and the result-size cap (SQL_MAX_RESULT_BYTES), past which the result is truncated (truncatedBy: rows or bytes); a client that disconnects cancels the query. A viewer of the project may run it. 429 (code sql-busy): the caller already runs SQL_MAX_CONCURRENT_PER_USER statements. 400 (code sql-address-refused): the engine address is loopback, link-local or the Kubernetes API server; 400 (code sql-unsupported): the instance is no Trino; 400 (code sql-no-url): it publishes no URL yet. Any other failure of the engine answers 502 with a generic message and the requestId, its cause in the server's log.
 // @Tags         sql
 // @Accept       json
 // @Produce      json
@@ -113,7 +115,7 @@ func respondSql(c *gin.Context, result *models.SqlQueryResult, err error) {
 			c.JSON(status, models.ErrorResponse{Error: err.Error(), Code: code})
 		}
 		switch {
-		case apierrors.IsNotFound(err):
+		case errors.Is(err, apperr.ErrNotFound):
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		case errors.Is(err, service.ErrSqlCredentialsRefused):
 			coded(http.StatusBadRequest, ErrorCodeSqlCredentialsRefused)
@@ -143,6 +145,10 @@ func respondSql(c *gin.Context, result *models.SqlQueryResult, err error) {
 			coded(http.StatusBadRequest, ErrorCodeSqlNoCredentials)
 		case errors.Is(err, service.ErrSqlTimeout):
 			coded(http.StatusGatewayTimeout, ErrorCodeSqlTimeout)
+		case errors.Is(err, service.ErrSqlNoTokenExchange):
+			coded(http.StatusBadRequest, ErrorCodeSqlNoTokenExchange)
+		case errors.Is(err, service.ErrSqlTokenExchange):
+			coded(http.StatusBadGateway, ErrorCodeSqlTokenExchange)
 		case errors.Is(err, service.ErrConnectionsUnavailable):
 			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 		default:

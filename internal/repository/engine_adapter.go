@@ -48,10 +48,40 @@ type EngineAdapter interface {
 	List(ctx context.Context, project string) (map[string]EngineStatus, error)
 	// Get returns the status of one release; Found is false when there is none.
 	Get(ctx context.Context, project, release string) (EngineStatus, error)
-	// Watch streams changes of the engine objects; ReleaseOf maps an event
-	// object to the project and release it belongs to.
-	Watch(ctx context.Context) (watch.Interface, error)
-	ReleaseOf(obj *unstructured.Unstructured) (project, release string)
+	// Watch streams the changes of the engine objects, until ctx ends or
+	// the underlying watch closes (the channel is then closed).
+	Watch(ctx context.Context) (<-chan EngineChange, error)
+}
+
+// EngineChange is one change of an engine object: the project and release it
+// belongs to, and the event (ADDED, MODIFIED, DELETED).
+type EngineChange struct {
+	Project string
+	Release string
+	Type    string
+}
+
+// watchChanges streams the objects of w as EngineChanges, each mapped to its
+// project and release by releaseOf.
+func watchChanges(ctx context.Context, w watch.Interface, releaseOf func(*unstructured.Unstructured) (string, string)) <-chan EngineChange {
+	out := make(chan EngineChange)
+	go func() {
+		defer close(out)
+		defer w.Stop()
+		for event := range w.ResultChan() {
+			u, ok := event.Object.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			project, release := releaseOf(u)
+			select {
+			case out <- EngineChange{Project: project, Release: release, Type: string(event.Type)}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }
 
 // Labels every HelmRelease, OCIRepository and Application of the layout
@@ -133,8 +163,12 @@ func (a *fluxAdapter) Get(ctx context.Context, project, release string) (EngineS
 	return FluxStatus(u), nil
 }
 
-func (a *fluxAdapter) Watch(ctx context.Context) (watch.Interface, error) {
-	return a.client.Resource(helmReleaseGVR).Namespace(a.namespace).Watch(ctx, metav1.ListOptions{})
+func (a *fluxAdapter) Watch(ctx context.Context) (<-chan EngineChange, error) {
+	w, err := a.client.Resource(helmReleaseGVR).Namespace(a.namespace).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return watchChanges(ctx, w, a.ReleaseOf), nil
 }
 
 // Flux Ready=False reasons that only mean "not yet", not a failure.
@@ -233,8 +267,12 @@ func (a *argoAdapter) Get(ctx context.Context, project, release string) (EngineS
 	return ArgoCDStatus(u), nil
 }
 
-func (a *argoAdapter) Watch(ctx context.Context) (watch.Interface, error) {
-	return a.client.Resource(applicationGVR).Namespace(a.namespace).Watch(ctx, metav1.ListOptions{})
+func (a *argoAdapter) Watch(ctx context.Context) (<-chan EngineChange, error) {
+	w, err := a.client.Resource(applicationGVR).Namespace(a.namespace).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return watchChanges(ctx, w, a.ReleaseOf), nil
 }
 
 // ArgoCDStatus maps an Application (argoproj.io/v1alpha1) to a phase.

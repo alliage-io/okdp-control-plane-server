@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/validation"
 	k8syaml "sigs.k8s.io/yaml"
 
@@ -139,7 +139,7 @@ func (s *DefaultSparkService) policy(ctx context.Context, project string) (*spar
 	}
 	cfg, err := s.contextRepo.GetSparkConfig(ctx)
 	if err != nil {
-		logrus.WithError(err).Debug("No sparkOperator in the platform values: the Spark images are not restricted")
+		slog.Debug("No sparkOperator in the platform values: the Spark images are not restricted", "error", err)
 		return p, nil
 	}
 	p.registry = strings.TrimSuffix(cfg.Image.Registry, "/")

@@ -1,13 +1,14 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // ConnectionHandler handles connection-related requests, for both the
@@ -28,7 +29,7 @@ func projectNamespace(c *gin.Context) string {
 
 // GetContracts godoc
 // @Summary      List the available contracts
-// @Description  Descriptors of every contract, used to build the creation form, plus whether connections can currently be persisted (crdAvailable: true when the deployments repository is configured)
+// @Description  Descriptors of every contract, used to build the creation form
 // @Tags         connections
 // @Produce      json
 // @Success      200  {object}  models.ConnectionCatalogResponse
@@ -167,7 +168,7 @@ func (h *ConnectionHandler) create(c *gin.Context, namespace string) {
 
 	connection, err := h.service.Create(c.Request.Context(), namespace, req)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error: fmt.Sprintf("Connection '%s' already exists", req.Name),
 			})

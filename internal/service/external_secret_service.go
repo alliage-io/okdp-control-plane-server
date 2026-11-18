@@ -2,13 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/repository"
 	"github.com/okdp/okdp-control-plane-server/internal/repository/crd"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -59,7 +60,7 @@ func (s *DefaultExternalSecretService) CreateExternalSecret(ctx context.Context,
 	// Validate that the referenced SecretStore exists in the namespace
 	_, err := s.secretStoreRepo.Get(ctx, namespace, req.SecretStoreRef)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			return nil, fmt.Errorf("SecretStore '%s' not found in project '%s'", req.SecretStoreRef, namespace)
 		}
 		return nil, fmt.Errorf("failed to verify SecretStore: %w", err)
@@ -94,7 +95,7 @@ func (s *DefaultExternalSecretService) UpdateExternalSecret(ctx context.Context,
 	// Validate that the referenced SecretStore exists in the namespace
 	_, err = s.secretStoreRepo.Get(ctx, namespace, req.SecretStoreRef)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			return nil, fmt.Errorf("SecretStore '%s' not found in project '%s'", req.SecretStoreRef, namespace)
 		}
 		return nil, fmt.Errorf("failed to verify SecretStore: %w", err)

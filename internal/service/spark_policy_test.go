@@ -64,7 +64,7 @@ func sparkTree(sa string) *compiler.Tree {
 
 func sparkUnderTest(tree *compiler.Tree, config *models.SparkConfig) (*DefaultSparkService, *sparkStore) {
 	store := &sparkStore{}
-	svc := NewDefaultSparkService(store, sparkPlatform{config: config}, k8sfake.NewClientset(), func(context.Context) (*compiler.Tree, error) { return tree, nil })
+	svc := NewDefaultSparkService(store, sparkPlatform{config: config}, repository.NewWorkloads(k8sfake.NewClientset(), nil), func(context.Context) (*compiler.Tree, error) { return tree, nil })
 	return svc, store
 }
 

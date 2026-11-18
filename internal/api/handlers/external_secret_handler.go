@@ -2,14 +2,15 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // ExternalSecretHandler handles external-secret-related requests
@@ -34,7 +35,7 @@ func (h *ExternalSecretHandler) Available(ctx context.Context) bool {
 // reported as 500 the console can only say the server broke when the fix is to
 // correct a value.
 func isRejectedInput(err error) bool {
-	return service.IsValidationError(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err)
+	return service.IsValidationError(err) || errors.Is(err, apperr.ErrInvalid) || errors.Is(err, apperr.ErrInvalid)
 }
 
 // ListExternalSecrets godoc
@@ -91,14 +92,14 @@ func (h *ExternalSecretHandler) CreateExternalSecret(c *gin.Context) {
 
 	es, err := h.service.CreateExternalSecret(c.Request.Context(), namespace, req)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error: fmt.Sprintf("ExternalSecret '%s' already exists in project '%s'", req.Name, namespace),
 			})
 			return
 		}
 		// SecretStore not found error from service
-		if apierrors.IsNotFound(err) || isSecretStoreNotFoundError(err) {
+		if errors.Is(err, apperr.ErrNotFound) || isSecretStoreNotFoundError(err) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 			return
 		}
@@ -142,7 +143,7 @@ func (h *ExternalSecretHandler) UpdateExternalSecret(c *gin.Context) {
 
 	es, err := h.service.UpdateExternalSecret(c.Request.Context(), namespace, esName, req)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})
@@ -183,7 +184,7 @@ func (h *ExternalSecretHandler) DeleteExternalSecret(c *gin.Context) {
 	esName := c.Param("esName")
 
 	if err := h.service.DeleteExternalSecret(c.Request.Context(), namespace, esName); err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})
@@ -217,7 +218,7 @@ func (h *ExternalSecretHandler) GetExternalSecretStatus(c *gin.Context) {
 
 	status, err := h.service.GetExternalSecretStatus(c.Request.Context(), namespace, esName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("ExternalSecret '%s' not found in project '%s'", esName, namespace),
 			})

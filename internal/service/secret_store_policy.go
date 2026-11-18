@@ -3,12 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strings"
 
 	compiler "github.com/okdp/okdp-compiler"
-	"github.com/sirupsen/logrus"
 )
 
 // platformSecretStore is the platform's secret store as the compile writes
@@ -43,7 +43,7 @@ func (s *DefaultSecretStoreService) compiledStore(ctx context.Context) *platform
 	}
 	t, err := s.tree(ctx)
 	if err != nil {
-		logrus.WithError(err).Warn("The platform's secret store is unknown: the tree does not compile")
+		slog.Warn("The platform's secret store is unknown: the tree does not compile", "error", err)
 		return nil
 	}
 	for _, inst := range t.Instances {

@@ -1,15 +1,16 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/authz"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // ProjectHandler handles project-related requests
@@ -63,7 +64,7 @@ func (h *ProjectHandler) GetProject(c *gin.Context) {
 	name := c.Param("name")
 	project, err := h.service.GetProject(c.Request.Context(), name)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Project not found"})
 			return
 		}
@@ -98,14 +99,14 @@ func (h *ProjectHandler) CreateProject(c *gin.Context) {
 
 	if err := h.service.CreateProject(c.Request.Context(), &project); err != nil {
 		switch {
-		case apierrors.IsBadRequest(err):
+		case errors.Is(err, apperr.ErrInvalid):
 			c.JSON(http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
 			return
-		case apierrors.IsAlreadyExists(err):
+		case errors.Is(err, apperr.ErrAlreadyExists):
 			c.JSON(http.StatusConflict, models.ErrorResponse{Error: "Project '" + project.Name + "' already exists, or its namespace exists and is not a project's"})
 			return
 		}
-		logrus.Errorf("Failed to create project: %v", err)
+		slog.Error(fmt.Sprintf("Failed to create project: %v", err))
 		writeError(c, err)
 		return
 	}
@@ -139,7 +140,7 @@ func (h *ProjectHandler) UpdateProject(c *gin.Context) {
 
 	updated, err := h.service.UpdateProject(c.Request.Context(), &project)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Project not found"})
 			return
 		}
@@ -166,7 +167,7 @@ func (h *ProjectHandler) UpdateProject(c *gin.Context) {
 func (h *ProjectHandler) DeleteProject(c *gin.Context) {
 	name := c.Param("name")
 	if err := h.service.DeleteProject(c.Request.Context(), name); err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{Error: "Project not found"})
 			return
 		}
@@ -187,69 +188,43 @@ func (h *ProjectHandler) DeleteProject(c *gin.Context) {
 // @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/stream [get]
 func (h *ProjectHandler) StreamProjects(c *gin.Context) {
-	w := c.Writer
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Transfer-Encoding", "chunked")
-
 	events, err := h.service.WatchProjects(c.Request.Context())
 	if err != nil {
 		writeError(c, err)
 		return
 	}
 
-	keepalive := time.NewTicker(30 * time.Second)
-	defer keepalive.Stop()
-
-	c.Writer.Flush()
-
 	// The projects this stream showed: a DELETED is sent of those only, and
 	// one the caller stops seeing is DELETED.
 	shown := map[string]bool{}
-	ctx := c.Request.Context()
 
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-keepalive.C:
-			// A comment line keeps proxies from cutting an idle stream.
-			if _, err := c.Writer.WriteString(": keepalive\n\n"); err != nil {
-				return
-			}
-			c.Writer.Flush()
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			name := event.Object.Name
-			if event.Type == "MODIFIED" {
-				// Its access may be what changed: the caller's role read
-				// from its project.yaml as it is now, not as kept.
-				authz.CallerFrom(ctx).Forget(name)
-			}
-			switch {
-			case event.Type == "DELETED" && !shown[name]:
-				continue
-			case event.Type == "DELETED":
-				delete(shown, name)
-			case canView(ctx, name):
-				if !shown[name] {
-					// A project the caller starts seeing is new to it.
-					event.Type = "ADDED"
-				}
-				shown[name] = true
-			case shown[name]:
-				delete(shown, name)
-				event.Type = "DELETED"
-			default:
-				continue
-			}
-			c.SSEvent("message", event)
-			c.Writer.Flush()
+	serveStream(c, events, func(s *sseStream, event service.ProjectEvent) error {
+		ctx := s.Context()
+		name := event.Object.Name
+		if event.Type == "MODIFIED" {
+			// Its access may be what changed: the caller's role read
+			// from its project.yaml as it is now, not as kept.
+			authz.CallerFrom(ctx).Forget(name)
 		}
-	}
+		switch {
+		case event.Type == "DELETED" && !shown[name]:
+			return nil
+		case event.Type == "DELETED":
+			delete(shown, name)
+		case canView(ctx, name):
+			if !shown[name] {
+				// A project the caller starts seeing is new to it.
+				event.Type = "ADDED"
+			}
+			shown[name] = true
+		case shown[name]:
+			delete(shown, name)
+			event.Type = "DELETED"
+		default:
+			return nil
+		}
+		return s.Event("message", event)
+	})
 }
 
 // Resolve looks a project up by name. It is what middleware.RequireProject

@@ -14,14 +14,11 @@ ARG VERSION=dev
 
 WORKDIR /workspace/okdp-server
 
-# go.mod replaces github.com/okdp/okdp-compiler and github.com/okdp/okdp-gitops
-# with ../okdp-compiler and ../okdp-gitops until they are published: build with
-# --build-context okdp-compiler=../okdp-compiler --build-context
-# okdp-gitops=../okdp-gitops. Each module is copied whole (okdp-gitops' own
-# go.mod replaces okdp-compiler with ../okdp-compiler, the directory above), so
-# a refactor of a sibling does not break this list; only what the build never
-# reads is left out: their Git metadata, binaries and test data.
-COPY --from=okdp-compiler --exclude=.git --exclude=bin --exclude=**/testdata . ../okdp-compiler/
+# go.mod replaces github.com/okdp/okdp-gitops with ../okdp-gitops until it is
+# published: build with --build-context okdp-gitops=../okdp-gitops. The module
+# is copied whole, so a refactor of it does not break this list; only what the
+# build never reads is left out: its Git metadata, binaries and test data.
+# okdp-compiler and cel2yaml are downloaded at the releases go.mod requires.
 COPY --from=okdp-gitops --exclude=.git --exclude=bin --exclude=**/testdata . ../okdp-gitops/
 COPY go.* ./
 RUN go mod download

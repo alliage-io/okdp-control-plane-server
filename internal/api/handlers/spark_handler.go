@@ -1,16 +1,15 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/okdp/okdp-control-plane-server/internal/apperr"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-control-plane-server/internal/service"
-	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 type SparkHandler struct {
@@ -49,7 +48,7 @@ func (h *SparkHandler) SubmitSparkApp(c *gin.Context) {
 
 	instance, err := h.service.SubmitApp(c.Request.Context(), project, req)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' already exists in project '%s'", req.Name, project),
 			})
@@ -93,7 +92,7 @@ func (h *SparkHandler) SubmitSparkAppYAML(c *gin.Context) {
 
 	instance, err := h.service.SubmitAppYAML(c.Request.Context(), project, req)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.Is(err, apperr.ErrAlreadyExists) {
 			c.JSON(http.StatusConflict, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication already exists in project '%s'", project),
 			})
@@ -145,52 +144,15 @@ func (h *SparkHandler) ListSparkApps(c *gin.Context) {
 // @Failure      500  {object}  models.ErrorResponse
 // @Router       /api/projects/{name}/spark-apps/stream [get]
 func (h *SparkHandler) StreamSparkApps(c *gin.Context) {
-	project := c.Param("name")
-
-	w := c.Writer
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Transfer-Encoding", "chunked")
-
-	watcher, err := h.service.WatchApps(c.Request.Context(), project)
+	events, err := h.service.WatchApps(c.Request.Context(), c.Param("name"))
 	if err != nil {
 		writeError(c, err)
 		return
 	}
-	defer watcher.Stop()
 
-	keepalive := time.NewTicker(30 * time.Second)
-	defer keepalive.Stop()
-
-	c.Writer.Flush()
-
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-keepalive.C:
-			// A comment line keeps proxies from cutting an idle stream.
-			if _, err := c.Writer.WriteString(": keepalive\n\n"); err != nil {
-				return
-			}
-			c.Writer.Flush()
-		case event, ok := <-watcher.ResultChan():
-			if !ok {
-				return
-			}
-
-			var instance models.SparkAppInstance
-			if u, ok := event.Object.(*unstructured.Unstructured); ok {
-				instance = models.FromUnstructuredToSparkAppInstance(u)
-			} else {
-				continue
-			}
-
-			c.SSEvent("message", gin.H{"type": event.Type, "object": instance})
-			c.Writer.Flush()
-		}
-	}
+	serveStream(c, events, func(s *sseStream, event models.SparkAppEvent) error {
+		return s.Event("message", gin.H{"type": event.Type, "object": event.Object})
+	})
 }
 
 // GetSparkApp godoc
@@ -212,7 +174,7 @@ func (h *SparkHandler) GetSparkApp(c *gin.Context) {
 
 	instance, err := h.service.GetApp(c.Request.Context(), project, appName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
@@ -242,7 +204,7 @@ func (h *SparkHandler) DeleteSparkApp(c *gin.Context) {
 	appName := c.Param("appName")
 
 	if err := h.service.DeleteApp(c.Request.Context(), project, appName); err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
@@ -283,7 +245,7 @@ func (h *SparkHandler) UpdateSparkApp(c *gin.Context) {
 
 	instance, err := h.service.UpdateApp(c.Request.Context(), project, appName, req)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
@@ -318,7 +280,7 @@ func (h *SparkHandler) GetSparkUI(c *gin.Context) {
 
 	info, err := h.service.GetSparkUI(c.Request.Context(), project, appName)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
@@ -356,7 +318,7 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 
 	stream, err := h.service.GetDriverLogs(c.Request.Context(), project, appName, container, tailLines, follow)
 	if err != nil {
-		if apierrors.IsNotFound(err) {
+		if errors.Is(err, apperr.ErrNotFound) {
 			c.JSON(http.StatusNotFound, models.ErrorResponse{
 				Error: fmt.Sprintf("SparkApplication '%s' not found in project '%s'", appName, project),
 			})
@@ -367,68 +329,7 @@ func (h *SparkHandler) GetSparkAppLogs(c *gin.Context) {
 	}
 	defer stream.Close()
 
-	if follow {
-		w := c.Writer
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("Transfer-Encoding", "chunked")
-		w.Flush()
-
-		lines := make(chan string)
-		scanErr := make(chan error, 1)
-		// Captured here: gin returns the *gin.Context to its pool as soon as
-		// the handler returns and overwrites Request, so reading it from the
-		// goroutine races and would watch another request's cancellation.
-		streamCtx := c.Request.Context()
-		go func() {
-			scanner := newLogStreamScanner(stream)
-			for scanner.Scan() {
-				select {
-				case lines <- scanner.Text():
-				case <-streamCtx.Done():
-					close(lines)
-					return
-				}
-			}
-			scanErr <- scanner.Err()
-			close(lines)
-		}()
-
-		keepalive := time.NewTicker(30 * time.Second)
-		defer keepalive.Stop()
-
-		for {
-			select {
-			case <-c.Request.Context().Done():
-				return
-			case <-keepalive.C:
-				// A comment line keeps proxies from cutting an idle stream.
-				if _, err := w.WriteString(": keepalive\n\n"); err != nil {
-					return
-				}
-				w.Flush()
-			case line, ok := <-lines:
-				if !ok {
-					select {
-					case err := <-scanErr:
-						if err != nil {
-							logrus.WithError(err).Warn("Log stream ended on a scanner error")
-							c.SSEvent("error", logStreamErrorMessage(err))
-							w.Flush()
-						}
-					default:
-					}
-					return
-				}
-				c.SSEvent("message", line)
-				w.Flush()
-			}
-		}
-	} else {
-		c.Header("Content-Type", "text/plain; charset=utf-8")
-		c.DataFromReader(http.StatusOK, -1, "text/plain; charset=utf-8", stream, nil)
-	}
+	writeLogs(c, stream, follow)
 }
 
 // GetSparkConfig godoc
@@ -464,7 +365,7 @@ func (h *SparkHandler) GetSparkConfig(c *gin.Context) {
 func (h *SparkHandler) GetSparkAppSchema(c *gin.Context) {
 	schema, err := h.service.GetAppSchema(c.Request.Context())
 	if err != nil {
-		logrus.WithError(err).Warn("Failed to get SparkApplication CRD schema")
+		slog.Warn("Failed to get SparkApplication CRD schema", "error", err)
 		c.JSON(http.StatusNotFound, models.ErrorResponse{Error: err.Error()})
 		return
 	}

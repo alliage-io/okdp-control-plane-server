@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -132,12 +133,47 @@ var Permissions = middleware.Permissions{
 	route(http.MethodGet, "/api/projects/:name/spark-apps/:appName/ui"):   viewer,
 }
 
-// SetupRouter initializes the Gin router and defines routes. A nil verifier
-// serves the API without token verification, which only AUTH_DISABLED
-// produces, every caller holding every right; authority is the platform's
-// authority each route's permission is read against (Permissions).
-func SetupRouter(cfg *config.Config, verifier auth.Verifier, authority *authz.Authority, capabilitiesHandler *handlers.CapabilitiesHandler, projectHandler *handlers.ProjectHandler, identityHandler *handlers.IdentityHandler, secretStoreHandler *handlers.SecretStoreHandler, externalSecretHandler *handlers.ExternalSecretHandler, serviceHandler *handlers.ServiceHandler, sparkHandler *handlers.SparkHandler, connectionHandler *handlers.ConnectionHandler, sqlHandler *handlers.SqlHandler, claimHandler *handlers.ClaimHandler) *gin.Engine {
+// Deps is what the router serves: the configuration, the token verifier
+// and the platform's authority, and one handler per stack.
+type Deps struct {
+	Config *config.Config
+	// Verifier checks the bearer tokens; nil serves the API without
+	// verification, which only AUTH_DISABLED produces, every caller holding
+	// every right.
+	Verifier auth.Verifier
+	// Authority is the platform's authority each route's permission is read
+	// against (Permissions).
+	Authority *authz.Authority
+
+	Capabilities    *handlers.CapabilitiesHandler
+	Projects        *handlers.ProjectHandler
+	Identity        *handlers.IdentityHandler
+	SecretStores    *handlers.SecretStoreHandler
+	ExternalSecrets *handlers.ExternalSecretHandler
+	Services        *handlers.ServiceHandler
+	Spark           *handlers.SparkHandler
+	Connections     *handlers.ConnectionHandler
+	SQL             *handlers.SqlHandler
+	Claims          *handlers.ClaimHandler
+}
+
+// SetupRouter initializes the Gin router and defines routes. It fails on
+// a TRUSTED_PROXIES entry that is no address or CIDR.
+func SetupRouter(d Deps) (*gin.Engine, error) {
+	cfg, verifier, authority := d.Config, d.Verifier, d.Authority
+	capabilitiesHandler, projectHandler, identityHandler := d.Capabilities, d.Projects, d.Identity
+	secretStoreHandler, externalSecretHandler := d.SecretStores, d.ExternalSecrets
+	serviceHandler, sparkHandler, connectionHandler := d.Services, d.Spark, d.Connections
+	sqlHandler, claimHandler := d.SQL, d.Claims
+
 	r := gin.New() // Use New() to skip default logger/recovery (we add them manually)
+
+	// The audit log's ip, and whatever else reads c.ClientIP(), believes
+	// X-Forwarded-For from these peers only: none by default, the client
+	// is then the address of the connection (SRV-27).
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+	}
 
 	// Middleware: the request id first, for the log line and the error
 	// answers.
@@ -322,7 +358,7 @@ func SetupRouter(cfg *config.Config, verifier auth.Verifier, authority *authz.Au
 		}
 	}
 
-	return r
+	return r, nil
 }
 
 func corsMiddleware(cfg *config.Config) gin.HandlerFunc {

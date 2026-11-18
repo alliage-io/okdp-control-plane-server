@@ -3,12 +3,12 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
-	"github.com/okdp/okdp-compiler/treeedit"
 	"github.com/okdp/okdp-control-plane-server/internal/auth"
 	"github.com/okdp/okdp-control-plane-server/internal/models"
 	"github.com/okdp/okdp-gitops/gitops"
-	"github.com/sirupsen/logrus"
+	"github.com/okdp/okdp-gitops/treeedit"
 )
 
 // CatalogWriterRepository manages the platform service catalog, the file
@@ -106,7 +106,7 @@ func (r *gitCatalogWriterRepository) AddPlatformService(ctx context.Context, svc
 		return appendServiceToCategory(categories, svc.Category, platformServiceToMap(svc)), nil
 	})
 	if err == nil {
-		logrus.WithField("service", svc.Name).WithField("category", svc.Category).Info("Added platform service to catalog")
+		slog.Info("Added platform service to catalog", "service", svc.Name, "category", svc.Category)
 	}
 	return err
 }
@@ -119,7 +119,7 @@ func (r *gitCatalogWriterRepository) UpdatePlatformService(ctx context.Context, 
 		return appendServiceToCategory(categories, svc.Category, platformServiceToMap(svc)), nil
 	})
 	if err == nil {
-		logrus.WithField("service", name).Info("Updated platform service in catalog")
+		slog.Info("Updated platform service in catalog", "service", name)
 	}
 	return err
 }
@@ -130,7 +130,7 @@ func (r *gitCatalogWriterRepository) RemovePlatformService(ctx context.Context, 
 		return categories, nil
 	})
 	if err == nil {
-		logrus.WithField("service", name).Info("Removed platform service from catalog")
+		slog.Info("Removed platform service from catalog", "service", name)
 	}
 	return err
 }
